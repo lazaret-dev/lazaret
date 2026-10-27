@@ -111,6 +111,9 @@ python/
 │   │   │                   JavaScript, Go and Rust lockfiles
 │   │   ├── gomod.py        the `go.mod` reader shared by the Go module auditor and
 │   │   │                   the dependency scan
+│   │   ├── netaddr.py      the class of an address a redirect connects to, and
+│   │   │                   where a redirect off a fetch's hosts may lead (LZ-02:
+│   │   │                   the Go guard's, the SCA feeds')
 │   │   ├── sca_feeds.py    `lazaret-sca --update-bundle`: the CVE bundle from OSV,
 │   │   │                   CISA KEV and EPSS
 │   │   ├── sca_index.py    the indexed CVE bundle (`--bundle-format index`)

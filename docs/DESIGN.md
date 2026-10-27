@@ -2312,12 +2312,12 @@ with urllib one variable away.
 The other callers (NET-1's second part): the guard's `Fetcher.open` (and so
 `fetch`, `fetch_to_file`, the Go relay and the pip index's relay) sends an
 https request through it, with the fetcher's hosts (and the URL's own,
-already checked) as the rule, or no host rule for a redirect where
-`https_redirects` lets one go to any https host; `_NativeResponse` reads like
+already checked) as the rule, for the Go guard's fetcher too (below: where its
+redirects may lead); `_NativeResponse` reads like
 urllib's response (`headers.get`, `read`, TooLarge over the budget).
 `sources._http` sends the `github:` and `gitlab:` sources' requests,
-`sca_feeds.fetch` a feed's download (no host rule: a feed may move, https
-only). What stays on urllib: plain http (a registry served on this machine).
+`sca_feeds.fetch` a feed's download (the feed's own host as the rule: a
+redirect elsewhere is judged by its address, below). What stays on urllib: plain http (a registry served on this machine).
 Secret verification's call goes over it too since V-1's stage 2 (§5k), its
 credential given to the provider's host and the request alone; urllib's
 transport makes it where the native client does not. `keepalive.py` (`--keepalive`) pools
@@ -2399,6 +2399,123 @@ dot segments resolved in a Location's path whatever its form, a backslash
 refused or read as a slash, a port of digits only ("+443" is taken today), a
 proxy's port read wherever the URL has a path, NO_PROXY read as urllib reads
 it, and no password in the `Debug` of a URL, a proxy or a pool's key.
+
+Where the Go guard's and the SCA feeds' redirects may lead (LZ-02, the
+external security report of Oct 27: CWE-918, server-side request forgery). A Go module proxy may send
+a zip on to its storage (Athens, Artifactory, a CDN), so the Go guard's
+fetcher (`Fetcher(https_redirects=True)`, `LocalGoProxy`'s) follows a
+redirect to an https host its `GOPROXY` does not name. Until this fix that
+was any https host, on both transports (the native one had no host rule for
+it): a malicious or compromised proxy could send the guard's GET to
+`https://127.0.0.1:…`, `https://10.…` or `https://169.254.169.254/…`, a
+blind request from the developer's machine. A list of storage hosts is not
+the answer (no allow-lists by host: John's rule), and neither is refusing
+every private address, since a company's Athens on 10.x may send go to its
+own MinIO or S3 gateway on 10.y. So such a hop is judged by the address it
+connects to (`scanner/netaddr.py`'s `Hops`: `guard._Hops`), against the class of the
+configured host the fetch reached last:
+
+| The hop's address | Followed when |
+|---|---|
+| unspecified, multicast, broadcast, reserved (240/4, the rest of 0/8), link-local (169.254/16, fe80::/10: where most clouds' metadata services are), site-local (fec0::/10), the clouds' metadata and platform addresses outside link-local (below), documentation, any other that is not globally routable | never |
+| loopback (127/8, ::1) | the proxy is on loopback itself |
+| private (10/8, 172.16/12, 192.168/16), unique-local (fc00::/7), carrier-grade NAT (100.64/10), benchmarking (198.18/15) | the proxy is on a private or loopback address |
+| public (globally routable) | always, as before |
+
+The metadata services of AWS, Azure, Google Cloud, Oracle Cloud,
+DigitalOcean, IBM Cloud (VPC: 169.254.169.254; Power Virtual Server:
+169.254.169.253), Hetzner, Tencent Cloud (169.254.0.23) and OpenStack
+(fe80::a9fe:a9fe over IPv6) are link-local. Those the clouds document
+outside it are `never` rows of their own (LZ-02's review): Alibaba Cloud's
+metadata service, 100.100.100.200 (in carrier-grade NAT); AWS's over IPv6,
+fd00:ec2::254, with its DNS resolver (fd00:ec2::253) and time server
+(fd00:ec2::123), and its EKS Pod Identity Agent over IPv6, fd00:ec2::23
+(a pod's credentials) (unique-local); Google's over IPv6, fd20:ce::254
+(unique-local); and Azure's WireServer, 168.63.129.16 (the VM agent's
+channel to the platform, DHCP and DNS: a public address).
+
+An IPv4 address inside an IPv6 one is judged as that IPv4 address (mapped,
+translated, compatible, NAT64's two prefixes, 6to4, Teredo's server and
+client), each form read by `netaddr` itself, since `ipaddress`'s answers for
+them differ between Python versions; `is_global` decides only what no table
+names, and the classes are the same on 3.10 to 3.14. NAT64's local-use
+prefix (64:ff9b:1::/48, RFC 8215) is private at best, and a network may cut
+its translation prefix from it at any of RFC 6052's lengths from /48 to /96,
+which the address does not say: so it is read at each (/48, /56, /64, /96)
+and the strictest reading counts. The cost is precision on a network that
+translates through it: the zero bits of a /96 prefix read as 0.0.0.0 at /48,
+so a redirect to an address it synthesizes is refused, as before this
+review. Hops to the configured
+hosts are made as before (and tell the proxy's class); a refused hop is a
+`HopRefused` (a FetchError) that says why: "redirect to a private address
+(10.1.2.3) refused: the proxy is on a public address". The address judged is
+the one connected to: on Python's transport each connection of such a fetch
+(urllib's and the pool's, `_open_socket`) looks the name up once, judges
+every address it gives before any is tried, connects to those, and judges
+the peer (getpeername) once more, the configured proxy's too (that is how its
+class is known); a kept connection is judged again before each fetch uses
+it. A name that answers a public address and then a private one (DNS
+rebinding) is judged by the answer it is connected by. An address written in
+the Location is refused by `check` already. Through an outbound proxy
+(HTTPS_PROXY's tunnel, HTTP_PROXY's forward request for a plain-http
+`GOPROXY`, the system's) the peer is that proxy, which is no hop (the
+connection to it is not judged), and the names are looked up there. A
+lookup made here only ever refuses. The hop's name is looked up here too and
+every address it gives judged, and a name that cannot be looked up here is
+refused. The configured proxy's name is not looked up at all: the tunnel
+goes where the outbound proxy's own lookup says, and the proxy's operator
+answers both lookups, so a lookup here would let a malicious `GOPROXY`
+answer 127.0.0.1 (or 10.x) to this machine and its real address to the
+outbound proxy, and be taken for a proxy on loopback (a private network)
+whose redirects there are followed (LZ-02's review, H1). Reached through an
+outbound proxy, the configured proxy counts as on a public address
+(`netaddr.RELAYED`: "the proxy is reached through an outbound proxy, so it
+counts as on a public address"), unless its URL names an address, whose
+class it then is. **The precision this trades:** a company's private
+`GOPROXY` reached *through* the outbound proxy can send go to public
+addresses only, not to its private storage. Internal hosts are normally in
+NO_PROXY and reached directly, where the proxy's peer is judged as above and
+its storage is reached as before (through the outbound proxy or not); naming
+the proxy by its address in `GOPROXY` does the same. **The gap that
+remains** is the outbound proxy's own lookup of a hop's name: a name that
+answers this machine a public address and the outbound proxy another (split
+DNS, or rebinding between the two lookups) is judged by what it answered
+here, and the guard cannot see where the proxy connected. The outbound proxy
+is the user's own configuration, and what it can reach is its own policy. A
+configured host written without a port (`GOPROXY=https://athens.corp`) is
+configured on every port, as it was before LZ-02, on both transports: a hop
+to `https://athens.corp:6443/` is made as one to a configured host.
+
+The native transport cannot judge an address: pratique's host rules are of
+names, its resolver is `pub(crate)`, and it is vendored unmodified. So for
+the Go guard too it gets the fetcher's hosts as its rule: a redirect to a
+configured host is followed there as before, and one elsewhere is refused
+there (`redirect N refused: host not allowed`), and the fetch is made again
+on Python's path, where the rule above holds; the proxy gets the first
+request twice (a GET), and the two transports give the same answer. Each hop
+still gets its own host's credentials and no other's (decision 14). Asked of
+pratique's next drop: an address rule in its client (a hook given each
+address a hop resolves to, or the classes above as a setting), applied to
+every address it tries, so that the native transport can follow such a
+redirect itself.
+
+The SCA feeds' download (`sca_feeds.fetch`, `lazaret-sca --update-bundle`)
+followed a feed's redirect to any https host on both transports
+(`hosts=None`), as a feed may move: the same request, from the machine that
+builds the bundle. It is held to the same rule (`sca_feeds._feed_hops`):
+the feed's own host is the configured one, so a redirect from OSV's, CISA's
+or EPSS's host (public) may lead to a public address only, and one from a
+mirror on a private or loopback address (`--osv-url`, `--kev-url`,
+`--epss-url`) to one of its class (through an outbound proxy the feed's host
+counts as on a public address, as a `GOPROXY` does); the native transport gets the feed's
+host as its rule and a download it refuses for a redirect elsewhere is made
+again on Python's transport (`_HttpsRedirects` and `_HTTPSHandler` carry
+the rule on a request's `lazaret_hops`). Those two are the only fetchers
+that follow a redirect off their hosts. The others' rules are names: the
+npm, PyPI and Cargo guards' fetchers (their registries, and the file hosts
+their indexes name, `Fetcher.allow`), `repo._RegistryOpener` and the
+registry modules (`_ModuleRedirects`, their hosts), and the sources
+(`_Hop`).
 
 The Go checksum database (NET-1's third part). `golang.verify_lookup`
 checks a `/lookup/<module>@<version>` answer as the go command's client does

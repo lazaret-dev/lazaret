@@ -80,7 +80,7 @@ import zlib
 
 import lazaret as _lazaret_pkg          # __version__ (the package root imports nothing)
 from lazaret.scanner import core as lazaret
-from lazaret.scanner import nativenet
+from lazaret.scanner import nativenet, netaddr
 from lazaret.scanner import reports as lazaret_report
 from lazaret.scanner import sca
 
@@ -145,17 +145,61 @@ class BundleOutputError(Exception):
 
 class _HttpsRedirects(urllib.request.HTTPRedirectHandler):
     """Follow a few redirects (feeds move: EPSS has changed hosts before), https
-    only: a feed is never downgraded to http or sent to another scheme."""
+    only: a feed is never downgraded to http or sent to another scheme. A
+    request that carries a hop rule (`lazaret_hops`: `fetch`'s) hands it on to
+    the next hop, and a redirect to an address written in its URL is judged
+    by it already (LZ-02)."""
 
     max_redirections = MAX_REDIRECTS
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
             raise urllib.error.URLError("redirect to a non-https URL refused: %s" % newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        hops = getattr(req, "lazaret_hops", None)
+        if hops is not None:
+            try:
+                hops.judge_url(newurl)
+            except netaddr.Refused:
+                if fp is not None:
+                    fp.close()              # (the redirect's response: nothing more is read of it)
+                raise
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and hops is not None:
+            new.lazaret_hops = hops
+        return new
 
 
-_OPENER = urllib.request.build_opener(_HttpsRedirects, nativenet.HTTPSHandler())   # (TLS 1.2 at least)
+class _HTTPSHandler(nativenet.HTTPSHandler):
+    """nativenet's handler (its context: the TLS floor), whose connections for a
+    request that carries a hop rule (`lazaret_hops`) are made under it
+    (netaddr.HeldHTTPSConnection: each address judged, the peer too)."""
+
+    def https_open(self, req):
+        hops = getattr(req, "lazaret_hops", None)
+        if hops is None:
+            return super().https_open(req)
+        if self._context is None:
+            self._context = nativenet.tls_context()
+        return self.do_open(netaddr.HeldHTTPSConnection, req, context=self._context, hops=hops)
+
+
+_HANDLERS = [_HttpsRedirects, _HTTPSHandler()]                                    # (TLS 1.2 at least: nativenet's)
+_OPENER = urllib.request.build_opener(*_HANDLERS)
+#: (tests) socket.getaddrinfo's stand-in, and (host, address) -> the address judged in its place, for the hops of a
+#: feed's download (netaddr.Hops); None: neither
+_LOOKUP = _PEER = None
+
+
+def _feed_hops(location):
+    """The hop rule of a feed's download (LZ-02, the external security report of Oct 27, CWE-918): the feed's own host
+    is the configured one, and a redirect elsewhere may lead only where its address lets it: a public address from a
+    feed on a public one (OSV's, CISA's and EPSS's hosts), a private or loopback address only from a mirror that is
+    itself on one (--osv-url, --kev-url, --epss-url), never a link-local, multicast, reserved or unspecified one or a
+    cloud's metadata address (scanner/netaddr.py). Through an outbound proxy the feed's host counts as on a public
+    address (netaddr.RELAYED) unless its URL names an address."""
+    loc = urllib.parse.urlsplit(location).netloc.rpartition("@")[2].lower()
+    return netaddr.Hops(lambda host, port: netaddr.named({loc}, host, port), origin="the feed's host",
+                        lookup=_LOOKUP, peer=_PEER)
 
 
 def local_path(location):
@@ -185,17 +229,26 @@ def _copy(src, dst, max_bytes, location):
         dst.write(chunk)
 
 
+class _Elsewhere(Exception):
+    """The native transport refused a feed's redirect to another host: fetch goes again on Python's transport."""
+
+
 def _fetch_native(location, dst, max_bytes):
-    """fetch's download through the native transport (NET-1, scanner/nativenet.py): any https host, on every
-    redirect too (a feed that moves, as urllib's _HttpsRedirects allows), at most MAX_REDIRECTS, the budget held as
-    it comes."""
+    """fetch's download through the native transport (NET-1, scanner/nativenet.py): the feed's own host is its rule,
+    for the URL and every redirect, at most MAX_REDIRECTS, the budget held as it comes. It was any https host
+    (hosts=None) until LZ-02: the native client cannot judge the address a hop connects to (pratique's rules are of
+    names), so a redirect to another host is refused there (_Elsewhere) and `fetch` makes the download again on
+    Python's transport, whose hop rule judges it."""
+    host = urllib.parse.urlsplit(location).netloc.rpartition("@")[2].lower()
     try:
-        with nativenet.open_stream(location, hosts=None, headers=[("User-Agent", USER_AGENT)], max_bytes=max_bytes,
+        with nativenet.open_stream(location, hosts=[host], headers=[("User-Agent", USER_AGENT)], max_bytes=max_bytes,
                                    timeout=READ_TIMEOUT, max_redirects=MAX_REDIRECTS) as resp:
             if not 200 <= resp.status < 300:
                 raise FeedError("HTTP %s from %s" % (resp.status, location))
             return _copy(resp, dst, max_bytes, location)
     except nativenet.NetError as exc:
+        if netaddr.refused_elsewhere(exc):
+            raise _Elsewhere(str(exc)) from None
         if exc.kind == "too-large":
             raise FeedError("%s is larger than the %d MiB budget for this feed"
                             % (location, max_bytes >> 20)) from None
@@ -219,11 +272,16 @@ def fetch(location, dst, max_bytes):
                 return _fetch_native(location, dst, max_bytes)
             except nativenet.UsePython:
                 pass                    # (urllib below: a proxy it does not take, nativenet._proxy_for)
+            except _Elsewhere:
+                pass                    # (urllib below: a redirect to another host, judged by its address; LZ-02)
         req = urllib.request.Request(location, headers={"User-Agent": USER_AGENT})
+        req.lazaret_hops = _feed_hops(location)
         with _OPENER.open(req, timeout=READ_TIMEOUT) as resp:
             return _copy(resp, dst, max_bytes, location)
     except FeedError:
         raise
+    except netaddr.Refused as exc:
+        raise FeedError("cannot fetch %s: %s" % (location, exc)) from None
     except urllib.error.HTTPError as exc:
         exc.close()
         raise FeedError("HTTP %s from %s" % (exc.code, location)) from None

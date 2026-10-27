@@ -34,7 +34,11 @@ no header of its own beyond `http.client`'s (`Host`, `Accept-Encoding: identity`
   or closes it when the deadline has shut it down. A body that ended short of its length is no clean
   end either: its connection is closed, not given back. A reused connection the watchdog shut down
   while its answer was awaited is not a stale one: it is not retried, and the host's other idle
-  connections are kept (`deadline.expired()`)."""
+  connections are kept (`deadline.expired()`).
+- **Where a connection may go** is the caller's too (LZ-02: the Go guard's redirects off its proxies'
+  hosts): `request(connect=…)` makes a new connection's socket with the caller's function, which
+  judges the addresses it connects to, and `request(reuse=…)` lets the caller judge a kept connection
+  before it carries the request; one it refuses is closed."""
 
 import base64
 import http.client
@@ -215,7 +219,7 @@ class Pool:
             conn.close()
 
     # ---- connections
-    def _connect(self, scheme, host, port, via, timeout, deadline=None):
+    def _connect(self, scheme, host, port, via, timeout, deadline=None, connect=None):
         if scheme == "https":
             if via:
                 conn = http.client.HTTPSConnection(via[0], via[1], timeout=timeout, context=self._tls())
@@ -224,7 +228,9 @@ class Pool:
                 conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=self._tls())
         else:
             conn = http.client.HTTPConnection(host, port, timeout=timeout)
-        if deadline is not None:
+        if connect is not None:
+            conn._create_connection = connect(conn)         # (the caller's: where it may connect, within its deadline)
+        elif deadline is not None:
             conn._create_connection = deadline.connect      # (the TCP connection, the tunnel and TLS within its time)
         try:
             with timings.span("network", "connect"):
@@ -236,10 +242,14 @@ class Pool:
             raise
         return conn
 
-    def request(self, url, headers, timeout, via=None, deadline=None):
+    def request(self, url, headers, timeout, via=None, deadline=None, connect=None, reuse=None):
         """One GET of `url` with `headers` -> Response (any status: the caller decides what a 404 or a
         redirect means). `via` is `proxy_for`'s answer. `deadline` (guard._Deadline): the download's
         whole time, which the connection, the request, the answer's head and its body are held to.
+        `connect`: a function of a new connection that gives the one its socket is made with
+        (http.client's `_create_connection`: the caller's rule of where it may connect, within
+        `deadline` too; guard._Hops, LZ-02); `reuse`: called with a kept connection before it carries
+        the request (what it raises, the request raises, and that connection is closed).
         OSError and `http.client.HTTPException` are the caller's to turn into its own errors."""
         parts = urllib.parse.urlsplit(url)
         scheme, host = parts.scheme, parts.hostname
@@ -253,10 +263,12 @@ class Pool:
             conn = None if fresh else self._take(key)
             reused = conn is not None
             if conn is None:
-                conn = self._connect(scheme, host, port, via, timeout, deadline)
+                conn = self._connect(scheme, host, port, via, timeout, deadline, connect=connect)
             else:
                 conn.timeout = timeout
                 try:
+                    if reuse is not None:
+                        reuse(conn)
                     if deadline is None:
                         conn.sock.settimeout(timeout)
                     else:

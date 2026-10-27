@@ -157,7 +157,7 @@ import urllib.parse
 import urllib.request
 
 from lazaret.scanner import core as lazaret
-from lazaret.scanner import gomod, nativenet, programs, sca, timings
+from lazaret.scanner import gomod, nativenet, netaddr, programs, sca, timings
 from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, prior as prior_, \
     provenance as provenance_, repo, scanpool, yanks as yanks_
 from lazaret.registry import lookalike_history as lookalikes_
@@ -449,30 +449,12 @@ class _Deadline:
     def connect(self, address, timeout=None, source_address=None):
         """socket.create_connection within the time left (http.client's `_create_connection`): nothing once the time is
         up, not even the name's lookup (a redirect followed after the watchdog ended its body, which urllib reads as its
-        end); each address's attempt gets `wait`'s timeout, and the socket made is watched."""
-        host, port = address
-        error = None
-        self.wait(timeout)
-        for family, kind, proto, _, where in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
-            wait, cut = self.wait(timeout)
-            sock = socket.socket(family, kind, proto)
-            try:
-                sock.settimeout(wait)
-                if source_address:
-                    sock.bind(source_address)
-                sock.connect(where)
-                self.watch(sock)
-            except OSError as exc:
-                sock.close()
-                if cut and isinstance(exc, socket.timeout):
-                    self._ran_out = True
-                error = exc
-                continue
-            except BaseException:
-                sock.close()
-                raise
-            return sock
-        raise error if error is not None else OSError("getaddrinfo returns an empty list")
+        end); each address's attempt gets `wait`'s timeout, and the socket made is watched (netaddr.open_socket)."""
+        return netaddr.open_socket(address, timeout, source_address, deadline=self)
+
+    def ran_out(self):
+        """A connection attempt cut to the time left timed out (netaddr.open_socket): the time is up."""
+        self._ran_out = True
 
     def watch(self, sock):
         """Keep a duplicate of sock (its file descriptor's: the connection itself, whatever wraps or closes the object
@@ -554,18 +536,54 @@ class _Deadline:
             timer.cancel()
 
 
-class _DeadlineConnection:
-    """http.client's connection within a `_Deadline` (`deadline=`): its socket made by the deadline's `connect`, the
-    one it ends with (TLS's, for https) the one its body is read from."""
+class HopRefused(repo.FetchError):
+    """A hop of a fetch held to `_Hops` that its address may not be (LZ-02): the message says why ("redirect to a
+    private address (10.1.2.3) refused: the proxy is on a public address")."""
 
-    def __init__(self, *args, deadline, **kwargs):
+
+def _Hops(fetcher):
+    """Where the hops of one fetch may connect, for a fetcher with `https_redirects` (the Go guard's: a module proxy may
+    send a zip on to its storage, any https host): scanner/netaddr.py's `Hops`, with the fetcher's hosts as the
+    configured ones. LZ-02 (the external security report of Oct 27, CWE-918): a hop off the configured hosts went
+    wherever the proxy said, this machine and its network included (a blind request from the developer's machine to
+    `https://127.0.0.1:…`, `https://10.…`, `https://169.254.169.254/…`).
+
+    A hop to a configured host is made as before, and the class of the address it reached is kept (through an outbound
+    proxy, whose own lookup decides where it goes, a public one's unless its URL names an address). A hop to any other
+    host is judged by the address it connects to against the configured host the fetch reached last: a public address
+    always; a private one (10/8, 172.16/12, 192.168/16, fc00::/7, 100.64/10, 198.18/15) only from a proxy on a private
+    or loopback address; a loopback one only from a proxy on loopback; never an unspecified, multicast, broadcast,
+    reserved, link-local or site-local one, nor a cloud's metadata address. An IPv4 address inside an IPv6 one is
+    judged as that IPv4 address. No host is named: a company's proxy on 10.x may send go to its own storage on 10.y.
+    Directly, the address judged is the one connected to (every address the name gives before any is tried, the peer
+    after); through an outbound proxy, every address the name gives here. The native transport follows a redirect to the
+    configured hosts only (`Fetcher._open_native`); a fetch it would take elsewhere is made again on Python's path,
+    where these rules hold. HopRefused says why. `fetcher.lookup` and `fetcher.peer` are the tests' (netaddr.Hops)."""
+    def configured(host, port):
+        with fetcher.lock:
+            return netaddr.named(fetcher.hosts, host, port)
+    return netaddr.Hops(configured, error=HopRefused, lookup=fetcher.lookup, peer=fetcher.peer)
+
+
+class _DeadlineConnection:
+    """http.client's connection within a `_Deadline` (`deadline=`) and held to a fetch's `_Hops` (`hops=`, LZ-02),
+    either or both: its socket made by netaddr.open_socket, the one it ends with (TLS's, for https) the one its body is
+    read from. `forward`: (host, port) of the request's own URL where this is the connection to a forward proxy
+    (HTTP_PROXY, a plain-http URL), which is no hop: the request's host is what the rule holds to (netaddr.HopTarget)."""
+
+    def __init__(self, *args, deadline=None, hops=None, forward=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self._deadline = deadline
-        self._create_connection = deadline.connect
+        self._deadline, self._hops, self._forward = deadline, hops, forward
+        self._create_connection = self._socket
+
+    def _socket(self, address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+        target = netaddr.HopTarget(self._hops, self, self._forward) if self._hops is not None else None
+        return netaddr.open_socket(address, timeout, source_address, self._deadline, target)
 
     def connect(self):
         super().connect()
-        self._deadline.using(self.sock)
+        if self._deadline is not None:
+            self._deadline.using(self.sock)
 
 
 class _DeadlineHTTPConnection(_DeadlineConnection, http.client.HTTPConnection):
@@ -578,14 +596,22 @@ class _DeadlineHTTPSConnection(_DeadlineConnection, http.client.HTTPSConnection)
 
 class _DeadlineHandler:
     """urllib's handler of a scheme, with the connection classes of `_Deadline` for a request that carries one
-    (`lazaret_deadline`; the fetcher's redirect handler carries it to every hop)."""
+    (`lazaret_deadline`) or a fetch's `_Hops` (`lazaret_hops`); the fetcher's redirect handler carries both to every
+    hop. A request urllib sends whole to a forward proxy (HTTP_PROXY, a plain-http URL: `has_proxy`, no tunnel) is
+    held to the rule by its own host, not the proxy's (LZ-02's review: the connection to the outbound proxy is no
+    hop)."""
 
     def do_open(self, http_class, req, **kwargs):
         deadline = getattr(req, "lazaret_deadline", None)
-        if deadline is not None:
+        hops = getattr(req, "lazaret_hops", None)
+        if deadline is not None or hops is not None:
             secure = issubclass(http_class, http.client.HTTPSConnection)
             http_class = _DeadlineHTTPSConnection if secure else _DeadlineHTTPConnection
             kwargs["deadline"] = deadline
+            kwargs["hops"] = hops
+            if hops is not None and req.has_proxy() and not req._tunnel_host:
+                parts = urllib.parse.urlsplit(req.full_url)
+                kwargs["forward"] = (parts.hostname or "", parts.port or {"https": 443}.get(parts.scheme, 80))
         return super().do_open(http_class, req, **kwargs)
 
 
@@ -644,12 +670,24 @@ class Fetcher:
     every response is read in chunks against a byte budget, and a fetch
     against a deadline for the whole of it (`_Deadline`, F-07).
 
+    `https_redirects` (the Go guard's: a module proxy may send a zip on to
+    its storage) lets a redirect lead to an https host the fetcher does not
+    name, judged by the address it connects to (`_Hops`, LZ-02): a public
+    one always, a private one only from a proxy on a private or loopback
+    address, a loopback one only from a proxy on loopback, a link-local,
+    multicast, reserved or unspecified one, or a cloud's metadata address,
+    never (scanner/netaddr.py).
+
     `auth` (pmsettings.Credentials) holds the credentials the package
     manager's settings give for its registries: a request carries those of
     its own URL only — a redirect gets those of where it leads, if any — and
     none go over plain http to another machine. A URL's own user:password@
     is taken out of it and sent to its host alone; messages show URLs
     without it."""
+
+    #: (tests) for the hops `_Hops` judges: socket.getaddrinfo's stand-in, and (host, address) -> the address judged in
+    #: its place (a server on 127.0.0.1 standing in for a public or a private one); None: neither
+    lookup = peer = None
 
     def __init__(self, hosts, http_hosts=(), auth=None, keepalive=False, https_redirects=False):
         self.hosts = {h.lower() for h in hosts if usable_netloc(h)}
@@ -671,9 +709,12 @@ class Fetcher:
             with self.lock:
                 self.hosts.add(netloc(url))
 
-    def check(self, url, redirect=False):
-        """The url, or FetchError. redirect: it is where a response sent the fetcher; with `https_redirects` that may be any
-        https host (a module proxy redirects to its storage; what is fetched there is checked against a digest)."""
+    def check(self, url, redirect=False, hops=None):
+        """The url, or FetchError. redirect: it is where a response sent the fetcher; with `https_redirects` that may be an
+        https host the fetcher does not name (a module proxy redirects to its storage; what is fetched there is checked
+        against a digest), whose address is judged when it is connected to (`_Hops`, LZ-02). One written as an address
+        is judged here already, against the proxy `hops` says the fetch came from (HopRefused; without `hops`, a proxy
+        whose address is not known: as a public one's)."""
         try:
             parts = urllib.parse.urlsplit(url)
             host, loc = (parts.hostname or "").lower(), parts.netloc.rpartition("@")[2].lower()
@@ -689,6 +730,8 @@ class Fetcher:
             known = loc in self.hosts or host in self.hosts
         if not known and not (redirect and self.https_redirects and parts.scheme == "https"):
             raise repo.FetchError(f"host not allowed for this install: {loc!r}")
+        if not known:
+            (hops or _Hops(self)).judge_url(url)            # (an address; a name is judged by the one it connects to)
         return url
 
     def request(self, url, accept=None):
@@ -716,8 +759,12 @@ class Fetcher:
                 if deadline is not None and deadline.expired():
                     raise urllib.error.URLError(f"the download's {deadline.seconds} s are up")   # (no hop after it)
                 newurl = pmsettings.normal_url(newurl)       # (urljoin leaves the dots of an absolute URL)
+                hops = getattr(req, "lazaret_hops", None)
                 try:
-                    fetcher.check(newurl, redirect=True)
+                    fetcher.check(newurl, redirect=True, hops=hops)
+                except HopRefused:
+                    fp.close()                              # (the redirect's response: nothing more is read of it)
+                    raise
                 except repo.FetchError as exc:
                     raise urllib.error.URLError(f"redirect blocked: {exc}")
                 new = super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -726,6 +773,7 @@ class Fetcher:
                     new.add_unredirected_header("Authorization", header)
                 if new is not None:
                     new.lazaret_deadline = getattr(req, "lazaret_deadline", None)   # (one deadline for every hop)
+                    new.lazaret_hops = hops                                         # (and one rule, LZ-02)
                 return new
 
         handlers = [Redirects, _HTTPHandler(), _HTTPSHandler()]         # (TLS 1.2 at least: nativenet.TLS_FLOOR)
@@ -759,16 +807,19 @@ class Fetcher:
         return out
 
     def _open_native(self, req, clean, timeout, max_bytes, deadline=None):
-        """The request through the native transport (NET-1): its hosts the rule for the URL and every redirect (any
-        https host for a redirect with `https_redirects`, the first URL being checked already), no proxy for this
-        machine, and its credentials given hop by hop (`_native_credentials`); its total timeout the deadline's time
-        left (download_deadline() without one). None, for urllib: a plain-http URL, or one the native transport is not
-        to send (or cannot: a credential outside printable ASCII)."""
+        """The request through the native transport (NET-1): its hosts the rule for the URL and every redirect, no proxy
+        for this machine, and its credentials given hop by hop (`_native_credentials`); its total timeout the deadline's
+        time left (download_deadline() without one). None, for urllib: a plain-http URL, or one the native transport is
+        not to send (or cannot: a credential outside printable ASCII). With `https_redirects` too, the rule is the
+        fetcher's hosts (LZ-02: it was any https host): the native client cannot judge the address a hop connects to
+        (pratique's rules are of names, its resolver its own), so a redirect off them is refused there and the fetch is
+        made again on Python's path (None), whose `_Hops` judge it; a redirect to the configured hosts is followed as
+        before."""
         parts = urllib.parse.urlsplit(clean)
         if parts.scheme != "https" or "@" in parts.netloc or not nativenet.chosen(clean):
             return None
         with self.lock:
-            hosts = None if self.https_redirects else sorted(self.hosts | {netloc(clean)})
+            hosts = sorted(self.hosts | {netloc(clean)})
         budget = min(max_bytes or NATIVE_STREAM_MAX, NATIVE_STREAM_MAX)
         headers = [(k, v) for k, v in req.header_items() if k.lower() != "authorization"]
         if deadline is not None:
@@ -787,6 +838,8 @@ class Fetcher:
             if exc.kind == "too-large":
                 raise TooLarge(f"response over {budget // (1024 * 1024)}MB: {clean}") from None
             if exc.kind == "refused":
+                if self.https_redirects and netaddr.refused_elsewhere(exc):
+                    return None                             # (a redirect off the fetcher's hosts: Python's path, LZ-02)
                 raise repo.FetchError(f"URL error fetching {clean}: redirect blocked: {exc}") from None
             if deadline is not None:
                 deadline.check()
@@ -801,28 +854,36 @@ class Fetcher:
         native transport holds it as it reads; the caller holds it too). `deadline` (`_Deadline`, F-07): the time the
         whole download has, the connections, redirects and headers too; the response of urllib or of the pool is read
         within it (`_Timed`), and when it is up the error is the deadline's. Without one (the relays, which hand a
-        response on as it comes), urllib's and the pool's have only their timeout for each read, as before."""
+        response on as it comes), urllib's and the pool's have only their timeout for each read, as before. With
+        `https_redirects`, every hop is held to the fetch's `_Hops` (LZ-02): HopRefused names the address refused."""
         self.check(url)
         req, clean = self.request(url, accept)
+        hops = _Hops(self) if self.https_redirects else None
         try:
-            return self._open(req, clean, timeout, max_bytes, deadline)
+            return self._open(req, clean, timeout, max_bytes, deadline, hops)
+        except HopRefused as exc:
+            if deadline is not None:
+                deadline.close()
+            raise HopRefused(f"URL error fetching {clean}: {exc}") from None
         except BaseException:
             if deadline is not None:
                 deadline.close()
             raise
 
-    def _open(self, req, clean, timeout, max_bytes, deadline):
+    def _open(self, req, clean, timeout, max_bytes, deadline, hops=None):
         native = self._open_native(req, clean, timeout, max_bytes, deadline)
         if native is not None:
             return native
         if self.pool is not None:
             try:
-                resp = self._open_kept(req, clean, timeout, deadline)
+                resp = self._open_kept(req, clean, timeout, deadline, hops)
                 return resp if deadline is None else _Timed(resp, deadline, timeout)
             except keepalive_.Unsupported:
                 pass                                        # a proxy or URL the pool does not carry: urllib, as before
         if deadline is not None:
             req.lazaret_deadline = deadline
+        if hops is not None:
+            req.lazaret_hops = hops
         try:
             with timings.span("network", "request"):
                 resp = self._opener(clean).open(req, timeout=timeout)
@@ -841,16 +902,18 @@ class Fetcher:
             raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
         return resp if deadline is None else _Timed(resp, deadline, timeout)
 
-    def _open_kept(self, req, clean, timeout, deadline=None):
+    def _open_kept(self, req, clean, timeout, deadline=None, hops=None):
         """The same request through the pool's connections. Redirects are followed here, by the rules of
         `_opener`: at most repo.MAX_REDIRECTS, each target checked by `check`, and a hop carries the headers
-        but only the credentials of its own URL; every hop within `deadline`."""
+        but only the credentials of its own URL; every hop within `deadline`, and held to `hops` (a new
+        connection where it connects, a kept one before it is used: LZ-02)."""
         url, headers, visited = clean, dict(req.header_items()), {}
+        held = {} if hops is None else {"connect": lambda conn: hops.connector(conn, deadline), "reuse": hops.reused}
         while True:
             via = None if _is_loopback(urllib.parse.urlsplit(url).hostname) else keepalive_.proxy_for(url)
             try:
                 with timings.span("network", "request"):
-                    resp = self.pool.request(url, headers, timeout, via, deadline=deadline)
+                    resp = self.pool.request(url, headers, timeout, via, deadline=deadline, **held)
             except (OSError, http.client.HTTPException, UnicodeError) as exc:
                 if deadline is not None:
                     deadline.check()
@@ -879,7 +942,9 @@ class Fetcher:
             target = urllib.parse.urldefrag(urllib.parse.urljoin(url, urllib.parse.urlunsplit(target)))[0]
             target = pmsettings.normal_url(target)          # (urljoin leaves the dots of an absolute URL)
             try:
-                self.check(target, redirect=True)
+                self.check(target, redirect=True, hops=hops)
+            except HopRefused:
+                raise
             except repo.FetchError as exc:
                 raise repo.FetchError(f"URL error fetching {clean}: redirect blocked: {exc}") from exc
             visited[target] = visited.get(target, 0) + 1

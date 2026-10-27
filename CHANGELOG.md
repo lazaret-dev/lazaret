@@ -1795,6 +1795,43 @@ aggregate):
 
 ### Fixed
 
+- **Security: a Go module proxy's redirect, or an SCA feed's, can no longer send Lazaret to this machine, its network
+  or the cloud's metadata service (LZ-02, the external security report of Oct 27; CWE-918, server-side request forgery; no
+  rule-set change).** A Go proxy may send a zip on to its storage, so the Go guard followed a redirect to any https
+  host, on both transports: a malicious or compromised `GOPROXY` could make it send GET requests to
+  `https://127.0.0.1:…`, `https://10.…` or `https://169.254.169.254/…` from the developer's machine (blind: what comes
+  back is read as a module proxy's answer and checked against go's checksums, but the request is made). A redirect to
+  a host `GOPROXY` does not name is now judged by the address it connects to, with no list of hosts: a public address
+  always, as before; a private one (10/8, 172.16/12, 192.168/16, fc00::/7, carrier-grade NAT 100.64/10, benchmarking
+  198.18/15) only from a proxy that is itself on a private or loopback address, so a company's Athens or Artifactory
+  on 10.x still sends go to its own MinIO or S3 gateway; a loopback one only from a proxy on loopback; never an
+  unspecified, multicast, broadcast, reserved (240/4, the rest of 0/8), link-local (169.254/16, fe80::/10: most
+  clouds' metadata services) or site-local (fec0::/10) one, nor a cloud's metadata or platform address outside
+  link-local (Alibaba's `100.100.100.200`, AWS's `fd00:ec2::254` and its DNS and time servers, AWS's EKS Pod Identity
+  Agent `fd00:ec2::23`, Google's `fd20:ce::254`, Azure's `168.63.129.16`). An IPv4 address inside an IPv6 one counts
+  as that IPv4 address (`::ffff:127.0.0.1`, `::127.0.0.1`, NAT64's `64:ff9b::`, 6to4, Teredo; NAT64's local-use
+  `64:ff9b:1::/48` is read at each prefix length RFC 6052 allows in it, the strictest reading counting). The address
+  judged is the one connected to: every address a name gives is judged before any is tried and the connected one again
+  (getpeername), so a name that rebinds from a public address to a private one is refused, and the configured proxy's
+  own address, as connected to, is what grants. Through an outbound proxy (`HTTPS_PROXY`'s tunnel, or `HTTP_PROXY` for
+  a plain-http `GOPROXY`, whose first request is sent through it as before) a hop's name is judged by the addresses it
+  has on this machine, and one that has none here is refused; the configured proxy's name is not looked up here at
+  all, since its operator answers this machine's lookup and the outbound proxy's alike: reached through an outbound
+  proxy it counts as on a public address unless `GOPROXY` names it by its address, so a company's private proxy that
+  sends go on to its private storage is reached directly (in `NO_PROXY`, as internal hosts normally are). What the
+  outbound proxy's own lookup of a hop's name gives cannot be seen (`docs/DESIGN.md`). The native transport cannot
+  judge an address (pratique's host rules are of names), so it follows a redirect to the configured proxies only, and
+  a fetch it would take elsewhere is made again on Python's transport (the proxy is asked twice); both give the same
+  answer. A refused hop blocks the module with the reason: "redirect to a private address (10.1.2.3) refused: the
+  proxy is on a public address". Hops to the configured proxies, the credentials each hop gets (decision 14) and every
+  other fetcher are as they were: the npm, PyPI and Cargo guards, the registry and the sources follow redirects to
+  their own hosts only. The SCA feeds' download (`lazaret-sca --update-bundle`) followed a feed's redirect to any
+  https host the same way, and is held to the same rule: the feed's own host is the configured one, so a redirect from
+  OSV's, CISA's or EPSS's host leads to a public address only, and one from a mirror on a private or loopback address
+  (`--osv-url`, `--kev-url`, `--epss-url`) and reached directly to one of its class; a refused redirect fails the
+  update (the old bundle stays) with the reason: "redirect to a loopback address (127.0.0.1) refused: the feed's host
+  is on a public address".
+
 - **Security: a repository's scan reads every file of the commit at its own path, also where two paths differ only in
   case, and on a disk that holds them as one name says it was not read whole (MAC-TESTS; no rule-set change).** `lazaret
   scan github:…` / `gitlab:…` and the registry's GitHub scans (`discover --scan`, `--github-scan-all`) write the

@@ -90,9 +90,19 @@ class GuardNativeFetchTests(unittest.TestCase):
             with self.assertRaises(repo.FetchError) as caught:
                 f.get(self.url("/out"), max_bytes=100)          # (to 127.0.0.1: a host the fetcher does not name)
             self.assertIn("redirect blocked", str(caught.exception))
+        # with https_redirects (the Go guard's) another https host is judged by the address it connects to (LZ-02): the
+        # native client follows a redirect to the fetcher's hosts only, and a fetch it would take elsewhere is made again
+        # on Python's path, which judges it (`peer` says what 127.0.0.1 stands for: tests/registry/
+        # test_guard_redirect_addresses.py)
         f = self.fetcher(https_redirects=True)
-        with self.no_urllib(f):
-            self.assertEqual(f.get(self.url("/out"), max_bytes=100), b"hello", "any https host on a redirect")
+        f.peer = lambda host, ip: {"localhost": "8.8.8.8", "127.0.0.1": "1.1.1.1"}.get(host, ip)
+        with self.trusting_the_root():
+            self.assertEqual(f.get(self.url("/out"), max_bytes=100), b"hello", "a public host, from a public proxy")
+        f.peer = lambda host, ip: {"localhost": "8.8.8.8", "127.0.0.1": "10.1.2.3"}.get(host, ip)
+        with self.trusting_the_root(), self.assertRaises(guard.HopRefused) as caught:
+            f.get(self.url("/out"), max_bytes=100)
+        self.assertIn("redirect to 127.0.0.1, a private address (10.1.2.3), refused: the proxy is on a public address",
+                      str(caught.exception))
 
     def test_a_status_is_the_fetchers_error(self):
         f = self.fetcher()
@@ -107,10 +117,11 @@ class GuardNativeFetchTests(unittest.TestCase):
         auth.token(self.url("/"), "t0ken")
         auth.token(self.url("/team/"), "team-t0ken")
         f = self.fetcher(auth=auth, https_redirects=True)
+        with self.trusting_the_root():                  # (another host: Python's path, which judges its address, LZ-02)
+            self.assertNotIn("authorization", f.json(self.url("/out-headers")), "another host (127.0.0.1)")
         with self.no_urllib(f):
             self.assertEqual(f.json(self.url("/headers")).get("authorization"), "Bearer t0ken")
             self.assertEqual(f.json(self.url("/to-headers")).get("authorization"), "Bearer t0ken", "the same host")
-            self.assertNotIn("authorization", f.json(self.url("/out-headers")), "another host (127.0.0.1)")
             own = f.json(f"https://user:pw@{self.host}/headers")
             self.assertEqual(own.get("authorization"), pmsettings.basic("user", "pw"), "the URL's own, before the settings'")
             after = f.json(f"https://user:pw@{self.host}/to-headers")

@@ -565,7 +565,7 @@ class TeardownTests(RelayCase):
         self.assertEqual(ask(lp.base, "/example.test/good/@v/v1.0.0.zip")[0], 200)
         self.assertEqual(len(os.listdir(lp.spool)), 1)
 
-    def test_the_fetcher_follows_a_redirect_to_any_https_host_and_the_checks_name_the_first_proxy(self):
+    def test_the_fetcher_follows_a_redirect_to_another_https_host_and_the_checks_name_the_first_proxy(self):
         lp = self.serve(self.context())
         self.assertTrue(lp.fetcher.https_redirects)
         ask(lp.base, "/example.test/good/@v/v1.0.0.zip")
@@ -818,12 +818,18 @@ class ProxyListTests(RelayCase):
         self.assertEqual(ask(lp.base, "/example.test/good/@v/list")[0], 502)
         self.assertIn("HTTP 401", lp.relay.errors[0])
 
-    def test_redirects_may_lead_to_any_https_host_when_the_fetcher_is_told_so(self):
+    def test_redirects_may_lead_to_another_https_host_when_the_fetcher_is_told_so_judged_by_its_address(self):
+        # (LZ-02: another host is judged by the address it connects to, tests/registry/test_guard_redirect_addresses.py;
+        # one written as an address is judged here already, against a proxy whose address is not known yet: as a
+        # public one's. A public one may be any proxy's redirect, this machine and the metadata service none's.)
         for allowed in (False, True):
             f = guard.Fetcher({"proxy.example"}, https_redirects=allowed)
             f.check("https://proxy.example/x")
             for url, redirect, ok in (("https://storage.example/blob", True, allowed), ("https://storage.example/blob", False, False),
-                                      ("http://storage.example/blob", True, False), ("https://proxy.example/y", True, True)):
+                                      ("http://storage.example/blob", True, False), ("https://proxy.example/y", True, True),
+                                      ("https://8.8.8.8/blob", True, allowed), ("https://8.8.8.8/blob", False, False),
+                                      ("https://127.0.0.1:8443/internal-admin", True, False),
+                                      ("https://169.254.169.254/latest/meta-data/", True, False)):
                 with self.subTest(allowed=allowed, url=url, redirect=redirect):
                     if ok:
                         self.assertEqual(f.check(url, redirect=redirect), url)

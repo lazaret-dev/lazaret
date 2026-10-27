@@ -25,7 +25,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from tests import _support
-from lazaret.scanner import nativenet, sca, sca_feeds
+from lazaret.scanner import nativenet, netaddr, sca, sca_feeds
 
 # ---------------------------------------------------------------------------
 # Fixture feeds
@@ -952,6 +952,24 @@ class FetchTests(Feeds):
         for target in ["http://example.invalid/feed", "file:///etc/passwd", "ftp://example.invalid/f"]:
             with self.assertRaises(urllib.error.URLError):
                 handler.redirect_request(req, None, 302, "Found", {}, target)
+
+    def test_a_redirect_to_an_address_is_judged_by_the_feeds_hop_rule(self):
+        # (LZ-02: a feed's host is the configured one, and OSV's, CISA's and EPSS's are public, so a redirect from them
+        # may lead to a public address only; a name is judged by the address it connects to: tests/registry/
+        # test_guard_redirect_addresses.py's FeedDownloadTests, against servers of this machine)
+        handler = sca_feeds._HttpsRedirects()
+        req = urllib.request.Request("https://feed.invalid/feed")
+        req.lazaret_hops = sca_feeds._feed_hops("https://feed.invalid/feed")
+        req.lazaret_hops.proxy = netaddr.classify("8.8.8.8")
+        for target in ["https://127.0.0.1/x", "https://[::1]/x", "https://[::ffff:127.0.0.1]/x", "https://10.0.0.1/x",
+                       "https://169.254.169.254/latest/meta-data/", "https://0.0.0.0/x"]:
+            with self.subTest(target=target), self.assertRaises(netaddr.Refused) as caught:
+                handler.redirect_request(req, None, 302, "Found", {}, target)
+            self.assertRegex(str(caught.exception), r"refused: (the feed's host is on a public address|a redirect never "
+                                                    r"leads to such an address)$")
+        for target in ["https://8.8.8.8/feed", "https://mirror.invalid/feed"]:
+            new = handler.redirect_request(req, None, 302, "Found", {}, target)
+            self.assertEqual((new.full_url, new.lazaret_hops), (target, req.lazaret_hops))
 
 
 # ---------------------------------------------------------------------------
