@@ -8,7 +8,8 @@
    followed (INFO Q-SYMLINK), special/unreadable entries are INFO
    Q-UNREADABLE, and reads are bounded.
 3. os.walk recursed on 3.10/3.11: a tree 1,100 directories deep raised
-   RecursionError. The walk is iterative now.
+   RecursionError. The walk is iterative now; since LZ-03's review it enters
+   no folder deeper than core.MAX_WALK_DEPTH (512: SC-TRUNCATED, incomplete).
 4. A non-UTF-8 file name (b'bad\\xff.py') crashed the HTML writer after the
    scan (UnicodeEncodeError, traceback, exit 1) and put a lone surrogate in
    the SARIF URI. Paths are valid UTF-8 at collection time now.
@@ -184,13 +185,22 @@ class DeepTree(unittest.TestCase):
                               f"{self.DEPTH}-level tree needs (macOS: 1024)")
         with open(os.path.join(path, "leaf.py"), "w", encoding="utf-8") as fh:
             fh.write("eval(x)\n")
+        last = os.path.join(root, *["d"] * core.MAX_WALK_DEPTH)    # (the deepest folder the walk enters: LZ-03's review)
+        with open(os.path.join(last, "deep.py"), "w", encoding="utf-8") as fh:
+            fh.write("eval(x)\n")
         with open(os.path.join(root, "a.py"), "w", encoding="utf-8") as fh:
             fh.write("x = 1\n")
         p, report, _ = run_cli(root)
         self.assertNotIn("RecursionError", p.stderr)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        leaf = "/".join(["d"] * self.DEPTH + ["leaf.py"])
-        self.assertIn("S-EVAL-PY", by_file(report).get(leaf, set()))
+        self.assertNotIn("Traceback", p.stderr)
+        files = by_file(report)
+        self.assertIn("S-EVAL-PY", files.get("/".join(["d"] * core.MAX_WALK_DEPTH + ["deep.py"]), set()))
+        # the folders below the cap are not entered: the first of them is SC-TRUNCATED, the result incomplete
+        self.assertEqual(files.get("/".join(["d"] * (core.MAX_WALK_DEPTH + 1))), {"SC-TRUNCATED"})
+        self.assertNotIn("/".join(["d"] * self.DEPTH + ["leaf.py"]), files)
+        self.assertTrue(report["incomplete"])
+        self.assertIn(f"1 folder nested deeper than {core.MAX_WALK_DEPTH} folders was not read",
+                      report["incompleteReason"])
 
     @staticmethod
     def _remove_deep(root):
@@ -224,13 +234,13 @@ class Unreadable(unittest.TestCase):
     def test_unreadable_file(self):
         root = make_tree({"a.py": "eval(x)\n", "b.py": "x = 1\n", "c.so": b"\x00" * 10})
         self.addCleanup(shutil.rmtree, root, True)
-        real = core._read_prefix
+        real = core._Root.read                  # (the walk reads from the root's descriptor: LZ-03)
 
-        def deny(path, limit):
-            if os.path.basename(path) in ("b.py", "c.so"):
+        def deny(tree, parts, limit, expect=None):
+            if parts[-1] in ("b.py", "c.so"):
                 raise PermissionError(13, "Permission denied")
-            return real(path, limit)
-        with mock.patch.object(core, "_read_prefix", deny):
+            return real(tree, parts, limit, expect)
+        with mock.patch.object(core._Root, "read", deny):
             res = core.scan_project(root)
         files = {}
         for i in res["issues"]:
@@ -244,13 +254,13 @@ class Unreadable(unittest.TestCase):
     def test_unreadable_subdirectory(self):
         root = make_tree({"a.py": "x = 1\n", "sub/b.py": "eval(x)\n"})
         self.addCleanup(shutil.rmtree, root, True)
-        real = os.scandir
+        real = core._Root.listdir               # (folders are listed from the root's descriptor: LZ-03)
 
-        def scandir(path="."):
-            if os.path.basename(os.fspath(path)) == "sub":
+        def listdir(tree, parts=()):
+            if tuple(parts)[-1:] == ("sub",):
                 raise PermissionError(13, "Permission denied")
-            return real(path)
-        with mock.patch.object(core.os, "scandir", scandir):
+            return real(tree, parts)
+        with mock.patch.object(core._Root, "listdir", listdir):
             res = core.scan_project(root)
         subs = [i for i in res["issues"] if i["file"] == "sub"]
         self.assertEqual([i["rule"] for i in subs], ["Q-UNREADABLE"])

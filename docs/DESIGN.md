@@ -203,6 +203,12 @@ line yourself.
   ever installed or executed. Functional offensive samples live in the private
   `lazaret-samples` repo and reach tests only via `LAZARET_SAMPLES_DIR`. Never
   commit live malware or a fixture that touches the network.
+- **The scanned tree is read from its root's descriptor.** Every folder and
+  file a project scan lists or reads under its root is reached from the root
+  folder's descriptor a component at a time, no link followed (`core._Root`,
+  LZ-03), never by a path the system resolves again. A reader you add takes
+  the scan's `_Root` (`tree.read`, `tree.is_regular`, `tree.listdir_after`,
+  which hold what it reads to what the walk found), not a path.
 
 ---
 
@@ -270,6 +276,185 @@ shared by the CLI and the MCP server. In order it:
 6. **adds coverage notes** (skipped trees, symlinks, unreadable/truncated);
 7. **computes metrics, ratings and the quality gate**, then
 8. **sweeps everything for secrets** and returns `build_result(...)`.
+
+How the tree is read (LZ-03, the external security report of Oct 27:
+CWE-367, time-of-check time-of-use). The MCP server checks a path against its
+allowed roots once and then reads the tree; until this fix the walk and every
+reader after it (`_collect`, the pycache, pruned-tree and marker probes, the
+--deps and install-hook readers, the vendored-code readers, --verify-secrets'
+lines) went by path, so whoever could change the tree during a
+`scan_directory` or `quality_gate` call could swap a folder for a link and
+have one outside the roots listed and read. Now a scan reads one `_Root`: the
+root folder opened once (by the MCP server beneath its allowed root, a
+directory at a time with no link followed; by the CLI as given, a link in its
+path followed), every folder below it opened from its parent's descriptor
+(`dir_fd`, `O_DIRECTORY | O_NOFOLLOW`) and listed with `os.scandir(fd)`, its
+entries lstat'ed while it is open, and every file opened the same way
+(`O_NOFOLLOW | O_NONBLOCK`), read and fstat'ed from its descriptor. A folder
+is opened afresh from its parent when it is listed. Folders are kept open so
+that reaching one costs a bounded number of opens whatever the tree's shape
+(LZ-03's review, H3: with only the last eight kept, a "comb" N folders deep,
+a leaf folder beside each level, reopened its path from the root for every
+leaf, N²/2 opens: 1.8 million and 8 s of CPU at 1,900 levels, past 45 s at
+3,000): the 16 used last, and every 16th folder on the way to the last one
+opened (`_Root._spine`), so a folder is opened from one at most 16 levels
+above it; the walk is linear in the folders it lists (about two opens per
+folder on a comb). And the walk enters no folder deeper than 512 below the
+root (`MAX_WALK_DEPTH`): one deeper is an SC-TRUNCATED finding ("it is nested
+deeper than 512 folders"), and the result is incomplete. 512 is above
+anything real: a path of 512 folders is longer than Linux's PATH_MAX (4,096
+bytes) once its names average eight characters, so a project written, built
+and installed by tools that open files by path stays far below it, nested
+node_modules included (the walk before LZ-03 stopped at PATH_MAX by
+accident, reporting the rest unreadable, INFO); what it bounds is a tree
+made to be deep, which a tarball of a few kilobytes can be. A `__pycache__`
+that deep is not entered either. The npm package's walk has the same cap
+(`js/src/lib/collect.js`'s `MAX_WALK_DEPTH`, this one's twin: the same
+finding, the same incomplete result and reason; its pruned-tree counts, its
+probes for a dependency tree's markers and its --deps readers stop at it as
+`_Root` does), so the two CLIs answer alike on a deeper tree whose paths
+the system allows (`test_js_parity_core.DepthCapParityTests`: trees 511,
+512 and 513 deep). The npm package goes by path, and a path longer than the
+system allows (PATH_MAX: 4,096 bytes on Linux, 1,024 on macOS; a tree of
+ten-character names passes it near 370 levels on Linux) stops its walk and
+its --deps readers first: that folder or file is SC-TRUNCATED ("its path is
+longer than this system allows") and the result incomplete ("N folders or
+files were not read: their paths are longer than this system allows"),
+where it was one Q-UNREADABLE note in a complete result (LZ-03's re-check).
+The Python CLI reads such a tree whole below the cap; the two then differ in
+findings, never in giving a complete result without them (the same test,
+with ten-character names).
+With the cap, the descriptors open at once are at most 32 + 16 besides the
+root's (49 in all, far below the 256 a macOS process gets by default and
+Linux's 1,024). The
+kept ones are let go when the walk is done, so the readers after it reach
+each folder by the name it has then. A kept folder that is renamed meanwhile,
+even out of the root, is still the one read through its descriptor (LZ-03's
+review, L1): what is reached through it is what is in that folder, which was
+under the root when it was opened, and no link below it is followed; a file
+put into it after it left the root would be read, which needs the same write
+access that could put the file in the root.
+
+What the walk found is held to what it found (LZ-03's review, H1 and H2). A
+folder the walk found (`_Root.found`) that is a link, no folder or gone when
+it is opened again, by the walk or a reader after it, and a regular file the
+walk listed (`_Root.files`, `_file_record`: its device, inode, size and
+modification and change times) that is a link, another kind of file (a
+folder, a FIFO, a socket), another file (another inode, or one written since:
+another size or time; a file deleted and made again under its name can get
+the freed inode, as ext4 gives it, LZ-03's re-check 2, N5) or
+gone when it is opened (the descriptor's fstat), looked at (`is_regular`: the
+install hooks' stat, the vendored-code and agent-skill readers) or listed
+again (`listdir_after`: the readers of a package's folder), changed while the
+tree was read: it is not read, it is an SC-TRUNCATED finding ("it changed
+while the tree was read"), and the result is incomplete. Before, a file
+swapped for a folder or a FIFO between the walk's listing and its read was a
+Q-UNREADABLE note, and one swapped after the walk was treated as absent by
+the readers: a CRITICAL lost (SC-INSTALL-HOOK of the file a postinstall runs,
+SC-USE-RISK of a vendored header) while the call stayed complete and the gate
+passed. Q-UNREADABLE stays for a file that cannot be opened and is still the
+file the walk listed (permission denied when listed and when read). What the
+walk did not find (a file a hook names that was not there, a folder in a
+pruned tree) is looked at as it is then, as before.
+
+A reader's names come from a package's text (a hook's command,
+`vendor/modules.txt`, an agent skill) and are held to the walk's listing as
+the disk reads them (LZ-03's re-check, N1). A disk that takes some names for
+one (macOS's APFS and Windows' NTFS by default ignore case and Unicode form;
+Windows also drops a name's trailing dots and spaces and knows a file by its
+8.3 short name) opens the walk's `lib/run.dat` for a hook's `LIB/RUN.DAT`,
+so a check by the exact name let that file be swapped after the walk
+unnoticed. A name not in the walk's listing of its folder (`_Root.names`:
+every entry, its device, inode and kind) is looked up there (`_canon`,
+`_alias`): what it reaches now is the walk's entry of the same device and
+inode, and the reader is held to that entry as under its own name, where the
+disk could take the reader's name for that entry's (LZ-03's re-check 2, N3:
+an entry the walk listed under another name, renamed or hard linked into the
+place of the one the name stood for, or a folder the walk listed put in the
+place of the folder, is a change: the reader would be held to what that entry
+was, not to what its own name stood for); where the walk listed no name the
+disk could take it for (a folding this does not model), only while the walk's
+own name still reaches that entry. What the walk did not list there (another
+file, a link, a folder put in the entry's place or beside it) is a change. A
+name shaped as an 8.3 short name may stand for any name the walk listed in
+its folder: Windows makes the short name's extension from the long one's with
+spaces left out and characters 8.3 cannot hold made `_` (`run.c++` is
+`RUN~1.C__`; N4). A name that reaches nothing is a change too
+where the walk listed a name the disk could take it for (in case, Unicode
+form, trailing dots and spaces, an 8.3 name) and that entry is gone or
+another now, or the folder changed while it was looked at (its modification
+and change times, which every entry made, renamed or removed in it moves);
+otherwise it names nothing, as when the walk listed the folder. On a disk
+that tells names apart (Linux's usual ones) a hook's `LIB/RUN.DAT` is a file
+that is not there, as before. Where the walk's listing has no inodes
+(Windows' `DirEntry.stat`), a name is the entry it is one name with, by the
+identity both have now, and a regular file by its size and modification
+time (its change time only where the inode is known: Windows' listing has a
+creation time there).
+
+These checks keep what is read consistent with what the walk found while the
+tree is changed during a call (fail closed: SC-TRUNCATED and incomplete). The
+boundary they serve is that nothing outside the root is listed or read, and
+that holds whatever the tree does. Out of scope, as one who can change the
+tree can change a file's content after the scan and before it is installed: a
+write to a file while it is being read (after its open and fstat). Left, from
+LZ-03's re-check 2:
+- A disk whose times are coarse (FAT's two seconds, exFAT's ten
+  milliseconds): a file written in place within one tick at the same size is
+  not told from the file the walk listed (N5); and a name that reaches nothing
+  while its folder's times did not move is taken for one that reached nothing
+  then, so a file renamed away and back between two lookups on such a disk
+  can be missed (N6, timing-dependent).
+- Windows, whose listing has no inodes: a file replaced by another of the
+  same size whose modification time is set back (`SetFileTime`) is taken for
+  the file the walk listed.
+- A disk that takes names for one some other way (another Unicode version's
+  case folding), for a name that reaches nothing because the walk's entry it
+  stood for is gone.
+- The npm package's walk on Windows: only `ENAMETOOLONG` is a path too long
+  for the system (SC-TRUNCATED); if Windows reports a path past `MAX_PATH` as
+  missing (`ENOENT`), that folder is a Q-UNREADABLE note in a complete
+  result, as before (N7; not verified on Windows).
+
+Nothing outside the root is listed or read, whatever the tree does
+meanwhile; a link the listing shows is a Q-SYMLINK note and not followed, as
+always. Not races, and as before: a hard link inside the root to a file
+outside it is that file (read by its inode), and a folder mounted inside the
+root (a bind mount) is walked. On a
+normal tree nothing changes: the same files, findings and results, for both
+packages (the npm package's walk, which has no MCP server, stays by path, with
+the same depth cap; a path too long for the system is SC-TRUNCATED there).
+Where there is no such open (Windows: no `dir_fd`, no
+`scandir` of a descriptor, no `O_NOFOLLOW`), the tree is read by path and
+checked: every folder on the way is lstat'ed (a link or a non-folder is
+`_PathChanged`) and a folder is listed only when its final path
+(`CreateFileW` with `FILE_FLAG_BACKUP_SEMANTICS`, then
+`GetFinalPathNameByHandleW`) is under the root; a file is opened and kept
+only when its handle's final path is (`_open_verified`). What this leaves on
+Windows: a folder swapped between its check and its listing can have its
+names listed (not a byte of its files read; those are checked one by one).
+And the check opens what it checks, links followed: a link swapped in to a
+UNC path (`\\host\share\x`) is opened before it is refused, which makes an
+SMB connection, with the user's NTLM authentication, to that host (making
+the link needs the symlink privilege or developer mode; the walk before
+LZ-03, and `check_path`'s `realpath`, followed links anyway, so this is not
+new). `FILE_FLAG_OPEN_REPARSE_POINT` is not used for the final-path check on
+purpose: that check wants where the folder leads, links followed, to compare
+it with the root; an lstat-like check of each component with it before the
+open would close the UNC gap, and is left for a Windows pass. The tests stand Linux in for that path (`/proc/self/fd`, `F_GETPATH`
+on macOS): `tests/mcp/test_mcp_path_race.py`. The cost, measured on a
+20,000-file tree and on Lazaret's checkout: the walk within a few per cent
+of its CPU time before; the path fallback about a third more on the larger
+tree. On the comb trees of the review (CPU, min of 3): 2,143 opens and 0.11
+s at 500 levels (the reviewed commit: 124,261 opens and 0.35 s); at 1,900 to
+4,000 levels the walk stops at 512 (2,194 opens, 0.11-0.15 s); with the cap
+lifted it reads them whole, 8,182 opens and 0.7 s at 1,900 levels, 12,928
+and 1.3-1.6 s at 3,000 (the walk before LZ-03: 2.0-2.4 s at 1,900, and
+2.4-2.6 s stopping at PATH_MAX at 3,000; the reviewed commit: 1.8 million
+opens and 8.1-8.6 s at 1,900). The path fallback lstat's every folder on a
+folder's way each time it reaches one, so its cost grows with the square of
+the depth: a comb 512 deep costs it about 12 s (the Linux stand-in), which
+the cap bounds.
 
 `build_result` returns the dict the CLI and MCP serialize: `project`,
 `metrics`, `counts`, `ratings`, `supplyChain`, `crossFile`, `perFile`,

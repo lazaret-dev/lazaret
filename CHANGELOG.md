@@ -1795,6 +1795,60 @@ aggregate):
 
 ### Fixed
 
+- **Security: the MCP server's path tools read only beneath the root they were checked under (LZ-03, the external
+  security report of Oct 27; CWE-367, time-of-check time-of-use; Low; no rule-set change).** `scan_files` resolved a
+  path and checked it against the allowed roots, then read it by `os.stat(path)` and `_read_prefix(realpath(path))`:
+  a second resolution, never checked; `scan_directory` and `quality_gate` checked a directory and then walked it by
+  its path, as every reader of the project walk did. Whoever could change the tree during a call could swap a link
+  or a directory after the check, or while the walk ran, and have a file or a directory outside the roots listed
+  and scanned, its findings and metadata returned to the MCP client. Now a path is resolved once (the root it is
+  under and its real path), and what is read is opened beneath that root, a directory at a time with no link
+  followed (`dir_fd`, `O_DIRECTORY | O_NOFOLLOW`; a file `O_NOFOLLOW | O_NONBLOCK`). `scan_files` reads the kind,
+  size and bytes of the open file. `scan_directory` and `quality_gate` open the directory so, and the project walk
+  and every reader after it (the MCP budget's count, the `--deps` and install-hook readers, the vendored-code
+  readers, the pruned trees' counts; and for the CLI `--verify-secrets`' lines and a trusted repository's taint
+  config) reach each folder and file from that directory's descriptor (`core._Root`), the CLI's walk the same way
+  from the folder it is given. What the check or the walk found is held to what it found: a folder that is a link,
+  no folder or gone when it is opened, and a regular file the walk listed that is a link, another kind of file (a
+  folder, a FIFO), another file (another inode, or one written since: another size, modification or change time) or
+  gone when it is opened (its descriptor's fstat), looked at or
+  listed again, by the walk or by the install-hook, `--deps`, vendored-code and agent-skill readers after it, under
+  the name the walk listed or another the disk takes for it (a hook's `LIB/RUN.DAT` for `lib/run.dat` on macOS's
+  and Windows' disks, which ignore case and Unicode form: the reader is held to the walk's entry it reaches, by
+  device and inode, and a name that reaches something the walk did not list there, or another entry it listed, is
+  a change), is not
+  read (SC-TRUNCATED, "it changed while the tree was read"; the result incomplete, the gate failed), the whole
+  directory when the target changed after the check, and nothing outside the roots is listed or read. A file that
+  cannot be opened and is still the file the walk listed (permission denied) stays a Q-UNREADABLE note. The walk
+  enters no folder deeper than 512 below the root (SC-TRUNCATED "it is nested deeper than 512 folders", the result
+  incomplete), and keeps folders open along its way (every 16th, and the 16 used last) so that reaching one costs
+  at most 16 opens: linear in the tree, at most 49 descriptors open. The directory tools check that their target
+  exists and is a directory by opening it beneath its root, not by its path (a link swapped in after the check is
+  "it changed after it was checked", whether or not what it names exists). A folder moved out of the root after it
+  was opened is still read through its descriptor (only what is in it); a hard link to a file outside the root and
+  a folder mounted inside it are read as they are, as before. On Windows, which has neither `dir_fd` nor
+  `O_NOFOLLOW`, a file is opened and kept only when its handle's final path (`GetFinalPathNameByHandleW`) is under
+  the root, and a directory is listed only when no directory on its way is a link and its final path (`CreateFileW`
+  with `FILE_FLAG_BACKUP_SEMANTICS`) is under the root; a directory swapped between that check and its listing can
+  still have its names listed, never its files read, and a link swapped in to a UNC path is opened (an SMB
+  connection to its host) before it is refused, as before LZ-03 (`docs/DESIGN.md`). A link inside the roots that
+  resolves inside them, a path through a linked directory inside them, and a root named through a link (macOS's
+  `/tmp`) are scanned as before; a link that leads outside is refused at the check, and a link the walk finds is a
+  Q-SYMLINK note and not followed, as before. On a normal tree every result is the same as before (the snapshot and
+  parity suites), at a few per cent of the walk's CPU time; the npm package's walk, which has no MCP server, stays by
+  path and has the same depth cap: a tree deeper than 512 folders whose paths the system allows gives both CLIs the
+  same SC-TRUNCATED findings and the same incomplete result. A path longer than the system allows (4,096 bytes on
+  Linux, 1,024 on macOS: long folder names reach it well before the cap) stops the npm package's walk and its
+  `--deps` readers, not core's, which reads beneath descriptors: that folder or file is SC-TRUNCATED there ("its path
+  is longer than this system allows") and the npm result incomplete, where it was one Q-UNREADABLE note in a complete
+  result with the files below it unread. The two CLIs can then give different findings, never a complete result
+  without them. What this does not cover (`docs/DESIGN.md`): a file written while it is being read, or the tree
+  changed after the scan and before it is installed; on a disk whose times are coarse (FAT, exFAT) a file written in
+  place within the same tick at the same size, and a name that briefly reaches nothing while its folder's times do
+  not move; on Windows, whose listing has no inodes, a file replaced by another of the same size with its
+  modification time set back; and on Windows, the npm package's walk of a path longer than `MAX_PATH` if Windows
+  reports it as missing rather than too long.
+
 - **Security: a Go module proxy's redirect, or an SCA feed's, can no longer send Lazaret to this machine, its network
   or the cloud's metadata service (LZ-02, the external security report of Oct 27; CWE-918, server-side request forgery; no
   rule-set change).** A Go proxy may send a zip on to its storage, so the Go guard followed a redirect to any https

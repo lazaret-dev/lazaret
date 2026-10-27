@@ -13,7 +13,7 @@ import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fsNameToString } from "./encoding.js";
 import {
-  MAX_FILE_BYTES, skippedTreeIssue, symlinkIssue, takeStep, unreadableIssue, walkSteps,
+  MAX_FILE_BYTES, MAX_WALK_DEPTH, pathTooLong, skippedTreeIssue, symlinkIssue, takeStep, unreadableIssue, walkSteps,
 } from "./collect.js";
 
 export { skippedTreeIssue, symlinkIssue, unreadableIssue };
@@ -153,7 +153,9 @@ const DISK = {
     return listDir(dirBuf).map((ent) => {
       const node = childPath(dirBuf, ent.buf), name = ent.str;
       let st;
-      try { st = lstatSync(node, { bigint: true }); } catch (e) { return { name, node, kind: "error", why: strerror(e) }; }
+      try { st = lstatSync(node, { bigint: true }); } catch (e) {
+        return { name, node, kind: "error", why: strerror(e), tooLong: pathTooLong(e) };
+      }
       if (pycache) {                  // as core._check_pycache: any reparse point counts, file or directory
         if (st.isSymbolicLink() || ent.link) return { name, node, kind: "link", target: readlinkText(node) };
         if (st.isFile()) return { name, node, kind: "file", size: Number(st.size) };
@@ -187,19 +189,21 @@ export function vendorKind(dirBuf) {
   return null;
 }
 
-/** (file count, byte count) of a pruned tree — iterative, links not followed. */
-function treeStats(dirBuf) {
+/** (file count, byte count) of a pruned tree `depth` folders below the root — iterative, links not followed, no
+ * folder deeper than MAX_WALK_DEPTH listed (core._tree_stats_at). */
+function treeStats(dirBuf, depth = 1) {
   let nFiles = 0, nBytes = 0;
-  const stack = [dirBuf];
+  const stack = [[dirBuf, depth]];
   while (stack.length) {
-    const d = stack.pop();
+    const [d, at] = stack.pop();
+    if (at > MAX_WALK_DEPTH) continue;
     let names;
     try { names = readdirSync(d, { encoding: "buffer" }); } catch { continue; }
     for (const nb of names) {
       const p = childPath(d, nb);
       let st;
       try { st = lstatSync(p); } catch { continue; }
-      if (st.isDirectory()) { stack.push(p); continue; }
+      if (st.isDirectory()) { stack.push([p, at + 1]); continue; }
       nFiles++;
       if (st.isFile()) nBytes += st.size;
     }
@@ -221,7 +225,8 @@ function treeStats(dirBuf) {
  * Throws ScanTargetError when the root itself cannot be listed.
  */
 export function collectFiles(root, { includeDeps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
-  const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [], maxFileBytes };
+  const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [], tooDeep: [],
+    tooLong: [], maxFileBytes };
   const rootBuf = Buffer.from(resolve(root));
   for (const step of walkSteps(DISK, rootBuf, { includeDeps, exclude })) {
     if (step.rootError) throw new ScanTargetError(`cannot read directory ${fsNameToString(rootBuf)}: ${strerror(step.rootError)}`);

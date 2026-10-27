@@ -5,7 +5,7 @@
 // once it has it, what the file is to the scan. This module uses nothing of Node's.
 
 import { call, bytesText, issuesOf } from "./native.js";
-import { scanErrorIssue } from "./issue.js";
+import { scanErrorIssue, truncatedIssue } from "./issue.js";
 import { REDACT } from "./redact.js";
 import { CONFIG_SCAN_CAP } from "./configsecrets.js";
 
@@ -16,6 +16,27 @@ export const WINDOWS = PATH_SEP === "\\";
 // Source files and manifests above this are not read: SC-TRUNCATED (core.SOURCE_SIZE_CAP). The CLI takes
 // --max-source-bytes or LAZARET_MAX_SOURCE_BYTES; collectFiles() takes `maxFileBytes`.
 export const MAX_FILE_BYTES = 16_000_000;
+
+// The deepest folder the walk enters, in folders below the root: one nested deeper (a folder to walk, a __pycache__)
+// is not read, SC-TRUNCATED, and the result incomplete. Twin of core.MAX_WALK_DEPTH, whose comment says why 512.
+export const MAX_WALK_DEPTH = 512;
+export const TOO_DEEP_WHY = `it is nested deeper than ${MAX_WALK_DEPTH} folders, so it was not read`;
+
+/** Why a scan is incomplete when `n` folders were nested too deep to be read (core.tree_incomplete's words). */
+export const tooDeepReason = (n) =>
+  `${n} folder${n !== 1 ? "s" : ""} nested deeper than ${MAX_WALK_DEPTH} folders ${n !== 1 ? "were" : "was"} not read`;
+
+// A folder or a file this package cannot reach because its path is longer than the system allows (ENAMETOOLONG:
+// Linux's PATH_MAX is 4,096 bytes, macOS's 1,024; the walk and the --deps readers here go by path, where core's go
+// beneath a folder's descriptor and have no such limit) is not read: SC-TRUNCATED, and the result incomplete, never a
+// Q-UNREADABLE note in a complete result (LZ-03's re-check). Below the depth cap a tree with long names can be read
+// whole by the Python CLI and not by this one: this one then says so.
+export const TOO_LONG_WHY = "its path is longer than this system allows, so it was not read";
+/** Is `e` the system's refusal of a path that is too long? */
+export const pathTooLong = (e) => Boolean(e && e.code === "ENAMETOOLONG");
+/** Why a scan is incomplete when `n` folders or files had paths too long to read. */
+export const tooLongReason = (n) => `${n} folder${n !== 1 ? "s or files" : " or file"} ${n !== 1 ? "were" : "was"} not `
+  + `read: ${n !== 1 ? "their paths are" : "its path is"} longer than this system allows`;
 
 /** The engine's [[path, issue]] as this package's issues. */
 export const pathIssues = (pairs) => pairs.map(([path, row]) => issuesOf(path, [row])[0]);
@@ -82,14 +103,17 @@ export const skippedTreeIssue = (rel, nFiles, nBytes) => collectIssue("skipped_t
  *   names(node) -> [[name, is a folder]] of a folder's entries (no link followed), or null when it can't be listed;
  *   cargo(node, dirs) -> the names among `dirs` (folders in `node`) that hold a regular .cargo-checksum.json;
  *   strerror(e) -> why a folder could not be listed.
- * Steps: {issue}, {file: {node, rel, name, size, dep}}, {skip: {node, rel}}, {pycache: {node, rel, names}},
+ * Steps: {issue}, {file: {node, rel, name, size, dep}}, {skip: {node, rel, depth}}, {pycache: {node, rel, names}},
  * {walk: {node, rel, dep}} (a folder the walk follows, with the dependency or vendor tree it is in: false, true or
- * [kind, rel]) and {rootError} (the root could not be listed: nothing follows).
+ * [kind, rel]), {tooDeep: {node, rel}} (a folder to walk or a __pycache__ nested deeper than MAX_WALK_DEPTH below the
+ * root: not entered), {tooLong: {node, rel}} (a folder or an entry whose path the system refused as too long:
+ * pathTooLong; an entry of `list` says so with `tooLong: true`) and {rootError} (the root could not be listed: nothing
+ * follows). `depth`: the folder's, in folders below the root.
  */
 export function* walkSteps(tree, root, { includeDeps = false, exclude = [] } = {}) {
   const excluded = [...new Set(exclude)].sort();
   const seen = new Set();
-  const stack = [{ node: root, rel: "", dep: false }];
+  const stack = [{ node: root, rel: "", dep: false, depth: 0 }];
   while (stack.length) {
     const dir = stack.pop();
     let entries;
@@ -98,7 +122,8 @@ export function* walkSteps(tree, root, { includeDeps = false, exclude = [] } = {
       if (!dir.rel) { const key = tree.key(dir.node); if (key !== null) seen.add(key); }
     } catch (e) {
       if (!dir.rel) { yield { rootError: e }; return; }
-      yield { issue: unreadableIssue(dir.rel, tree.strerror(e)) };
+      yield pathTooLong(e) ? { tooLong: { node: dir.node, rel: dir.rel } }
+        : { issue: unreadableIssue(dir.rel, tree.strerror(e)) };
       continue;
     }
     const listed = entries.map((e) => (e.kind === "dir" ? [e.name, "dir", e.key, e.key !== null && seen.has(e.key)]
@@ -109,8 +134,13 @@ export function* walkSteps(tree, root, { includeDeps = false, exclude = [] } = {
       got = call("collect_dir", { dir: dir.rel, dep: dir.dep, entries: listed, excludes: excluded, includeDeps,
         windows: WINDOWS, answers });
       if (!got.need) break;
-      for (const k of got.need.lists) answers.lists.push([k, tree.names(entries[k].node)]);
-      for (const [k, dirs] of got.need.cargo) answers.cargo.push([k, tree.cargo(entries[k].node, dirs)]);
+      // (the probes reach no folder deeper than MAX_WALK_DEPTH either, as core._Root's: an entry of the folder is one
+      // deeper than it, the crates in a vendor entry two)
+      const below = dir.depth + 1;
+      for (const k of got.need.lists) answers.lists.push([k, below > MAX_WALK_DEPTH ? null : tree.names(entries[k].node)]);
+      for (const [k, dirs] of got.need.cargo) {
+        answers.cargo.push([k, below + 1 > MAX_WALK_DEPTH ? [] : tree.cargo(entries[k].node, dirs)]);
+      }
     }
     for (const key of got.seen) seen.add(key);
     const names = entries.map((e) => e.name);
@@ -118,12 +148,14 @@ export function* walkSteps(tree, root, { includeDeps = false, exclude = [] } = {
     for (const [k, action, extra] of got.do) {
       const { node, name } = entries[k];
       const rel = dir.rel ? `${dir.rel}${PATH_SEP}${name}` : name;
-      if (action === "issue") yield { issue: pathIssues([extra])[0] };
+      const depth = dir.depth + 1;
+      if (action === "issue") yield entries[k].tooLong ? { tooLong: { node, rel } } : { issue: pathIssues([extra])[0] };
       else if (action === "file") yield { file: { node, rel, name, size: entries[k].size, dep: dir.dep } };
-      else if (action === "skip") yield { skip: { node, rel } };
+      else if (action === "skip") yield { skip: { node, rel, depth } };
+      else if (depth > MAX_WALK_DEPTH) yield { tooDeep: { node, rel } };       // (a walk or a __pycache__)
       else if (action === "pycache") yield { pycache: { node, rel, names } };
       else {
-        const walk = { node, rel, dep: dir.dep || (Array.isArray(extra[1]) ? [extra[1][0], rel] : extra[1]) };
+        const walk = { node, rel, depth, dep: dir.dep || (Array.isArray(extra[1]) ? [extra[1][0], rel] : extra[1]) };
         push.push(walk);
         yield { walk };                 // (a folder followed: nothing to take)
       }
@@ -134,9 +166,12 @@ export function* walkSteps(tree, root, { includeDeps = false, exclude = [] } = {
 
 /**
  * Take a step of walkSteps into `col` (collectFiles' collection): a finding, a file collected (collectEntry), a
- * pruned tree counted (Q-SKIPPED-TREE) or a __pycache__ checked. `tree` as walkSteps', and:
+ * pruned tree counted (Q-SKIPPED-TREE), a __pycache__ checked, a folder too deep to enter (SC-TRUNCATED, and its rel
+ * in col.tooDeep: the result is incomplete) or one whose path is too long to read (SC-TRUNCATED, its rel in
+ * col.tooLong: the result is incomplete). `tree` as walkSteps', and:
  *   entry(node, rel, name, size, dep) -> collectEntry's entry for a file;
- *   stats(node) -> [files, bytes] of a pruned tree;
+ *   stats(node, depth) -> [files, bytes] of a pruned tree `depth` folders below the root (no folder deeper than
+ *     MAX_WALK_DEPTH listed);
  *   list(node, {pycache: true}) -> a __pycache__'s entries (any reparse point a link); head(node, n) -> a file's first
  *     n bytes (throws when it can't be read).
  * `ioError(e)`: whether an error is the I/O's (the file is Q-UNREADABLE; anything else: its scan failed).
@@ -151,19 +186,38 @@ export function takeStep(step, col, tree, { ioError = () => false, strerror = (e
       col.binaryIssues.push(ioError(e) ? unreadableIssue(rel, strerror(e)) : scanErrorIssue(rel, e));
     }
   } else if (step.skip) {
-    const [nFiles, nBytes] = tree.stats(step.skip.node);
+    const [nFiles, nBytes] = tree.stats(step.skip.node, step.skip.depth);
     col.skippedIssues.push(skippedTreeIssue(step.skip.rel, nFiles, nBytes));
+  } else if (step.tooDeep) {
+    col.binaryIssues.push(truncatedIssue(step.tooDeep.rel, TOO_DEEP_WHY));
+    (col.tooDeep ??= []).push(step.tooDeep.rel);
+  } else if (step.tooLong) {
+    tooLongIssue(col, step.tooLong.rel);
   } else if (step.pycache) {
-    try { checkPycache(tree, step.pycache, col.binaryIssues, strerror); } catch (e) {
+    try { checkPycache(tree, step.pycache, col, strerror); } catch (e) {
       col.binaryIssues.push(scanErrorIssue(step.pycache.rel, e));
     }
   }
 }
 
-/** __pycache__ is not source-scanned; every .pyc directly inside is checked (the engine's: collect_pycache). */
-function checkPycache(tree, { node, rel, names }, issues, strerror) {
+/** A folder or a file whose path is too long to read: SC-TRUNCATED, and its rel in col.tooLong (incomplete). */
+function tooLongIssue(col, rel) {
+  col.binaryIssues.push(truncatedIssue(rel, TOO_LONG_WHY));
+  (col.tooLong ??= []).push(rel);
+}
+
+/** __pycache__ is not source-scanned; every .pyc directly inside is checked (the engine's: collect_pycache). One, or
+ * the folder, whose path is too long to read is SC-TRUNCATED (col.tooLong). */
+function checkPycache(tree, { node, rel, names }, col, strerror) {
+  const issues = col.binaryIssues;
   let entries;
-  try { entries = tree.list(node, { pycache: true }); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); return; }
+  try { entries = tree.list(node, { pycache: true }); } catch (e) {
+    if (pathTooLong(e)) tooLongIssue(col, rel);
+    else issues.push(unreadableIssue(rel, strerror(e)));
+    return;
+  }
+  for (const e of entries) if (e.tooLong) tooLongIssue(col, `${rel}${PATH_SEP}${e.name}`);
+  entries = entries.filter((e) => !e.tooLong);
   const listed = entries.map((e) => [e.name, e.kind, e.kind === "file" ? e.size : e.kind === "link" ? e.target
     : e.kind === "special" ? e.code : e.why]);
   const files = new Map(entries.filter((e) => e.kind === "file").map((e) => [e.name, e.node]));

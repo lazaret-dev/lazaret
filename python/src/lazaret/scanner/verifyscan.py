@@ -36,15 +36,22 @@ RANK = {secretverify.LIVE: 0, secretverify.UNKNOWN: 1, secretverify.REJECTED: 2}
 
 def lines_of(root, rel, wanted):
     """{n: text} of the lines `wanted` (1-based) of the file `rel` under `root`, read and numbered as the scan read it; {}
-    when it cannot be read so (not a regular file, under a symbolic link, outside the root, larger than the scan reads)."""
-    path = os.path.join(root, rel)
+    when it cannot be read so (not a regular file, under a symbolic link, outside the root, larger than the scan reads).
+    The file is reached from the root's descriptor a folder at a time, no link followed (core._Root, LZ-03): a part of
+    its path that is a link now is not read through. `root` may be a core._Root."""
+    if os.path.isabs(rel):
+        return {}
     try:
-        top = os.path.realpath(root)
-        if os.path.commonpath([top, os.path.realpath(path)]) != top:
-            return {}
-        data = core._read_prefix(path, core.SOURCE_SIZE_CAP + 1)
+        tree, own = core._as_root(root)
+    except OSError:
+        return {}
+    try:
+        data = tree.read(tree.parts(rel), core.SOURCE_SIZE_CAP + 1)
     except (OSError, ValueError):
         return {}
+    finally:
+        if own:
+            tree.close()
     if len(data) > core.SOURCE_SIZE_CAP:
         return {}
     ext = os.path.splitext(rel)[1].lower()

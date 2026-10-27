@@ -22,7 +22,7 @@ import { HOOK_COMMANDS } from "./lib/supplychain.js";
 import { readBounded, strerror, normpathRel } from "./lib/fs.js";
 import { truncatedIssue, scanErrorIssue } from "./lib/issue.js";
 import { normalizeNewlines, decodeMember } from "./lib/encoding.js";
-import { MAX_FILE_BYTES } from "./lib/collect.js";
+import { MAX_FILE_BYTES, MAX_WALK_DEPTH, pathTooLong } from "./lib/collect.js";
 import { looksBinary, HEADER_SAMPLE, pyExt } from "./lib/binary.js";
 import { REDACT } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";
@@ -60,12 +60,19 @@ const ROUNDS = 4096;
  * hook's manifest is SC-TRUNCATED). core._DEPS_UNANSWERED */
 const UNANSWERED = { exhausted: ["risk", "agent", "obfuscated", "spawned"] };
 
+/** Is the folder `parts` (names below the root) too deep to reach? As the walk, the readers open no folder deeper
+ * than MAX_WALK_DEPTH (core._Root: "it is nested deeper than 512 folders"). */
+const tooDeep = (parts) => parts.length > MAX_WALK_DEPTH;
+const TOO_DEEP = `it is nested deeper than ${MAX_WALK_DEPTH} folders`;
+
 /**
  * What a --deps scan knows of the tree, to answer what the engine's --deps calls ask (deps.rs): the files it read
  * and, for the others, the disk under the scan root — regular files only, reached through no link and no directory
  * an exclusion prunes. `pruned`: the directories the walk pruned, when nothing in them is to be read either (a
  * project's own hooks: projectHookChecks); `project`: a file a hook runs is then read, not scanned. Twin of
- * core._DependencyTree.
+ * core._DependencyTree. A folder or a file whose path the system refuses as too long (pathTooLong) is noted in
+ * `tooLong` (its display path; the caller's list, given as an option): the scan says it was not read (SC-TRUNCATED)
+ * and is incomplete (tooLongIssues).
  */
 class DependencyTree {
   constructor(root, files, manifests, exclude, maxFileBytes, pruned = [], project = false) {
@@ -78,6 +85,12 @@ class DependencyTree {
     this.project = project;
     this.regular = new Map();
     this.read = new Map();                        // rel -> [findings, the file as scanned or null, text]
+    this.tooLong = [];
+  }
+
+  /** `rel` ("/"-separated) could not be reached: its path is too long for this system (when `e` says so). */
+  noteLong(rel, e) {
+    if (pathTooLong(e)) this.tooLong.push(native(rel));
   }
 
   isFile(rel) {
@@ -89,10 +102,10 @@ class DependencyTree {
   onDisk(rel) {
     const parts = rel.split("/");
     if (parts.slice(0, -1).some((p) => this.excludes.has(p) || p === "" || p === "." || p === "..")) return false;
-    if (this.inPruned(parts)) return false;
-    let path = this.root;
+    if (this.inPruned(parts) || tooDeep(parts.slice(0, -1))) return false;
+    let path = this.root, k = 0;
     try {
-      for (let k = 0; k < parts.length; k++) {
+      for (; k < parts.length; k++) {
         path = join(path, parts[k]);
         const st = lstatSync(path);
         if (st.isSymbolicLink()) return false;
@@ -100,7 +113,9 @@ class DependencyTree {
           if (!st.isDirectory()) return false;
         } else return st.isFile();
       }
-    } catch { /* missing, unreadable, or a name the OS refuses */ }
+    } catch (e) {                                 // (missing, unreadable, or a name the OS refuses)
+      this.noteLong(parts.slice(0, k + 1).join("/"), e);
+    }
     return false;
   }
 
@@ -158,9 +173,10 @@ class DependencyTree {
     for (const [path, cap] of need.head) {
       let got = null;
       try {
+        if (tooDeep(path.split("/").slice(0, -1))) throw new Error(TOO_DEEP);      // (it can't be read: null)
         const data = readBounded(join(this.root, ...path.split("/")), cap + 1);
         got = [data.subarray(0, cap).toString("utf8"), data.length > cap];
-      } catch { /* (it can't be read: null) */ }
+      } catch (e) { this.noteLong(path, e); }       // (it can't be read: null)
       known.head.push([path, cap, got]);
     }
   }
@@ -168,14 +184,18 @@ class DependencyTree {
   /** [[name, a real directory]] of a directory of the tree, or null when it can't be listed (no link is followed to
    * tell a directory). */
   entries(folder) {
+    if (folder && tooDeep(folder.split("/"))) return null;
     const where = folder ? join(this.root, ...folder.split("/")) : this.root;
     let names;
-    try { names = readdirSync(where).sort(cmpCodePoints); } catch { return null; }
+    try { names = readdirSync(where).sort(cmpCodePoints); } catch (e) { this.noteLong(folder, e); return null; }
     return names.map((name) => {
       try {
         const st = lstatSync(join(where, name));
         return [name, st.isDirectory() && !st.isSymbolicLink()];
-      } catch { return [name, false]; }
+      } catch (e) {
+        this.noteLong(folder ? `${folder}/${name}` : name, e);
+        return [name, false];
+      }
     });
   }
 
@@ -185,29 +205,34 @@ class DependencyTree {
     const prefix = folder + "/";
     const out = new Set([...this.sources.keys(), ...this.manifests.keys()].filter((rel) => rel.startsWith(prefix)));
     const parts = folder.split("/");
-    if (parts.some((p) => this.excludes.has(p) || p === "" || p === "." || p === "..") || this.inPruned([...parts, ""])) {
+    if (parts.some((p) => this.excludes.has(p) || p === "" || p === "." || p === "..") || this.inPruned([...parts, ""])
+        || tooDeep(parts.slice(0, -1))) {
       return [...out].sort(cmpCodePoints);
     }
-    let path = this.root;
+    let path = this.root, k = 0;
     try {                                         // (the folder itself: a real directory, reached through no link)
-      for (const part of parts) {
-        path = join(path, part);
+      for (; k < parts.length; k++) {
+        path = join(path, parts[k]);
         const st = lstatSync(path);
         if (!st.isDirectory() || st.isSymbolicLink()) return [...out].sort(cmpCodePoints);
       }
-    } catch { return [...out].sort(cmpCodePoints); }
-    const stack = [[path, folder]];
+    } catch (e) {
+      this.noteLong(parts.slice(0, k + 1).join("/"), e);
+      return [...out].sort(cmpCodePoints);
+    }
+    const stack = [[path, folder, parts.length]];
     while (stack.length) {
-      const [where, rel] = stack.pop();
+      const [where, rel, depth] = stack.pop();
+      if (depth > MAX_WALK_DEPTH) continue;
       let names;
-      try { names = readdirSync(where); } catch { continue; }
+      try { names = readdirSync(where); } catch (e) { this.noteLong(rel, e); continue; }
       for (const name of names) {
         const sub = `${rel}/${name}`;
         let st;
-        try { st = lstatSync(join(where, name)); } catch { continue; }
+        try { st = lstatSync(join(where, name)); } catch (e) { this.noteLong(sub, e); continue; }
         if (st.isSymbolicLink()) continue;
         if (st.isDirectory()) {
-          if (!this.excludes.has(name) && !this.pruned.has(sub)) stack.push([join(where, name), sub]);
+          if (!this.excludes.has(name) && !this.pruned.has(sub)) stack.push([join(where, name), sub, depth + 1]);
         } else if (st.isFile()) out.add(sub);
       }
     }
@@ -229,11 +254,16 @@ class DependencyTree {
   readScript(rel) {
     const disp = native(rel);
     const cap = this.maxFileBytes;
+    if (tooDeep(rel.split("/").slice(0, -1))) {
+      return [[truncatedIssue(disp, `it runs at install time but could not be read (${TOO_DEEP})`)], null, null];
+    }
     let data;
     try {
       data = readBounded(join(this.root, ...rel.split("/")), cap + 1);
     } catch (e) {
-      return [[truncatedIssue(disp, `it runs at install time but could not be read (${strerror(e)})`)], null, null];
+      this.noteLong(rel, e);
+      const why = pathTooLong(e) ? "its path is longer than this system allows" : strerror(e);
+      return [[truncatedIssue(disp, `it runs at install time but could not be read (${why})`)], null, null];
     }
     if (data.length > cap) {
       return [[truncatedIssue(disp, `it runs at install time but is larger than the ${withCommas(cap)}-byte file limit`)],
@@ -282,8 +312,10 @@ const hookRows = (hooks) => hooks.map((i) => [posix(i.file), i.line, i.sev, HOOK
  * manifests in `issues` in place and returns { issues, files }: the findings
  * to add and the files read and scanned here. Twin of core.dependency_checks.
  */
-export function dependencyChecks(root, files, manifests, issues, { exclude = [], maxFileBytes = MAX_FILE_BYTES, pool = null } = {}) {
+export function dependencyChecks(root, files, manifests, issues,
+  { exclude = [], maxFileBytes = MAX_FILE_BYTES, pool = null, tooLong = [] } = {}) {
   const tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
+  tree.tooLong = tooLong;
   const depManifests = new Set(manifests.filter((m) => m.dep).map((m) => m.path));
   const hooks = issues.filter((i) => i.rule === "SC-INSTALL-HOOK" && HOOK_COMMANDS.get(i) && depManifests.has(i.file));
   const out = [], extra = [];
@@ -395,13 +427,19 @@ export function packageReaderIssues(answer, order) {
  * skill runs, RA-3): read through no link and into nothing an exclusion prunes (DependencyTree), at most
  * `maxFileBytes`, as text; null for another (binary, too large, missing). Twin of core._disk_reader.
  */
-export function diskReader(root, files, manifests, { exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+export function diskReader(root, files, manifests, { exclude = [], maxFileBytes = MAX_FILE_BYTES, tooLong = [] } = {}) {
   let tree = null;                                                    // (made when first asked)
   return (rel) => {
-    if (tree === null) tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
+    if (tree === null) {
+      tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
+      tree.tooLong = tooLong;
+    }
     if (!tree.isFile(rel)) return null;
     let data;
-    try { data = readBounded(join(tree.root, ...rel.split("/")), maxFileBytes + 1); } catch { return null; }
+    try { data = readBounded(join(tree.root, ...rel.split("/")), maxFileBytes + 1); } catch (e) {
+      tree.noteLong(rel, e);
+      return null;
+    }
     if (data.length > maxFileBytes || looksBinary(data.subarray(0, 2048))) return null;
     return new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
   };
@@ -412,7 +450,10 @@ export function diskReader(root, files, manifests, { exclude = [], maxFileBytes 
 function vendorText(tree, rel, cap) {
   if (!tree.isFile(rel)) return null;
   let data;
-  try { data = readBounded(join(tree.root, ...rel.split("/")), cap + 1); } catch { return null; }
+  try { data = readBounded(join(tree.root, ...rel.split("/")), cap + 1); } catch (e) {
+    tree.noteLong(rel, e);
+    return null;
+  }
   return data.length > cap ? null : new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
 }
 
@@ -422,15 +463,16 @@ const vendoredModules = (text) => (text ? goVendoredModules(text) : []);
 /** [[rel, text]] of the .c and .h files directly in `folder` (a vendored Go package's directory, "/"-separated):
  * what the Go reader reads with its cgo preambles. Regular files only, through no link (core._cgo_texts). */
 function cgoTexts(tree, folder, exts) {
+  if (folder && tooDeep(folder.split("/"))) return [];
   const where = folder ? join(tree.root, ...folder.split("/")) : tree.root;
   let names;
-  try { names = readdirSync(where); } catch { return []; }
+  try { names = readdirSync(where); } catch (e) { tree.noteLong(folder, e); return []; }
   const out = [];
   for (const name of names.filter((n) => exts.includes(pyExt(n).toLowerCase())).sort(cmpCodePoints)) {
     const rel = folder ? `${folder}/${name}` : name;
     if (!tree.isFile(rel)) continue;
     let data;
-    try { data = readBounded(join(where, name), tree.maxFileBytes + 1); } catch { continue; }
+    try { data = readBounded(join(where, name), tree.maxFileBytes + 1); } catch (e) { tree.noteLong(rel, e); continue; }
     if (data.length <= tree.maxFileBytes && !looksBinary(data.subarray(0, HEADER_SAMPLE))) {
       out.push([rel, new TextDecoder("utf-8", { ignoreBOM: true }).decode(data)]);
     }
@@ -551,14 +593,17 @@ export function depFileIssues(path, content, lang = null, names = null) {
 /**
  * The follow of a project's own install hooks, after the manifests were scanned: escalates the SC-INSTALL-HOOK
  * findings of the package.json files that are not a dependency's in `issues` in place and returns the findings to
- * add. `pruned`: the directories the walk pruned. Twin of core.project_hook_checks.
+ * add. `pruned`: the directories the walk pruned; `tooLong`: where the paths too long to read are noted (as for
+ * dependencyChecks and diskReader: DependencyTree). Twin of core.project_hook_checks.
  */
-export function projectHookChecks(root, files, manifests, issues, { exclude = [], pruned = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+export function projectHookChecks(root, files, manifests, issues,
+  { exclude = [], pruned = [], maxFileBytes = MAX_FILE_BYTES, tooLong = [] } = {}) {
   const own = new Set(manifests.filter((m) => !m.dep && m.kind === "package.json").map((m) => m.path));
   const hooks = issues.filter((i) => i.rule === "SC-INSTALL-HOOK" && HOOK_COMMANDS.get(i) && own.has(i.file));
   const out = [];
   if (!hooks.length) return out;
   const tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes, pruned, true);
+  tree.tooLong = tooLong;
   try {
     tree.take(tree.ask("deps_hooks", { project: true, hooks: hookRows(hooks), redact: REDACT.on, neumaier: false }),
       hooks, out);

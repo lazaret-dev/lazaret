@@ -50,11 +50,14 @@ def tree(files):
 
 
 def refuse_scandir(target):
-    """os.scandir that fails with EACCES for `target` only."""
+    """os.scandir that fails with EACCES for `target` only: by its path, or by a descriptor of it (the MCP tools list
+    the directory they opened beneath its root: LZ-03)."""
     real = os.scandir
+    want = os.path.realpath(target)
 
     def scandir(path="."):
-        if os.fspath(path) == target:
+        where = lazaret._opened_path(path) if isinstance(path, int) else os.fspath(path)
+        if where == target or (isinstance(path, int) and where and os.path.realpath(where) == want):
             raise PermissionError(errno.EACCES, "Permission denied", target)
         return real(path)
     return mock.patch("os.scandir", side_effect=scandir)
@@ -146,10 +149,11 @@ class ScanFilesUnreadableTests(unittest.TestCase):
         root = tree({"a.py": "x = 1\n"})
         path = os.path.join(root, "a.py")
         err = PermissionError(errno.EACCES, "Permission denied")
-        with mock.patch.object(lazaret, "_read_prefix", side_effect=err):
-            out = server.tool_scan_files({"paths": [path]})
-        self.check_not_read(out, path, "cannot read the file (Permission denied)")
-        self.assertEqual(out["totalIssues"], 1)
+        for where in ("_open_beneath", "_read_fd"):     # (the open beneath its root, LZ-03, and the read of it)
+            with self.subTest(where=where), mock.patch.object(lazaret, where, side_effect=err):
+                out = server.tool_scan_files({"paths": [path]})
+            self.check_not_read(out, path, "cannot read the file (Permission denied)")
+            self.assertEqual(out["totalIssues"], 1)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs named pipes")
     def test_fifo_and_directory(self):
@@ -211,15 +215,15 @@ class PreflightBudgetTests(unittest.TestCase):
 
     def test_vendor_without_marker_and_pth_files_are_refused_unread(self):
         read = []
-        real = lazaret._read_prefix
+        real = lazaret._read_fd                 # (every read under the tree: from the root's descriptor, LZ-03)
 
-        def counting(path, limit):
-            data = real(path, limit)
+        def counting(fd, limit, st=None):
+            data = real(fd, limit, st)
             read.append(len(data))
             return data
         for sub, ext in (("vendor", ".js"), ("lib", ".pth")):
             root = byte_tree({f"{sub}/f{i}{ext}": 50_000 for i in range(3)})
-            with self.subTest(sub=sub, ext=ext), mock.patch.object(lazaret, "_read_prefix", counting):
+            with self.subTest(sub=sub, ext=ext), mock.patch.object(lazaret, "_read_fd", counting):
                 read.clear()
                 out = self.scan(root, 100_000)
                 self.assertTrue(self.refused(out), out.get("incompleteReason"))

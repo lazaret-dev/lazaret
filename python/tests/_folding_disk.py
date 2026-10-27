@@ -4,10 +4,11 @@ test.
 macOS's disk (APFS, case-insensitive by default) and Windows' compare names as one when they differ only in case or
 Unicode form, and keep a name as it was first written: a folder holds one of `a.js` and `A.js`. Under
 `folding_disk(root)` the calls a writer makes under `root` (os.mkdir, and through it os.makedirs; os.stat, os.lstat;
-open; os.link) find a name that folds as one already in its folder, as such a disk does, so a Linux run sees what a
-Mac sees: mkdir, an exclusive create and a hard link fail on it, and open(..., "wb") writes over it under its first
-name. Names fold as `unicodedata`'s NFD, then str.casefold() (APFS's reading, near enough for test names), or as
-`fold` says: a disk that folds names some other way. Paths outside `root` are left alone.
+open; os.link), and the scan's reads beneath a folder's descriptor there (os.stat, os.lstat, os.open, os.readlink
+with dir_fd: core._Root), find a name that folds as one already in its folder, as such a disk does, so a Linux run
+sees what a Mac sees: mkdir, an exclusive create and a hard link fail on it, and open(..., "wb") writes over it under
+its first name. Names fold as `unicodedata`'s NFD, then str.casefold() (APFS's reading, near enough for test names),
+or as `fold` says: a disk that folds names some other way. Paths outside `root` are left alone.
 
     with folding_disk(root):
         sources.checkout(spec, dest=root, ...)"""
@@ -45,7 +46,7 @@ def tells_names_apart(folder):
 def folding_disk(root, fold=apfs_fold):
     roots = {os.path.abspath(root), os.path.realpath(root)}      # (as given, and behind its links: macOS's /var)
     real_open, real_mkdir, real_stat, real_lstat, real_listdir = builtins.open, os.mkdir, os.stat, os.lstat, os.listdir
-    real_link = os.link
+    real_link, real_os_open, real_readlink = os.link, os.open, os.readlink
 
     def resolve(path):
         if not isinstance(path, (str, os.PathLike)) or isinstance(path, bytes):
@@ -66,14 +67,42 @@ def folding_disk(root, fold=apfs_fold):
             at = os.path.join(at, next((n for n in names if fold(n) == key), part))
         return at
 
+    def at_folder(name, dir_fd):
+        """`name` relative to the folder open at `dir_fd` (the scan's walk, core._Root, opens beneath a folder's
+        descriptor), folded against that folder's names when it is under `root`: one name, as the disk would."""
+        if not isinstance(name, str) or os.sep in name or (os.altsep and os.altsep in name):
+            return name
+        try:
+            where = real_readlink(f"/proc/self/fd/{dir_fd}")         # (Linux: where this runs as a stand-in)
+        except OSError:
+            return name
+        if not any(where == r or where.startswith(r + os.sep) for r in roots):
+            return name
+        try:
+            names = real_listdir(dir_fd)
+        except OSError:
+            return name
+        key = fold(name)
+        return next((n for n in names if fold(n) == key), name)
+
+    def at(path, dir_fd):
+        return resolve(path) if dir_fd is None else at_folder(path, dir_fd)
+
     def mkdir(path, mode=0o777, *, dir_fd=None):
-        return real_mkdir(resolve(path), mode, dir_fd=dir_fd)
+        return real_mkdir(at(path, dir_fd), mode, dir_fd=dir_fd)
 
     def stat(path, *, dir_fd=None, follow_symlinks=True):
-        return real_stat(resolve(path), dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        return real_stat(at(path, dir_fd), dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
     def lstat(path, *, dir_fd=None):
-        return real_lstat(resolve(path), dir_fd=dir_fd)
+        return real_lstat(at(path, dir_fd), dir_fd=dir_fd)
+
+    def os_open(path, flags, mode=0o777, *, dir_fd=None):
+        # (by path, os.open is the system's: the writers create with open(); beneath a descriptor, the readers')
+        return real_os_open(path if dir_fd is None else at_folder(path, dir_fd), flags, mode, dir_fd=dir_fd)
+
+    def readlink(path, *, dir_fd=None):
+        return real_readlink(path if dir_fd is None else at_folder(path, dir_fd), dir_fd=dir_fd)
 
     def open_(file, *args, **kwargs):
         return real_open(resolve(file), *args, **kwargs)
@@ -84,5 +113,6 @@ def folding_disk(root, fold=apfs_fold):
 
     with mock.patch.object(os, "mkdir", mkdir), mock.patch.object(os, "stat", stat), \
             mock.patch.object(os, "lstat", lstat), mock.patch.object(builtins, "open", open_), \
-            mock.patch.object(os, "link", link):
+            mock.patch.object(os, "link", link), mock.patch.object(os, "open", os_open), \
+            mock.patch.object(os, "readlink", readlink):
         yield

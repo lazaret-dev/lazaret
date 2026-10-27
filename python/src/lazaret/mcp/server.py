@@ -33,7 +33,26 @@ Environment:
     The same goes for a directory with nothing Lazaret can scan and for a
     file named to scan_files that can't be read; a directory that is missing
     or can't be listed is a tool error.
+
+A path is resolved once and checked against the allowed roots
+(ToolContext.check_path), and what is read is opened beneath the root it was
+found under, a directory at a time with no link followed (LZ-03, the external
+security report of Oct 27, CWE-367). scan_files opens each file so
+(core._open_beneath). scan_directory and quality_gate open the directory so,
+and the project walk and every reader after it reach each folder and file
+from that directory's descriptor (core._Root): the budget's count, the walk,
+the --deps and install-hook readers, the vendored-code readers. What the
+check or the walk found is held to what it found: a folder that is a link,
+no folder or gone, and a file that is a link, another kind of file, another
+file or gone when it is opened, looked at or listed again, is not read: that
+file or subtree (or the whole directory, when the target itself changed) is
+SC-TRUNCATED and the call incomplete. Whether the target exists and is a
+directory is its open beneath the root that says, never a check by its path.
+On Windows, which has no such open, every file read is opened and kept only
+when the final path of its handle is under the root, and every directory is
+checked so before it is listed (docs: README, "Limits and safety").
 """
+import errno
 import json
 import os
 import queue
@@ -307,19 +326,21 @@ class ToolContext:
         return self.roots
 
     def check_path(self, path):
-        """Tool error for a path outside the allowed roots (symlinks resolved)."""
+        """Tool error for a path outside the allowed roots (symlinks resolved) -> (the root it is under, its real
+        path): the one resolution of the path, which the file tools open beneath that root (core._open_beneath,
+        LZ-03); the root None where no root restricts the call."""
         if not isinstance(path, str) or not path or "\x00" in path:
             raise ValueError("path must be a non-empty string")
         roots = self.allowed()
         if isinstance(roots, RootsRefused):
             raise ValueError(f"no directory may be scanned: {roots.reason} {ROOTS_HELP}")
-        if not roots:
-            return
         real = os.path.normcase(os.path.realpath(path))
+        if not roots:
+            return None, real
         for root in roots:
             try:
                 if os.path.commonpath([real, root]) == root:
-                    return
+                    return root, real
             except ValueError:            # different drives
                 continue
         raise ValueError(f"path is outside the allowed roots ({self.roots_source}): {path}")
@@ -358,7 +379,7 @@ def result_summary(res, max_issues):
 _MANIFEST_NAMES = lazaret.MANIFEST_NAMES
 
 
-def _preflight(root, exclude, include_deps, ctx):
+def _preflight(tree, exclude, include_deps, ctx):
     """Count what scan_project will read before it reads it; stops at the
     caps (and on cancel / deadline) so a huge tree costs a bounded walk.
     -> None when within budget, else the reason.
@@ -371,25 +392,26 @@ def _preflight(root, exclude, include_deps, ctx):
     .venv / env only with a marker inside (a vendor/ without one is
     first-party code, and collect reads it). Sources, manifests and .pth
     files are read whole, so they count toward the byte budget; compiled
-    artifacts count as files."""
+    artifacts count as files. `tree` is the core._Root the scan reads (LZ-03):
+    the count is of the same folders, reached the same way; a folder that
+    changed meanwhile is left to the walk, which reports it."""
     prune = set(lazaret.ALWAYS_PRUNE_DIRS) | set(exclude) | {lazaret.PYCACHE_DIR}
     n_files = n_bytes = 0
     seen = set()
     try:
-        st = os.stat(root)
+        st = tree.lstat(())
         if st.st_ino:
             seen.add((st.st_dev, st.st_ino))
     except OSError:
         pass
-    stack = [(root, False)]
+    stack = [((), False)]
     while stack:
         ctx.check()
         if ctx.expired():
             return f"time budget of {ctx.max_seconds:g} s spent while listing files"
-        path, in_dep = stack.pop()
+        parts, in_dep = stack.pop()
         try:
-            with os.scandir(path) as it:
-                entries = list(it)
+            entries = tree.listdir(parts)
         except OSError:
             continue
         for e in entries:
@@ -407,10 +429,13 @@ def _preflight(root, exclude, include_deps, ctx):
                     if (st.st_dev, st.st_ino) in seen:
                         continue                          # filesystem loop
                     seen.add((st.st_dev, st.st_ino))
-                dep = in_dep or lazaret._dep_tree_kind(e.name, e.path)
+                at = parts + (e.name,)
+                if len(at) > lazaret.MAX_WALK_DEPTH:
+                    continue                              # (the walk does not enter it either: SC-TRUNCATED there)
+                dep = in_dep or lazaret._dep_tree_kind(e.name, (tree, at))
                 if dep and not in_dep and not include_deps:
                     continue                              # pruned dependency tree
-                stack.append((e.path, dep))
+                stack.append((at, dep))
                 continue
             if not stat.S_ISREG(mode):
                 continue
@@ -429,23 +454,86 @@ def _preflight(root, exclude, include_deps, ctx):
     return None
 
 
-def _check_scan_target(path):
-    """Tool error (ValueError) unless `path` is a directory this process can
-    list. The CLI exits 2 for such a target; a tool caller must never get an
-    empty clean result for it."""
+def _check_listable(tree):
+    """OSError unless the directory `tree` (a core._Root) holds can be listed: the CLI exits 2 for such a target, and a
+    tool caller must never get an empty clean result for it. It is listed through its descriptor, opened beneath its
+    root (LZ-03's review: a check by path follows a link swapped in after the check, and its error told the caller
+    whether a path outside the roots exists)."""
+    with os.scandir(tree.fd if lazaret._ANCHORED_OPEN else tree.path):
+        pass
+
+
+def _target_error(path, exc):
+    """The tool error for a directory to scan that cannot be opened."""
+    if isinstance(exc, FileNotFoundError):
+        return ValueError(f"Not a directory: {path} (it does not exist)")
+    if isinstance(exc, NotADirectoryError):
+        return ValueError(f"Not a directory: {path}")
+    return ValueError(f"Cannot read directory {path}: {exc.strerror or type(exc).__name__}")
+
+
+def _not_scanned(path, reason):
+    """The result of a directory call that read nothing: incomplete, one SC-TRUNCATED finding."""
+    res = lazaret.build_result(path, [], [lazaret.truncated_issue(".", f"directory not scanned: {reason}")])
+    res.update(incomplete=True, incompleteReason=reason)
+    return res
+
+
+#: why a directory checked under its root is not scanned: it is no directory beneath that root now
+_TARGET_CHANGED = ("it changed after it was checked (a symbolic link, a file or nothing where the directory was), "
+                   "so it was not read")
+
+
+def _open_target(path, checked):
+    """The directory to scan as a core._Root (LZ-03): opened beneath the root check_path found it under (`checked`:
+    (root, its real path)), a directory at a time with no link followed (core._open_beneath), so the walk starts
+    from the directory that was checked and stays beneath it; without a root to stay under (`checked` None, or no
+    root restricts the call), `path` opened as it is (O_DIRECTORY). Where there is no such open (Windows), the real
+    path read by path, every folder on its way lstat'ed (no link) and every folder and file read checked to be under it
+    (core._Root). This open is the existence check too (LZ-03's review: no check by path first): FileNotFoundError for
+    a target that is not there, NotADirectoryError for one that is no directory, another OSError when it cannot be
+    opened; None when it changed after it was checked (a link on its way now, or the root itself a link)."""
+    root, real = checked if checked is not None else (None, None)
+    if root is None:
+        return lazaret._Root(path)
+    if not lazaret._ANCHORED_OPEN:
+        rel = os.path.relpath(real, root)
+        where = root
+        for part in ([] if rel == os.curdir else rel.split(os.sep)):
+            where = os.path.join(where, part)
+            st = os.lstat(where)                    # (FileNotFoundError: not there)
+            if stat.S_ISLNK(st.st_mode) or lazaret._is_reparse_point(st):
+                return None
+            if not stat.S_ISDIR(st.st_mode):
+                if where != real:
+                    return None                     # (a file on its way: it changed)
+                raise NotADirectoryError(errno.ENOTDIR, "Not a directory", path)
+        try:
+            return lazaret._Root(real, within=real)
+        except (lazaret._PathChanged, lazaret._OutsideRoot):
+            return None
     try:
-        with os.scandir(path):
-            pass
-    except FileNotFoundError:
-        raise ValueError(f"Not a directory: {path} (it does not exist)") from None
-    except NotADirectoryError:
-        raise ValueError(f"Not a directory: {path}") from None
-    except OSError as exc:
-        raise ValueError(f"Cannot read directory {path}: "
-                         f"{exc.strerror or type(exc).__name__}") from None
+        fd = lazaret._open_beneath(root, real)
+    except (lazaret._PathChanged, lazaret._OutsideRoot):
+        return None
+    except lazaret._NotRegularFile:                 # (a socket: no directory)
+        raise NotADirectoryError(errno.ENOTDIR, "Not a directory", path) from None
+    except OSError as exc:              # (the root itself: a link or no directory now, O_NOFOLLOW | O_DIRECTORY)
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+            return None
+        raise
+    try:
+        isdir = stat.S_ISDIR(os.fstat(fd).st_mode)
+    except BaseException:
+        os.close(fd)
+        raise
+    if not isdir:
+        os.close(fd)
+        raise NotADirectoryError(errno.ENOTDIR, "Not a directory", path)
+    return lazaret._Root(path, fd=fd, own=True)
 
 
-def run_project_scan(path, exclude=None, include_deps=False, ctx=None):
+def run_project_scan(path, exclude=None, include_deps=False, ctx=None, checked=None):
     """The CLI's project pipeline for the MCP tools: core.scan_project(), the
     same function `lazaret <dir>` runs (collection, scan_file per file,
     package.json / binding.gyp, skipped-tree notes, the guarded cross-file
@@ -456,37 +544,53 @@ def run_project_scan(path, exclude=None, include_deps=False, ctx=None):
     that stops early returns what it scanned with "incomplete": true and an
     SC-TRUNCATED finding, so it can never pass the gate.
 
+    `checked`: (the allowed root, the real path) as ctx.check_path gave them
+    for `path`. The directory is opened beneath that root and every read
+    starts from its descriptor (_open_target, core._Root; LZ-03): a target
+    that changed after the check is not scanned, and a folder or file that
+    changes during the scan is not read (SC-TRUNCATED; incomplete).
+
     A target that is missing or can't be listed is a tool error (ValueError);
     one with nothing Lazaret can scan (only Go or Markdown files, or none) is
     "incomplete" with an SC-TRUNCATED finding — never a clean pass."""
     ctx = ctx or _ctx()
     exclude = list(exclude or [])
-    _check_scan_target(path)
-    over = _preflight(path, exclude, include_deps, ctx)
-    if over:
-        res = lazaret.build_result(path, [], [lazaret.truncated_issue(
-            ".", f"directory not scanned: {over}; narrow the path or raise the MCP caps")])
-        res.update(incomplete=True, incompleteReason=over, notes=[])
-        return res
-
-    def should_stop():
-        ctx.check()                      # raises when the call was cancelled
-        if ctx.expired():
-            return f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
-        return None
-
     try:
-        res = lazaret.scan_project(path, exclude, include_deps=include_deps,
-                                   should_stop=should_stop)
-    except lazaret.ScanTargetError as exc:
-        _check_scan_target(path)         # it vanished or became unreadable meanwhile
-        # Nothing to scan: the CLI exits 2 ("usage error"). For a tool caller
-        # "no findings" would read as "checked and clean", so the result is
-        # incomplete and fails the gate.
-        reason = str(exc)
-        res = lazaret.build_result(path, [], [lazaret.truncated_issue(
-            ".", f"directory not scanned: {reason}")])
-        res.update(incomplete=True, incompleteReason=reason, warnings=[])
+        tree = _open_target(path, checked)
+        if tree is not None:
+            try:
+                _check_listable(tree)
+            except BaseException:
+                tree.close()
+                raise
+    except OSError as exc:               # missing, no directory, or it can't be opened or listed
+        raise _target_error(path, exc) from None
+    if tree is None:
+        res = _not_scanned(path, _TARGET_CHANGED)
+        res["notes"] = []
+        return res
+    with tree:
+        over = _preflight(tree, exclude, include_deps, ctx)
+        if over:
+            res = _not_scanned(path, f"{over}; narrow the path or raise the MCP caps")
+            res.update(incompleteReason=over, notes=[])
+            return res
+
+        def should_stop():
+            ctx.check()                      # raises when the call was cancelled
+            if ctx.expired():
+                return f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
+            return None
+
+        try:
+            res = lazaret.scan_project(path, exclude, include_deps=include_deps,
+                                       should_stop=should_stop, opened=tree)
+        except lazaret.ScanTargetError as exc:
+            # Nothing to scan: the CLI exits 2 ("usage error"). For a tool caller
+            # "no findings" would read as "checked and clean", so the result is
+            # incomplete and fails the gate.
+            res = _not_scanned(path, str(exc))
+            res["warnings"] = []
     res["notes"] = res.pop("warnings", [])
     return res
 
@@ -494,13 +598,11 @@ def run_project_scan(path, exclude=None, include_deps=False, ctx=None):
 def tool_scan_directory(args):
     ctx = _ctx()
     path = args.get("path")
-    ctx.check_path(path)
-    if not os.path.isdir(path):
-        raise ValueError(f"Not a directory: {path}")
+    checked = ctx.check_path(path)                     # (whether it is a directory: its open beneath the root says)
     exclude = args.get("exclude") or []
     if not isinstance(exclude, list) or not all(isinstance(x, str) for x in exclude):
         raise ValueError("exclude must be an array of directory names")
-    res = run_project_scan(path, exclude, bool(args.get("include_deps")), ctx=ctx)
+    res = run_project_scan(path, exclude, bool(args.get("include_deps")), ctx=ctx, checked=checked)
     out = result_summary(res, int(args.get("max_issues") or MAX_ISSUES))
     out["supplyChainIndicators"] = res.get("supplyChain", 0)
     return out
@@ -522,13 +624,21 @@ def _not_a_regular_file(mode):
         f"it is {kind}, not a regular file"
 
 
+def _not_opened(exc):
+    """Why a file named to scan_files could not be opened beneath its root (core._open_beneath), for its SC-TRUNCATED."""
+    if isinstance(exc, lazaret._NotRegularFile):
+        return f"it is {exc}, not a regular file"
+    if isinstance(exc, (lazaret._PathChanged, lazaret._OutsideRoot)):
+        return f"not read: {exc.strerror or exc}"
+    return f"cannot read the file ({exc.strerror or type(exc).__name__})"
+
+
 def tool_scan_files(args):
     ctx = _ctx()
     paths = args.get("paths")
     if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
         raise ValueError("paths must be an array of strings")
-    for p in paths:                      # every path is checked before any is read
-        ctx.check_path(p)
+    checked = [ctx.check_path(p) for p in paths]       # every path is checked before any is read
     out, all_issues, files = {}, [], []
     read_bytes, stopped, unread = 0, None, 0
 
@@ -573,36 +683,43 @@ def tool_scan_files(args):
             out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx/.go/.rs, a config file "
                                "such as .env, .json or .yaml, or an agent skill or instruction file such as SKILL.md)"}
             continue
+        # LZ-03 (the external security report of Oct 27, CWE-367): the path was resolved once, by check_path, and
+        # is opened beneath the root it was found under, a directory at a time with no link followed
+        # (core._open_beneath): a part of it swapped for a symbolic link or another directory after the check
+        # makes the open fail, so a file outside the roots is never read, and the file is not read either
+        # (SC-TRUNCATED, the call incomplete). Its kind, its size and its bytes are all the open fd's. It used to be
+        # os.stat(p) and _read_prefix(os.path.realpath(p)): a second resolution, never checked.
+        root, real = checked[idx]
         try:
-            st = os.stat(p)
-        except (FileNotFoundError, NotADirectoryError):
+            fd = lazaret._open_beneath(root, real)
+        except FileNotFoundError:
             out[p] = {"error": "File not found"}
             continue
         except OSError as exc:
-            not_read(p, f"cannot stat the file ({exc.strerror or type(exc).__name__})")
+            not_read(p, _not_opened(exc))
             continue
-        if not stat.S_ISREG(st.st_mode):
-            not_read(p, _not_a_regular_file(st.st_mode))
-            continue
-        size = st.st_size
-        cap = lazaret.configsecrets.CONFIG_SCAN_CAP if lang == "cfg" else lazaret.SOURCE_SIZE_CAP
-        if size > cap:
-            ti = lazaret.truncated_issue(p, f"{size:,} bytes exceeds the {cap:,}-byte file limit")
-            all_issues.append(ti)
-            out[p] = {"error": ti["msg"], "rule": ti["rule"], "sev": ti["sev"]}
-            continue
-        # bounded read: read cap+1 so a file that GREW between stat and read
-        # (TOCTOU) is still caught, then falls into the truncation path. The
-        # symlinks were resolved (and checked against the roots) already;
-        # _read_prefix opens with O_NONBLOCK and refuses anything but a
-        # regular file, so a FIFO swapped in after the stat can't hang the call.
         try:
-            data = lazaret._read_prefix(os.path.realpath(p), cap + 1)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                not_read(p, _not_a_regular_file(st.st_mode))
+                continue
+            size = st.st_size
+            cap = lazaret.configsecrets.CONFIG_SCAN_CAP if lang == "cfg" else lazaret.SOURCE_SIZE_CAP
+            if size > cap:
+                ti = lazaret.truncated_issue(p, f"{size:,} bytes exceeds the {cap:,}-byte file limit")
+                all_issues.append(ti)
+                out[p] = {"error": ti["msg"], "rule": ti["rule"], "sev": ti["sev"]}
+                continue
+            # bounded read: read cap+1 so a file that GREW between fstat and read is still caught, then falls into
+            # the truncation path
+            data = lazaret._read_fd(fd, cap + 1)
         except OSError as exc:
             reason = (str(exc) if isinstance(exc, lazaret._NotRegularFile)
                       else exc.strerror or type(exc).__name__)
             not_read(p, f"cannot read the file ({reason})")
             continue
+        finally:
+            os.close(fd)
         if len(data) > cap:
             ti = lazaret.truncated_issue(p, f"read exceeded the {cap:,}-byte file limit")
             all_issues.append(ti)
@@ -649,10 +766,8 @@ def tool_scan_snippet(args):
 def tool_quality_gate(args):
     ctx = _ctx()
     path = args.get("path")
-    ctx.check_path(path)
-    if not os.path.isdir(path):
-        raise ValueError(f"Not a directory: {path}")
-    res = run_project_scan(path, ctx=ctx)
+    checked = ctx.check_path(path)                     # (whether it is a directory: its open beneath the root says)
+    res = run_project_scan(path, ctx=ctx, checked=checked)
     out = {"qualityGate": "PASSED" if res["pass"] else "FAILED",
            "conditions": res["conditions"], "counts": res["counts"],
            "ratings": res["ratings"],

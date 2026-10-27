@@ -3,8 +3,8 @@
 // dependency checks, the skipped trees, the cross-file flows, then the result built and redacted. Prints nothing.
 
 import { collectFiles, ScanTargetError } from "./lib/fs.js";
-import { scanErrorIssue } from "./lib/issue.js";
-import { MAX_FILE_BYTES } from "./lib/collect.js";
+import { scanErrorIssue, truncatedIssue } from "./lib/issue.js";
+import { MAX_FILE_BYTES, TOO_LONG_WHY, tooDeepReason, tooLongReason } from "./lib/collect.js";
 import { fsNameToString } from "./lib/encoding.js";
 import { scanFile } from "./scanner/scan.js";
 import { collectionIssues, scanTask } from "./scancollection.js";
@@ -28,7 +28,9 @@ export function collectProject(root, { deps = false, exclude = [], maxFileBytes 
 
 /**
  * Scan what collectProject collected under `root` -> { res, files, configs }: the result (buildResult's, redacted,
- * with metrics.configFiles), every file read (the dependency files the checks read included) and the config files.
+ * with metrics.configFiles, and incomplete with its reasons when a folder was nested too deep to be read, or a folder
+ * or a file had a path too long for this system to read), every file read (the dependency files the checks read
+ * included) and the config files.
  * Each file's scan, and --deps' checks of each dependency file, run on worker threads for a scan with enough to read
  * (pool.js; env LAZARET_THREADS), the findings in the same order. `extraIssues`: findings made before the scan that
  * belong in its result (core.scan_project's extra_issues; the hook's files it could not copy).
@@ -42,20 +44,23 @@ export function scanCollected(root, col, { exclude = [], env = process.env, extr
     try { pool = new Pool(threads); } catch { pool = null; }        // (no workers here: one thread does it all)
   }
   let issues;
+  const tooLong = [];                     // (what the readers after the walk could not reach: a path too long)
   try {
     issues = collectionIssues(col, {
       extraIssues,
       // a dependency's agent skill (RA-3): the scripts it runs, from the disk when the walk did not keep them
-      diskRead: diskReader(root, files, manifests, { exclude, maxFileBytes: col.maxFileBytes }),
+      diskRead: diskReader(root, files, manifests, { exclude, maxFileBytes: col.maxFileBytes, tooLong }),
       scanAll: (all, helpers) => mapTasks(pool, all.map((f) => ["scan", scanTask(f, helpers)]),
         ([, file]) => scanFile(file),
         ([, file], e) => [scanErrorIssue(file.path, e)]),                // one file must never kill the run
       checks: (sofar) => {
         // the project's own install hooks: what they run (projectHookChecks)
+        const pruned = skippedIssues.map((i) => i.file);
         for (const i of projectHookChecks(root, files, manifests, sofar,
-          { exclude, pruned: skippedIssues.map((i) => i.file), maxFileBytes: col.maxFileBytes })) sofar.push(i);
+          { exclude, pruned, maxFileBytes: col.maxFileBytes, tooLong })) sofar.push(i);
         // --deps: what the dependencies run (install hooks, import-time code)
-        const deps = dependencyChecks(root, files, manifests, sofar, { exclude, maxFileBytes: col.maxFileBytes, pool });
+        const deps = dependencyChecks(root, files, manifests, sofar,
+          { exclude, maxFileBytes: col.maxFileBytes, pool, tooLong });
         for (const i of deps.issues) sofar.push(i);
         for (const f of deps.files) files.push(f);
       },
@@ -63,7 +68,16 @@ export function scanCollected(root, col, { exclude = [], env = process.env, extr
   } finally {
     if (pool) pool.close();
   }
+  // a folder or a file the readers after the walk could not reach, its path too long: not read (SC-TRUNCATED, unless
+  // a reader said so of it already)
+  const said = new Set(issues.filter((i) => i.rule === "SC-TRUNCATED").map((i) => i.file));
+  for (const rel of new Set(tooLong)) if (!said.has(rel)) issues.push(truncatedIssue(rel, TOO_LONG_WHY));
   const res = redactResult(buildResult(root, files, issues));
   res.metrics.configFiles = configs.length;
+  // a folder nested deeper than MAX_WALK_DEPTH was not read (core.scan_project's), or one or a file whose path is too
+  // long for this system: the result is incomplete
+  const deep = new Set(col.tooDeep ?? []).size, long = new Set([...(col.tooLong ?? []), ...tooLong]).size;
+  const why = [...(deep ? [tooDeepReason(deep)] : []), ...(long ? [tooLongReason(long)] : [])];
+  if (why.length) Object.assign(res, { incomplete: true, incompleteReason: why.join("; ") });
   return { res, files, configs };
 }

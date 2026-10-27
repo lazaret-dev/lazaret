@@ -335,5 +335,113 @@ class CoreParityTests(unittest.TestCase):
             self.assertEqual((js[0], py[0]), (1, 1))
             self.assert_same(js, parity.run_cli(parity.js_cmd(root), ("--ci",)), label="js, closed or not")
 
+
+def _deep_tree(root, depth, name="d"):
+    """Under `root`: a.py; d/d/…/d, `depth` folders (each named `name`), with leaf.py (a finding), a __pycache__ and a
+    Go vendor/ (its marker inside) in the deepest; node_modules/dep/d/…/d, `depth` folders in all, with index.js (a
+    finding) in the deepest. Made a folder at a time beneath the one before (dir_fd), so its paths' length never
+    matters here."""
+    def chain(fd, n, leaf, text):
+        for _ in range(n):
+            os.mkdir(name, dir_fd=fd)
+            below = os.open(name, os.O_RDONLY, dir_fd=fd)
+            os.close(fd)
+            fd = below
+        put(fd, leaf, text)
+        return fd
+
+    def put(fd, name, data):
+        f = os.open(name, os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=fd)
+        os.write(f, data.encode("utf-8") if isinstance(data, str) else data)
+        os.close(f)
+
+    def sub(fd, name):
+        os.mkdir(name, dir_fd=fd)
+        return os.open(name, os.O_RDONLY, dir_fd=fd)
+    top = os.open(root, os.O_RDONLY)
+    put(top, "a.py", "x = 1\n")
+    fd = chain(os.dup(top), depth, "leaf.py", "eval(x)\n")
+    for folder, path, data in (("__pycache__", "leaf.cpython-313.pyc", b"\x00" * 16),
+                               ("vendor", "modules.txt", "# example.com/v v1.0.0\n## explicit\nexample.com/v\n")):
+        inner = sub(fd, folder)
+        put(inner, path, data)
+        os.close(inner)
+    os.close(fd)
+    nm = sub(top, "node_modules")
+    dep = sub(nm, "dep")
+    put(dep, "package.json", '{"name": "dep", "version": "1.0.0"}\n')
+    os.close(chain(dep, depth - 2, "index.js", "eval(x)\n"))
+    os.close(nm)
+    os.close(top)
+
+
+@unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
+@unittest.skipUnless(hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd, "folders made beneath a descriptor")
+class DepthCapParityTests(unittest.TestCase):
+    """LZ-03's review: the walk enters no folder deeper than MAX_WALK_DEPTH (512) below the root, core's walk and the
+    npm package's alike (js/src/lib/collect.js): one nested deeper (a folder to walk, a __pycache__, a vendor folder
+    whose marker the probe cannot reach) is SC-TRUNCATED ("it is nested deeper than 512 folders"), and the result is
+    incomplete with the same reason; a pruned tree is counted to the cap; the --deps readers reach no deeper. Trees
+    just under the cap, at it and over it, with --deps and without."""
+    maxDiff = None
+    assert_same = parity.EngineParityTests.assert_same
+
+    def test_a_tree_just_under_at_and_over_the_cap(self):
+        # (and with long folder names, whose paths are longer than the system allows long before the cap: the npm
+        # package reads by path and stops there, core's walk beneath descriptors does not. The two cannot give the
+        # same findings then; neither may give a complete result without them: the npm package's is incomplete, its
+        # folder SC-TRUNCATED "its path is longer than this system allows", where the Python CLI read it all)
+        from lazaret.scanner import core
+        cap = core.MAX_WALK_DEPTH
+        for name, depth, modes in (("d", cap - 1, (False,)), ("d", cap, (False, True)), ("d", cap + 1, (False, True)),
+                                   ("n" * 10, cap - 1, (False, True)), ("n" * 10, cap + 1, (True,))):
+            with tempfile.TemporaryDirectory() as root:
+                need = len(os.path.realpath(root)) + (len(name) + 1) * (depth + 4) + 32
+                limit = os.pathconf(root, "PC_PATH_MAX") if hasattr(os, "pathconf") else 4096
+                fits = need <= limit        # (the npm package reads by path: Linux's PATH_MAX is 4,096, macOS's 1,024)
+                _deep_tree(root, depth, name)
+                for deps in modes:
+                    with self.subTest(name=name, depth=depth, deps=deps, fits=fits):
+                        js, py = parity.both(root, deps=deps)
+                        if fits:
+                            self.assert_same(js, py, label=f"{depth} deep, deps={deps}")
+                            for key in ("incomplete", "incompleteReason"):
+                                self.assertEqual(js[1].get(key), py[1].get(key), key)
+                        else:
+                            self.assert_too_long(js[1], py[1])
+                        found = {(i["rule"], i["file"].replace("\\", "/")) for i in py[1]["issues"]}
+                        chain = "/".join([name] * depth)
+                        truncated = sorted(f for r, f in found if r == "SC-TRUNCATED")
+                        if depth < cap:
+                            self.assertNotIn("incomplete", py[1])
+                            self.assertEqual(truncated, [])
+                            self.assertIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
+                        elif depth == cap:
+                            self.assertEqual(truncated, [f"{chain}/__pycache__", f"{chain}/vendor"])
+                            self.assertEqual(py[1]["incompleteReason"],
+                                             f"2 folders nested deeper than {cap} folders were not read")
+                            self.assertIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
+                        else:
+                            deep = sorted([chain] + (["node_modules/dep/" + "/".join([name] * (depth - 2))]
+                                                     if deps else []))
+                            self.assertEqual(truncated, deep)
+                            self.assertTrue(py[1]["incomplete"])
+                            self.assertNotIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
+                        self.assertTrue(all("nested deeper than 512 folders" in i["msg"] for i in py[1]["issues"]
+                                            if i["rule"] == "SC-TRUNCATED"))
+
+    def assert_too_long(self, js, py):
+        """The npm package's result, where its paths are too long to read: incomplete, saying so, each folder it could
+        not reach SC-TRUNCATED, and every other finding one of the Python CLI's."""
+        self.assertTrue(js.get("incomplete"), js)
+        self.assertRegex(js["incompleteReason"], r"(^|; )\d+ folders? or files? (was|were) not read: (its path is|their "
+                                                 r"paths are) longer than this system allows$")
+        long = [i for i in js["issues"] if i["rule"] == "SC-TRUNCATED" and "longer than this system allows" in i["msg"]]
+        self.assertTrue(long, js["issues"])
+        self.assertFalse([i for i in js["issues"] if i["rule"] == "Q-UNREADABLE"], js["issues"])
+        theirs = {parity.issue_key(i) for i in py["issues"]}
+        self.assertFalse([parity.issue_key(i) for i in js["issues"] if i not in long and parity.issue_key(i) not in
+                          theirs and i["rule"] != "Q-SKIPPED-TREE"])
+
 if __name__ == "__main__":
     unittest.main()

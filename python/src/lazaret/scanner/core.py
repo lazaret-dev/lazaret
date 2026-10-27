@@ -1302,28 +1302,67 @@ REPO_TAINT_CONFIG = ".lazaret-taint.json"
 TAINT_CONFIG_MAX_BYTES = 1_000_000
 
 
-def _read_taint_config(path, from_repo):
+def _read_taint_config(path, from_repo, raw=None):
     """(cfg, None) or (None, reason) for a taint-config file.
 
     Only a regular file is read (a FIFO would hang the open); a repository
     config must not be a symlink either. Reads are bounded; bad UTF-8,
-    invalid JSON, huge integers and deep nesting are reasons, not crashes."""
-    try:
-        st = os.lstat(path) if from_repo else os.stat(path)
-    except OSError as exc:
-        return None, str(exc.strerror or exc)
+    invalid JSON, huge integers and deep nesting are reasons, not crashes.
+
+    A repository config is opened once, its last component not followed
+    (O_NOFOLLOW | O_NONBLOCK), and what the descriptor is decides (fstat):
+    a link or a special file swapped in after it was found is not read
+    (LZ-03). `raw`, a list, is given the bytes read (the Q-TAINT-CONFIG
+    note's lines are these, not a second read)."""
     import stat as _stat
-    if not _stat.S_ISREG(st.st_mode):
-        return None, ("not a regular file (symlinks and special files are "
-                      "not followed)" if from_repo else "not a regular file")
-    if st.st_size > TAINT_CONFIG_MAX_BYTES:
-        return None, (f"{st.st_size} bytes exceeds the "
-                      f"{TAINT_CONFIG_MAX_BYTES}-byte limit")
+    if from_repo:
+        nofollow = hasattr(os, "O_NOFOLLOW")
+        if not nofollow:            # (Windows) a link refused by lstat; the file opened kept only beside it
+            try:
+                st = os.lstat(path)
+            except OSError as exc:
+                return None, str(exc.strerror or exc)
+            if not _stat.S_ISREG(st.st_mode) or _is_reparse_point(st):
+                return None, "not a regular file (symlinks and special files are not followed)"
+        try:
+            fd = (os.open(path, _OPEN_FLAGS) if nofollow
+                  else _open_verified(os.path.normcase(os.path.realpath(os.path.dirname(os.path.abspath(path)))), path))
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                return None, "not a regular file (symlinks and special files are not followed)"
+            return None, str(exc.strerror or exc)
+        try:
+            st = os.fstat(fd)
+            if not _stat.S_ISREG(st.st_mode):
+                return None, "not a regular file (symlinks and special files are not followed)"
+            if st.st_size > TAINT_CONFIG_MAX_BYTES:
+                return None, (f"{st.st_size} bytes exceeds the "
+                              f"{TAINT_CONFIG_MAX_BYTES}-byte limit")
+            data = _read_fd(fd, TAINT_CONFIG_MAX_BYTES + 1)
+        except OSError as exc:
+            return None, str(exc.strerror or exc)
+        finally:
+            os.close(fd)
+    else:
+        try:
+            st = os.stat(path)
+        except OSError as exc:
+            return None, str(exc.strerror or exc)
+        if not _stat.S_ISREG(st.st_mode):
+            return None, "not a regular file"
+        if st.st_size > TAINT_CONFIG_MAX_BYTES:
+            return None, (f"{st.st_size} bytes exceeds the "
+                          f"{TAINT_CONFIG_MAX_BYTES}-byte limit")
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read(TAINT_CONFIG_MAX_BYTES + 1)
+        except OSError as exc:
+            return None, str(exc)
+    if raw is not None:
+        raw.append(data)
     try:
-        with open(path, "rb") as fh:
-            data = fh.read(TAINT_CONFIG_MAX_BYTES + 1)
         return json_loads_bounded(data.decode("utf-8")), None
-    except (OSError, ValueError, MemoryError) as exc:
+    except (ValueError, MemoryError) as exc:
         # ValueError covers JSONDecodeError, UnicodeDecodeError, the int-digit
         # limit and JsonTooDeep (1149e3e5: a deep-nested config).
         return None, str(exc)
@@ -1362,7 +1401,8 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
                   f"--trust-repo-config to use its sources/sinks")
             return []
         from_repo = True
-    cfg, err = _read_taint_config(path, from_repo)
+    raw = []
+    cfg, err = _read_taint_config(path, from_repo, raw)
     if err is not None:
         # audit H1: both the path and the reason (JSONDecodeError position
         # text can echo hostile config bytes) are sanitized.
@@ -1396,11 +1436,9 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
     if not from_repo:
         return []
     n = spec.counts()
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            cfg_lines = fh.read(TAINT_CONFIG_MAX_BYTES).split("\n")
-    except OSError:
-        cfg_lines = []
+    # the bytes loaded, as text mode read them before (LZ-03: no second open)
+    cfg_lines = raw[0][:TAINT_CONFIG_MAX_BYTES].decode("utf-8", errors="replace").replace("\r\n", "\n") \
+        .replace("\r", "\n").split("\n") if raw else []
     note = mk_issue(
         {"id": "Q-TAINT-CONFIG", "name": "Taint rules loaded from the scanned repository",
          "type": "HOTSPOT", "sev": "INFO",
@@ -1792,11 +1830,42 @@ def _tree_stats(tree_path):
                     n_bytes += st.st_size
     return n_files, n_bytes
 
+def _tree_stats_at(tree, parts):
+    """_tree_stats of the folder `parts` of a _Root, read from its descriptor: a folder that is a link or no folder
+    now is not counted further (nothing in a pruned tree is read)."""
+    n_files, n_bytes = 0, 0
+    stack = [tuple(parts)]
+    while stack:
+        cur = stack.pop()
+        try:
+            entries = tree.listdir(cur)
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if _stat.S_ISDIR(st.st_mode) and not _is_reparse_point(st):
+                stack.append(cur + (e.name,))
+            else:
+                n_files += 1
+                if _stat.S_ISREG(st.st_mode):
+                    n_bytes += st.st_size
+    return n_files, n_bytes
+
 def _count_skipped_tree(root, tree_path, rel=None, into=None):
     """Record a pruned directory with its file count and total size for the
     INFO blind-spot accounting surfaced after the scan. `rel` is the
     root-relative display path (review item 5: it used to be cwd-relative,
-    e.g. './app/vendor', when the root was given as a relative path)."""
+    e.g. './app/vendor', when the root was given as a relative path).
+    `root` a _Root: `tree_path` is the folder's names below it (LZ-03)."""
+    if isinstance(root, _Root):
+        n_files, n_bytes = _tree_stats_at(root, tree_path)
+        if rel is None:
+            rel = _fs_display(os.path.join(*tree_path))
+        (_SKIPPED_TREES if into is None else into).append((rel, n_files, n_bytes))
+        return
     n_files, n_bytes = _tree_stats(tree_path)
     if rel is None:
         rel = _fs_display(os.path.relpath(tree_path, root))
@@ -2842,7 +2911,12 @@ VERSION = _lazaret_pkg.__version__     # what every command's --version prints
 #   * the walk is iterative (os.walk recursed: a 1,100-deep tree raised
 #     RecursionError on 3.10/3.11);
 #   * paths in findings are root-relative and valid UTF-8 (a non-UTF-8 file
-#     name crashed the HTML writer after the scan).
+#     name crashed the HTML writer after the scan);
+#   * every folder and file under the root is reached from the root folder's
+#     descriptor a component at a time, no link followed (_Root, LZ-03): the
+#     walk and every reader after it, never a path resolved again, so a tree
+#     changed while it is read cannot lead a read outside the root; what the
+#     walk found that is a link or no folder when opened is SC-TRUNCATED.
 
 def _env_int(var, default):
     """A positive integer from the environment, else `default` (parsed like
@@ -2932,19 +3006,816 @@ def _read_prefix(path, limit):
     O_NONBLOCK, then fstat). Raises OSError (incl. _NotRegularFile)."""
     fd = os.open(path, _OPEN_FLAGS)
     try:
-        st = os.fstat(fd)
-        if not _stat.S_ISREG(st.st_mode):
-            raise _NotRegularFile(f"{_special_kind(st.st_mode)}")
-        chunks, remaining = [], limit
-        while remaining > 0:
-            chunk = os.read(fd, min(remaining, 1 << 20))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
+        return _read_fd(fd, limit)
     finally:
         os.close(fd)
+
+
+def _read_fd(fd, limit, st=None):
+    """At most `limit` bytes of the file open at `fd`, which must be a
+    REGULAR file (fstat, or `st` where the caller has it; _NotRegularFile
+    otherwise). The caller closes it."""
+    st = os.fstat(fd) if st is None else st
+    if not _stat.S_ISREG(st.st_mode):
+        raise _NotRegularFile(f"{_special_kind(st.st_mode)}")
+    chunks, remaining = [], limit
+    while remaining > 0:
+        chunk = os.read(fd, min(remaining, 1 << 20))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+#: Can a file be opened beneath a directory, a component at a time, no link followed (`_open_beneath`)? POSIX's
+#: os.open with dir_fd, O_NOFOLLOW and O_DIRECTORY; Windows has none of them (`_open_verified` there).
+_ANCHORED_OPEN = (os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd and os.scandir in os.supports_fd
+                  and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY"))
+_DIR_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NOCTTY", 0)
+              | getattr(os, "O_CLOEXEC", 0))
+
+
+class _OutsideRoot(OSError):
+    """_open_beneath: what was opened is not beneath the directory it was to be found under."""
+
+
+class _Unlocatable(_OutsideRoot):
+    """_open_verified, _Root: this platform cannot say where a file or folder opened is, so it is not read."""
+
+
+class _PathChanged(OSError):
+    """_open_beneath: a directory of the path is a symbolic link now, or no directory (it changed after the path was
+    resolved and checked)."""
+
+
+def _open_beneath(root, path):
+    """An fd (O_RDONLY) of `path`, a resolved path under the directory `root` (both as os.path.realpath gives them:
+    the MCP server's path tools, LZ-03), opened beneath `root` and only there: one resolution, then an anchored open.
+    `root` is opened (O_DIRECTORY | O_NOFOLLOW), then each directory of `path` below it from the one before
+    (dir_fd, O_DIRECTORY | O_NOFOLLOW), and the file itself with `_OPEN_FLAGS` (O_NOFOLLOW | O_NONBLOCK: a FIFO cannot
+    hang the call). A part of the path swapped for a symbolic link or a file after it was resolved makes the open fail
+    (_PathChanged), and nothing outside `root` is opened, whatever the tree does meanwhile. The caller fstats the fd
+    (it may be a directory or a special file) and closes it.
+
+    Where the platform has no such open (Windows: no dir_fd, no O_NOFOLLOW): `_open_verified`. `root` None: no
+    directory to stay under (`path` opened with `_OPEN_FLAGS`). FileNotFoundError for a path that is not there;
+    _NotRegularFile for a special file that cannot be opened (a socket); OSError otherwise."""
+    if root is None:
+        return os.open(path, _OPEN_FLAGS)
+    rel = os.path.relpath(path, root)
+    parts = [] if rel == os.curdir else rel.split(os.sep)
+    if any(p in ("", os.curdir, os.pardir) for p in parts):
+        raise _OutsideRoot("it is not under the allowed root")
+    if not _ANCHORED_OPEN:
+        return _open_verified(root, path)
+    fd = os.open(root, _DIR_FLAGS)
+    if not parts:
+        return fd                                   # (the root itself: a directory, which the caller's fstat says)
+    try:
+        for part in parts[:-1]:
+            try:
+                below = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+                    raise _PathChanged(exc.errno, f"{_fs_display(part)} on its path is a symbolic link or no "
+                                                  f"directory now: it changed after the path was checked") from None
+                raise
+            os.close(fd)
+            fd = below
+        try:
+            return os.open(parts[-1], _OPEN_FLAGS, dir_fd=fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                raise _PathChanged(exc.errno, "it is a symbolic link now: it changed after the path was "
+                                              "checked") from None
+            if exc.errno == errno.ENOTDIR:
+                raise _PathChanged(exc.errno, "a directory on its path is no directory now: it changed after the "
+                                              "path was checked") from None
+            try:                                    # (a socket, which cannot be opened: what it is, for the message)
+                mode = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False).st_mode
+            except OSError:
+                raise exc from None
+            if not _stat.S_ISREG(mode) and not _stat.S_ISDIR(mode) and not _stat.S_ISLNK(mode):
+                raise _NotRegularFile(_special_kind(mode)) from None
+            raise
+    finally:
+        os.close(fd)
+
+
+def _open_verified(root, path):
+    """`_open_beneath` where a file cannot be opened beneath a directory's fd (Windows): `path` is opened (links
+    followed), and kept only when the file opened is under `root` by the final path of its handle (Windows'
+    GetFinalPathNameByHandleW; /proc/self/fd or F_GETPATH elsewhere): what is read is the file checked, or nothing
+    (_OutsideRoot). A platform that cannot say where an opened file is reads nothing this way."""
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):            # (O_NOFOLLOW, where there is one)
+            raise _PathChanged(exc.errno, "it is a symbolic link now: it changed after the path was checked") from None
+        raise
+    try:
+        where = _opened_path(fd)
+        if where is None:
+            raise _Unlocatable("this platform cannot tell where the file opened is, so it is not read")
+        where = os.path.normcase(where)
+        try:
+            inside = os.path.commonpath([where, root]) == root
+        except ValueError:                          # (another drive)
+            inside = False
+        if not inside:
+            raise _OutsideRoot("the file opened is outside the allowed root: its path changed after it was checked")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _opened_path(fd):
+    """The path of the file open at `fd` as the system names it now, or None where it cannot say."""
+    if os.name == "nt":
+        return _windows_final_path(fd)
+    if sys.platform == "darwin":
+        import fcntl
+        try:
+            name = fcntl.fcntl(fd, 50, bytes(1024))                     # F_GETPATH (MAXPATHLEN)
+        except OSError:
+            return None
+        return os.fsdecode(name.split(b"\0", 1)[0]) or None
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return None
+
+
+def _windows_final_path(fd):
+    """GetFinalPathNameByHandleW of the file open at `fd` (FILE_NAME_NORMALIZED, VOLUME_NAME_DOS), without its \\\\?\\
+    prefix (link_target_text: C:\\x, \\\\server\\share\\x)."""
+    import msvcrt
+    return _windows_handle_path(msvcrt.get_osfhandle(fd))
+
+
+def _windows_handle_path(handle):
+    import ctypes
+    from ctypes import wintypes
+    final = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
+    final.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+    final.restype = wintypes.DWORD
+    size = 1024
+    while size <= 1 << 16:
+        buf = ctypes.create_unicode_buffer(size)
+        got = final(handle, buf, size, 0)
+        if not got:
+            return None
+        if got < size:
+            return link_target_text(buf.value)
+        size = got + 1
+    return None
+
+
+def _windows_folder_path(path):
+    """The final path of the folder `path` names, its links followed (CreateFileW with FILE_FLAG_BACKUP_SEMANTICS, which
+    opens a folder; then GetFinalPathNameByHandleW), or None where it cannot be told. OSError when it cannot be
+    opened."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                       wintypes.DWORD, wintypes.HANDLE)
+    create.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    # FILE_READ_ATTRIBUTES; FILE_SHARE_READ | WRITE | DELETE; OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS
+    handle = create(path, 0x80, 0x7, None, 3, 0x02000000, None)
+    if handle is None or handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return _windows_handle_path(handle)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _folder_final_path(path):
+    """Where the folder `path` names is, its links followed, as the system names it now (Windows: _windows_folder_path;
+    elsewhere the folder opened and asked, as _opened_path asks a file), or None where the system cannot say. OSError
+    when it cannot be opened."""
+    if os.name == "nt":
+        return _windows_folder_path(path)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        return _opened_path(fd)
+    finally:
+        os.close(fd)
+
+
+_ROOT_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+_CHANGED_WHY = ("it changed while the tree was read (a symbolic link, another file or kind of file, or nothing where "
+                "the walk had found a folder or a file), so it was not read")
+
+#: The deepest folder the walk enters, in folders below the root (LZ-03's review, H3): a folder nested deeper is not read
+#: (SC-TRUNCATED, "nested deeper than 512 folders", the result incomplete). It is above anything real: a path of 512
+#: folders is longer than Linux's PATH_MAX (4,096 bytes) once its names average eight characters, so a project that is
+#: written, built and installed by tools that open files by path stays far below it, nested node_modules included (the
+#: walk before LZ-03 stopped at PATH_MAX by accident). What it bounds is a tree made to be deep (a tarball of a few
+#: kilobytes can hold thousands of levels): the walk's cost and the descriptors `_Root` keeps open on the way down.
+#: The npm package's walk has the same cap, its twin (js/src/lib/collect.js MAX_WALK_DEPTH): the same findings and
+#: result for a tree deeper than it whose paths the system allows (test_js_parity_core; that package reads by path,
+#: and a path too long for the system is SC-TRUNCATED there, its result incomplete: TOO_LONG_WHY).
+MAX_WALK_DEPTH = 512
+_TOO_DEEP_WHY = f"it is nested deeper than {MAX_WALK_DEPTH} folders, so it was not read"
+
+
+class _TooDeep(OSError):
+    """_Root: a folder nested deeper than MAX_WALK_DEPTH below the root is not opened."""
+
+
+def _file_record(st):
+    """What the walk keeps of a regular file it listed (`st`, its lstat): (st_dev, st_ino, st_size, st_mtime_ns,
+    st_ctime_ns). The size and times tell a file deleted and made again under its name, which can reuse its inode (ext4
+    does), or written in place, from the file the walk listed (LZ-03's re-check 2, N5)."""
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def _unwritten(st, then, inode_known):
+    """Is `st` unwritten since `then` (st_size, st_mtime_ns, st_ctime_ns, or () where none was kept)? Its change time
+    is compared only where both have an inode: a listing without one (Windows' DirEntry.stat) has a change time of its
+    own making, which an fstat need not share."""
+    if not then:
+        return True
+    size, mtime, ctime = then
+    return st.st_size == size and st.st_mtime_ns == mtime and (not inode_known or st.st_ctime_ns == ctime)
+
+
+def _same_file(st, expect):
+    """Is `st` (an lstat or an fstat) the regular file `expect` (_file_record: as the walk's lstat gave it), unwritten
+    since? Where an inode is not known (0: Windows' DirEntry.stat), its kind, size and modification time are compared."""
+    if not _stat.S_ISREG(st.st_mode):
+        return False
+    dev, ino = expect[:2]
+    known = bool(ino and st.st_ino)
+    if known and (st.st_dev, st.st_ino) != (dev, ino):
+        return False
+    return _unwritten(st, expect[2:], known)
+
+
+def _same_entry(st, rec):
+    """Is `st` (an lstat) the entry `rec`, (st_dev, st_ino, its kind: S_IFMT) as the walk's listing gave them, and a
+    regular file's size and times (_file_record) after them, unwritten since? Where an inode is not known (0: Windows'
+    DirEntry.stat), its kind (and a regular file's size and modification time) are compared."""
+    dev, ino, kind = rec[:3]
+    if _stat.S_IFMT(st.st_mode) != kind:
+        return False
+    known = bool(ino and st.st_ino)
+    if known and (st.st_dev, st.st_ino) != (dev, ino):
+        return False
+    return _unwritten(st, rec[3:], known)
+
+
+def _name_keys(name):
+    """What a disk that takes some names for one compares `name` by (LZ-03's re-check, N1): APFS's and ext4 casefold's
+    reading (NFD, then case folded, on the engine's Unicode: repo.case_fold's), NTFS's (upper case), each also with
+    the trailing dots and spaces Windows drops from a name."""
+    out = set()
+    for n in {name, name.rstrip(". ") or name}:
+        try:
+            out.add(("fold", engine.case_fold(n, "NFD")))
+        except (ValueError, _native.NativeError):      # (a name the engine cannot read as text)
+            out.add(("fold", n.lower()))
+        out.add(("upper", n.upper()))
+    return frozenset(out)
+
+
+#: An 8.3 short name, as Windows gives one to a file on NTFS or FAT (PROGRA~1 for Program Files): a few letters, ~ and
+#: a number, and at most three letters of an extension. Any name the walk listed in its folder may be the one it
+#: stands for: the letters before the ~ can be a hash's, and the extension's are the long one's with spaces left out
+#: and characters 8.3 cannot hold made `_` (`run.c++` is RUN~1.C__; LZ-03's re-check 2, N4).
+_SHORT_NAME = re.compile(r"[^.~]{1,6}~[0-9]{1,6}(?:\.[^.]{1,3})?\Z")
+
+
+class _Entry:
+    """A folder's entry as `_Root.listdir` gives it: its `name` and what lstat said of it (`stat(follow_symlinks=False)`
+    and `is_dir(follow_symlinks=False)`, read while the folder was open; the OSError, raised again, where it failed)."""
+
+    __slots__ = ("name", "_st")
+
+    def __init__(self, name, st):
+        self.name, self._st = name, st
+
+    def stat(self, follow_symlinks=False):
+        if isinstance(self._st, BaseException):
+            raise self._st
+        return self._st
+
+    def is_dir(self, follow_symlinks=False):
+        return not isinstance(self._st, BaseException) and _stat.S_ISDIR(self._st.st_mode)
+
+
+class _Root:
+    """The scanned tree, read from its root folder's descriptor (LZ-03, the external security report of Oct 27,
+    CWE-367): the project walk and every reader after it (the --deps and install-hook readers, the vendored-code
+    readers, the pruned trees' counts, --verify-secrets' lines, the MCP server's budget count) reach a folder or a
+    file under the root a component at a time from the root's descriptor (dir_fd, O_DIRECTORY | O_NOFOLLOW; a file
+    O_NOFOLLOW | O_NONBLOCK), never by a path the system resolves again; nothing outside the root is opened, whatever
+    the tree does meanwhile.
+
+    What the walk found is held to what it found. A folder it found (`found`) that is a symbolic link, no folder or
+    gone when it is opened again, and a regular file it listed (`files`: its device and inode) that is a link, another
+    kind of file (a folder, a FIFO), another file (another inode) or gone when it is opened or looked at again
+    (`open`'s fstat, `is_regular`, `listdir_after`), changed while the tree was read: the caller or this records it
+    (`changed_at`), and the scan says it was not read (SC-TRUNCATED, the result incomplete), whichever reader asks (the
+    walk, or one after it; LZ-03's review, H1 and H2). A reader's names are held to the walk's listing as the disk
+    reads them (`_canon`; LZ-03's re-check, N1): on a disk that takes some names for one (macOS's and Windows' ignore
+    case and Unicode form, Windows knows a file by an 8.3 name too), a package's text can name a file the walk listed
+    by another spelling, which the disk opens; such a name is the walk's entry it reaches, by identity, and a name
+    that reaches something the walk did not list there, or nothing where the walk listed one it is one name with, is
+    a change. What the walk did not find (a file a hook names that was not there) is looked at as it is then. A file
+    that cannot be opened and is still the file the walk listed (permission denied) is unreadable, as before. A
+    folder deeper than MAX_WALK_DEPTH is not opened (_TooDeep; the walk records it in `too_deep`).
+
+    `path` is the root as given (what is shown, and joined to where there is no such open); `fd` an open folder
+    descriptor of it (the MCP server's, opened beneath its allowed root: `own` says whether this closes it), else the
+    root is opened here, a link in its own path followed (the command line's folder may be one). Folders are kept
+    open so that reaching one costs a bounded number of opens whatever the tree's shape (LZ-03's review, H3: a deep
+    "comb" cost N²/2 opens): the `_KEEP` used last, and every `_STRIDE`-th on the way to the last one opened (`_spine`),
+    so a folder is opened from one at most `_STRIDE` levels above it, and at most MAX_WALK_DEPTH / _STRIDE + _KEEP
+    (48) are open besides the root's. A folder is opened afresh from its parent when it is listed, and the walk lets
+    the kept ones go when it is done (`forget`), so the readers after it reach each folder by the name it has then. A
+    kept folder that is renamed meanwhile, even out of the root, is still the one read through its descriptor, and
+    only what is in it is reached (no link below it is followed): nothing that was not under the root when it was
+    opened, unless something is put into it after it left.
+
+    Where the platform has no such open (Windows: no dir_fd, no scandir of a descriptor), the tree is read by path,
+    and checked: every folder is lstat'ed (a link or a file where a folder was is _PathChanged) and listed only when
+    its final path, its links followed (CreateFileW with FILE_FLAG_BACKUP_SEMANTICS, GetFinalPathNameByHandleW), is
+    under `within` (the root's real path); every file is opened and read only when its handle's final path is
+    (_open_verified), so no file outside the root is read. A folder swapped between that check and its listing can
+    still show its names there (not its files' contents): the gap docs/DESIGN.md states."""
+
+    _KEEP = 16
+    _STRIDE = 16
+
+    def __init__(self, path, fd=None, own=None, within=None):
+        self.path = os.fspath(path)
+        self.changed = []                   # the display paths of what changed while the tree was read
+        self.too_deep = []                  # the display paths of the folders the walk did not enter (MAX_WALK_DEPTH)
+        self.found = set()                  # the folders the walk found (names): one no folder later changed
+        self.files = {}                     # folder (names) -> {name: _file_record}: the regular files it listed
+        self.names = {}                     # folder (names) -> {name: (st_dev, st_ino, kind[, size, mtime, ctime]) or
+        #                                     None}: all it listed (a regular file's size and times after its kind)
+        self._keys = {}                     # folder (names) -> {name: _name_keys(name)}, made when first asked
+        self._dirs = collections.OrderedDict()
+        self._spine = []                    # [(depth, names, fd)]: every _STRIDE-th folder on the way to the last one
+        self._own = fd is None if own is None else own
+        self.fd = self.within = None
+        if _ANCHORED_OPEN:
+            self.fd = os.open(self.path, _ROOT_FLAGS) if fd is None else fd
+            return
+        # (`within` as the caller resolved it when it checked it: never resolved again here)
+        self.within = os.path.normcase(os.path.realpath(self.path) if within is None else within)
+        if within is not None:
+            where = _folder_final_path(self.path)
+            if where is None:
+                raise _Unlocatable("this platform cannot tell where the folder is, so it is not read")
+            if os.path.normcase(where) != self.within:
+                raise _PathChanged(errno.ELOOP, "the folder changed after it was checked")
+
+    def forget(self):
+        """Let the folders kept open go: what is read next is reached from the root again, by the names it has now."""
+        for fd in self._dirs.values():
+            os.close(fd)
+        self._dirs.clear()
+        for _depth, _names, fd in self._spine:
+            os.close(fd)
+        self._spine.clear()
+
+    def close(self):
+        self.forget()
+        if self._own and self.fd is not None:
+            os.close(self.fd)
+        self.fd = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:                   # (interpreter shutdown)
+            pass
+
+    @staticmethod
+    def parts(rel):
+        """A root-relative path ('/'- or os.sep-separated) as a tuple of names; ValueError for one that leaves the root."""
+        rel = os.fspath(rel)
+        names = tuple(p for p in (rel.replace("/", os.sep) if os.sep != "/" else rel).split(os.sep) if p not in ("", "."))
+        if any(p == ".." for p in names) or (os.name == "nt" and any(":" in p for p in names)):
+            raise ValueError(f"not a path under the root: {rel!r}")
+        return names
+
+    def changed_at(self, rel):
+        """Record that `rel` (a display path, or names) changed while it was read: it is reported not read."""
+        self.changed.append(_fs_display(os.path.join(*rel) if isinstance(rel, tuple) else rel))
+
+    def listed(self, parts, entries):
+        """The walk listed the folder `parts` ([_Entry]): the regular files in it are what it found there, and its
+        names those a reader's names in it are held to (_canon)."""
+        files, names = {}, {}
+        for e in entries:
+            try:
+                st = e.stat()
+            except OSError:
+                names[e.name] = None
+                continue
+            names[e.name] = (st.st_dev, st.st_ino, _stat.S_IFMT(st.st_mode))
+            if _stat.S_ISREG(st.st_mode):
+                files[e.name] = rec = _file_record(st)
+                names[e.name] += rec[2:]
+        self.files[tuple(parts)] = files
+        self.names[tuple(parts)] = names
+
+    def _walked(self, parts):
+        """The _file_record of the regular file the walk listed at `parts` (names as it listed them: _canon), or
+        None."""
+        return self.files.get(parts[:-1], {}).get(parts[-1]) if parts else None
+
+    def _canon(self, parts):
+        """A reader's names `parts` (from a package's text: a hook's command, vendor/modules.txt, an agent skill) as
+        the walk listed them, so that what it reads is held to what the walk found (LZ-03's re-check, N1). A name not
+        in the walk's listing of its folder is looked up (_alias); the names below a folder the walk did not list are
+        kept as they are. _PathChanged (recorded) where the tree changed."""
+        out = ()
+        for k, name in enumerate(parts):
+            listing = self.names.get(out)
+            if listing is None:
+                return out + parts[k:]
+            if name not in listing:
+                name = self._alias(out, name, listing, parts)
+                if name is None:
+                    return out + parts[k:]
+            out += (name,)
+        return out
+
+    def _alias(self, folder, name, listing, whole):
+        """The name the walk listed in `folder` that `name`, not among them, reaches on this disk, or None where it
+        reaches nothing and reached nothing when the walk listed the folder. What it reaches is held to the walk's
+        entries by identity (device and inode; where the walk's listing has none, Windows', by the entry it is one name
+        with, as it is now). It reaches something the walk did not list there (another file, a link, a folder put in
+        the entry's place or beside it), or nothing where the walk listed a name it is one with (_like: in case,
+        Unicode form, Windows' trailing dots and spaces, an 8.3 name) while one of those is gone or another now, or
+        the folder changed while this looked: the tree changed. That is recorded (`whole`, the reader's names, to
+        this one: once for every path a reader asks below it) and _PathChanged."""
+        where = self._dir(folder)
+        like = self._like(folder, name, listing)
+        before = self._stamp(where) if like else None
+        try:
+            st = self._lstat_in(where, name)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            got = self._entry_of(where, st, listing, like)
+            # (LZ-03's re-check 2, N3: the entry it reaches must be one the disk could take the name for, or, where
+            # no listed name is (a folding this does not model), still the walk's entry under the walk's own name)
+            if got is not None and (got in like or (not like and self._still_entry(where, got, listing[got]))):
+                return got
+        elif not like:
+            return None
+        else:
+            for n in like:                  # (a disk that tells them apart: each still the entry the walk listed,
+                try:                        # and the folder unchanged meanwhile: its times, which every entry made,
+                    now = self._lstat_in(where, n)      # renamed or removed in it changes)
+                except OSError:
+                    break
+                if listing[n] is not None and not _same_entry(now, listing[n]):
+                    break
+            else:
+                if self._stamp(where) == before:
+                    return None
+        self.changed_at(whole[:len(folder) + 1])
+        raise _PathChanged(errno.ESTALE, "it is not what the walk found there now")
+
+    def _entry_of(self, where, st, listing, like):
+        """The name of the walk's entry that `st` (the lstat of what a name not in `listing` reaches) is, or None."""
+        if st.st_ino and any(rec and rec[1] for rec in listing.values()):
+            hits = [n for n, rec in listing.items() if rec and rec[1] and _same_entry(st, rec)]
+            return min(hits, key=lambda n: (n not in like, n)) if hits else None   # (hard links: one file)
+        hits = []                           # (Windows: the entry it is one name with, by identity as it is now)
+        for n in like:
+            try:
+                now = self._lstat_in(where, n)
+            except OSError:
+                continue
+            if listing[n] is not None and _same_entry(now, listing[n]) and \
+                    _same_entry(st, (now.st_dev, now.st_ino, _stat.S_IFMT(now.st_mode))):
+                hits.append(n)
+        return hits[0] if len(hits) == 1 else None
+
+    def _still_entry(self, where, name, rec):
+        """Is the walk's `name` in the folder `where` still its entry `rec`?"""
+        try:
+            return rec is not None and _same_entry(self._lstat_in(where, name), rec)
+        except OSError:
+            return False
+
+    def _like(self, folder, name, listing):
+        """The names the walk listed in `folder` that a disk could take `name` for (_name_keys; for a name shaped as
+        an 8.3 short name, any: Windows makes a short name's extension from the long one's with characters left out
+        or replaced, LZ-03's re-check 2, N4)."""
+        keys = self._keys.get(folder)
+        if keys is None:
+            keys = self._keys[folder] = {n: _name_keys(n) for n in listing}
+        if _SHORT_NAME.match(name.upper()):
+            return sorted(keys)
+        want = _name_keys(name)
+        return sorted(n for n, k in keys.items() if k & want)
+
+    @staticmethod
+    def _stamp(where):
+        st = os.fstat(where) if _ANCHORED_OPEN else os.lstat(where)
+        return st.st_mtime_ns, st.st_ctime_ns
+
+    @staticmethod
+    def _lstat_in(where, name):
+        if not _ANCHORED_OPEN:
+            return os.lstat(os.path.join(where, name))
+        return os.stat(name, dir_fd=where, follow_symlinks=False)
+
+    def _keep(self, parts, fd):
+        old = self._dirs.pop(parts, None)
+        if old is not None and old != fd:
+            os.close(old)
+        self._dirs[parts] = fd
+        while len(self._dirs) > self._KEEP:
+            os.close(self._dirs.popitem(last=False)[1])
+
+    def _dir(self, parts, fresh=False):
+        """The folder `parts` below the root: a descriptor (kept: the caller does not close it), or its path where there
+        is no anchored open. `fresh`: opened again from its parent even where it is kept (what is listed is the folder
+        its name names now). _PathChanged when a component is a link or no folder now, or a folder the walk found is
+        gone; _TooDeep for a folder deeper than MAX_WALK_DEPTH. It is opened from the deepest folder kept on its way
+        (the spine's, or one of the last used within _STRIDE levels of it), each folder below opened from the one before
+        and kept in turn (every _STRIDE-th on the spine, the others with the last used)."""
+        if len(parts) > MAX_WALK_DEPTH:
+            raise _TooDeep(errno.ENAMETOOLONG, f"it is nested deeper than {MAX_WALK_DEPTH} folders")
+        if not _ANCHORED_OPEN:
+            path = os.path.join(self.path, *parts)
+            for n in range(1, len(parts) + 1):     # (each folder on the way: no link followed, as beneath an fd)
+                try:
+                    st = os.lstat(os.path.join(self.path, *parts[:n]))
+                except FileNotFoundError:
+                    if parts[:n] not in self.found:
+                        raise
+                    self._lost(parts[:n])
+                    raise _PathChanged(errno.ENOENT, f"{_fs_display(os.path.join(*parts[:n]))} is gone now") from None
+                if _stat.S_ISLNK(st.st_mode) or _is_reparse_point(st) or not _stat.S_ISDIR(st.st_mode):
+                    self._lost(parts[:n])
+                    raise _PathChanged(errno.ENOTDIR, f"{_fs_display(os.path.join(*parts[:n]))} is a symbolic link "
+                                                      f"or no folder now")
+            where = _folder_final_path(path)
+            if where is None:
+                raise _Unlocatable("this platform cannot tell where the folder is, so it is not read")
+            where = os.path.normcase(where)
+            try:
+                inside = os.path.commonpath([where, self.within]) == self.within
+            except ValueError:
+                inside = False
+            if not inside:
+                self._lost(parts, below=True)
+                raise _PathChanged(errno.ELOOP, "the folder is outside the root now: it changed while it was read")
+            return path
+        if not parts:
+            return self.fd
+        if fresh:
+            old = self._dirs.pop(parts, None)
+            if old is not None:
+                os.close(old)
+        else:
+            fd = self._dirs.get(parts)
+            if fd is not None:
+                self._dirs.move_to_end(parts)
+                return fd
+        n, spine = len(parts), self._spine
+        while spine:                        # (the spine's folders on the way to `parts` stay; the others are let go)
+            depth, names, fd = spine[-1]
+            if (depth < n or (depth == n and not fresh)) and parts[:depth] == names:
+                break
+            spine.pop()
+            os.close(fd)
+        if spine and spine[-1][0] == n:
+            return spine[-1][2]
+        start, k = (spine[-1][2], spine[-1][0]) if spine else (self.fd, 0)
+        for m in range(n - 1, max(k, n - 1 - self._STRIDE), -1):
+            fd = self._dirs.get(parts[:m])
+            if fd is not None:
+                self._dirs.move_to_end(parts[:m])
+                start, k = fd, m
+                break
+        fd, at = start, k
+        try:
+            for part in parts[k:]:
+                at += 1
+                fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                if at % self._STRIDE == 0:
+                    spine.append((at, parts[:at], fd))
+                else:
+                    self._keep(parts[:at], fd)
+        except OSError as exc:
+            gone = exc.errno == errno.ENOENT and parts[:at] in self.found
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK) or gone:
+                self._lost(parts[:at])
+                raise _PathChanged(exc.errno, f"{_fs_display(os.path.join(*parts[:at]))} is "
+                                              f"{'gone' if gone else 'a symbolic link or no folder'} now") from None
+            raise
+        return fd
+
+    def _lost(self, parts, below=False):
+        """The folder `parts` is a link, no folder or gone (beneath the root) now: where the walk found a folder there,
+        it changed while the tree was read, whichever reader asks (recorded: SC-TRUNCATED). `below`: one of the folders
+        on its way changed, which one unknown (the deepest the walk found is recorded)."""
+        for n in range(len(parts), 0, -1) if below else (len(parts),):
+            if parts[:n] in self.found:
+                self.changed_at(parts[:n])
+                return
+
+    def listdir(self, parts=()):
+        """[_Entry] of the folder `parts`, each lstat'ed while it is open. The folder itself is opened afresh (a
+        descriptor of it kept from before is let go): what is listed is the folder its name names now, and a folder
+        that is a link or no folder now is _PathChanged."""
+        parts = tuple(parts)
+        where = self._dir(parts, fresh=True)
+        out = []
+        with os.scandir(where) as it:
+            for e in it:
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError as exc:
+                    st = exc
+                out.append(_Entry(e.name, st))
+        return out
+
+    def listdir_after(self, parts):
+        """listdir, for a reader after the walk: a regular file the walk listed in that folder that is gone from it,
+        or another file or kind of file now, changed while the tree was read (recorded)."""
+        parts = self._canon(tuple(parts))
+        entries = self.listdir(parts)
+        listed = self.files.get(parts)
+        if listed:
+            now = {e.name: e for e in entries}
+            for name, expect in listed.items():
+                e = now.get(name)
+                try:
+                    same = e is not None and _same_file(e.stat(), expect)
+                except OSError:
+                    same = False
+                if not same:
+                    self.changed_at(parts + (name,))
+        return entries
+
+    def lstat(self, parts):
+        """lstat of `parts` (the root's own for ())."""
+        parts = tuple(parts)
+        if not parts:
+            return os.fstat(self.fd) if _ANCHORED_OPEN else os.stat(self.path)
+        where = self._dir(parts[:-1])
+        if not _ANCHORED_OPEN:
+            return os.lstat(os.path.join(where, parts[-1]))
+        return os.stat(parts[-1], dir_fd=where, follow_symlinks=False)
+
+    def is_regular(self, parts):
+        """Is `parts` a regular file now (lstat; no link followed on the way)? A regular file the walk listed there
+        that is gone, a link, another kind of file or another file now changed while the tree was read: recorded, and
+        False (a folder on its way that changed is recorded by `_dir`)."""
+        try:
+            parts = self._canon(tuple(parts))
+        except (OSError, ValueError):       # (_PathChanged: recorded)
+            return False
+        expect = self._walked(parts)
+        try:
+            st = self.lstat(parts)
+        except _PathChanged:
+            return False
+        except FileNotFoundError:
+            if expect is not None:
+                self.changed_at(parts)
+            return False
+        except (OSError, ValueError):       # (ValueError: a NUL in the name)
+            return False
+        if expect is not None and not _same_file(st, expect):
+            self.changed_at(parts)
+            return False
+        return _stat.S_ISREG(st.st_mode) and not _is_reparse_point(st)
+
+    def readlink(self, parts):
+        parts = tuple(parts)
+        where = self._dir(parts[:-1])
+        if not _ANCHORED_OPEN:
+            return os.readlink(os.path.join(where, parts[-1]))
+        return os.readlink(parts[-1], dir_fd=where)
+
+    def open(self, parts, expect=None):
+        """A descriptor of the file `parts` (O_NOFOLLOW | O_NONBLOCK); the caller closes it. _PathChanged when it, or a
+        folder on its way, is a link or no folder now. (Without an anchored open, the file is kept only when the final
+        path of what was opened is under the root, which bounds it whatever its folders are now: _open_verified. A
+        file is opened only where the walk, or a reader's lstat of every folder on its way, found it.)
+
+        `expect`: the regular file it must be, a _file_record or the lstat of it the walk made; without one, the file
+        the walk listed there, if it did. The descriptor's fstat must be that file: another kind of file (a folder, a
+        FIFO), another file or nothing there now is _PathChanged (LZ-03's review, H2); an open that fails otherwise
+        (permission denied) is raised as it is only while the entry is still that file."""
+        return self._opened(parts, expect)[0]
+
+    def _opened(self, parts, expect):
+        """(open's descriptor, its fstat where it was taken, else None)."""
+        parts = tuple(parts)
+        if expect is None:
+            parts = self._canon(parts)
+            expect = self._walked(parts)
+        elif isinstance(expect, os.stat_result):
+            expect = _file_record(expect)
+        try:
+            fd = self._open(parts)
+        except _PathChanged:
+            raise
+        except OSError:
+            if expect is not None:
+                self._still(parts, expect)
+            raise
+        if expect is None:
+            return fd, None
+        try:
+            st = os.fstat(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        if not _same_file(st, expect):
+            os.close(fd)
+            raise _PathChanged(errno.ESTALE, "it is another file or kind of file now")
+        return fd, st
+
+    def _still(self, parts, expect):
+        """_PathChanged unless `parts` is still the regular file `expect` (by lstat; nothing said where that fails)."""
+        try:
+            st = self.lstat(parts)
+        except _PathChanged:
+            raise
+        except FileNotFoundError:
+            raise _PathChanged(errno.ENOENT, "it is gone now") from None
+        except OSError:
+            return
+        if not _same_file(st, expect):
+            raise _PathChanged(errno.ESTALE, "it is another file or kind of file now")
+
+    def _open(self, parts):
+        if not _ANCHORED_OPEN:
+            try:
+                return _open_verified(self.within, os.path.join(self.path, *parts))
+            except _Unlocatable:
+                raise
+            except _OutsideRoot:            # (a file the walk found under the root: it changed)
+                raise _PathChanged(errno.ELOOP, "it is outside the root now: it changed while it was read") from None
+        where = self._dir(parts[:-1])
+        try:
+            return os.open(parts[-1], _OPEN_FLAGS, dir_fd=where)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                raise _PathChanged(exc.errno, "it is a symbolic link now") from None
+            raise
+
+    def read(self, parts, limit, expect=None):
+        """At most `limit` bytes of the regular file `parts` (_read_prefix's reading, from the root's descriptor; held
+        to `expect`, or to what the walk listed there, as `open` says)."""
+        fd, st = self._opened(parts, expect)
+        try:
+            return _read_fd(fd, limit, st)
+        finally:
+            os.close(fd)
+
+
+def _as_root(root):
+    """(a _Root for `root`, whether the caller opened it and closes it): `root` itself when it is one."""
+    return (root, False) if isinstance(root, _Root) else (_Root(root), True)
+
+
+def changed_issues(tree):
+    """SC-TRUNCATED for each part of the tree that changed while it was read (`_Root.changed`), once each, and for each
+    folder the walk did not enter, nested deeper than MAX_WALK_DEPTH (`_Root.too_deep`)."""
+    return [truncated_issue(rel, _CHANGED_WHY) for rel in dict.fromkeys(tree.changed)] + \
+        [truncated_issue(rel, _TOO_DEEP_WHY) for rel in dict.fromkeys(tree.too_deep)]
+
+
+def tree_incomplete(tree):
+    """Why a scan of `tree` is incomplete for what changed while it was read or was nested too deep: [reason]."""
+    out = []
+    changed, deep = len(dict.fromkeys(tree.changed)), len(dict.fromkeys(tree.too_deep))
+    if changed:
+        out.append(f"{changed} part{'s' if changed != 1 else ''} of the tree changed while it was read and "
+                   f"{'were' if changed != 1 else 'was'} not read")
+    if deep:
+        out.append(f"{deep} folder{'s' if deep != 1 else ''} nested deeper than {MAX_WALK_DEPTH} folders "
+                   f"{'were' if deep != 1 else 'was'} not read")
+    return out
 
 
 def collect_issue(kind, path, **args):
@@ -3088,9 +3959,24 @@ def _listing(path):
         return None
 
 
+def _listing_at(tree, parts):
+    """_listing of the folder `parts` of a _Root (a probe: None when it cannot be listed, a link now among them)."""
+    try:
+        return [[_fs_display(e.name), e.is_dir(follow_symlinks=False)] for e in tree.listdir(parts)]
+    except OSError:
+        return None
+
+
+def _regular_at(tree, parts):
+    try:
+        return _stat.S_ISREG(tree.lstat(parts).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
 def _dir_plan(rel_dir, in_dep, listed, paths, excludes, include_deps):
     """collect_dir until it needs nothing more: the probes of the folders it asks about (their entries; a vendor
-    folder's .cargo-checksum.json files)."""
+    folder's .cargo-checksum.json files). `paths[k]`: entry k's path, or (a _Root, its names) (LZ-03)."""
     answers = {"lists": [], "cargo": []}
     while True:
         got = _native.call("collect_dir", {"dir": _fs_display(rel_dir), "dep": _dep_arg(in_dep), "entries": listed,
@@ -3100,17 +3986,22 @@ def _dir_plan(rel_dir, in_dep, listed, paths, excludes, include_deps):
         if need is None:
             return got
         for k in need["lists"]:
-            answers["lists"].append([k, _listing(paths[k])])
+            at = paths[k]
+            answers["lists"].append([k, _listing_at(*at) if isinstance(at, tuple) else _listing(at)])
         for k, dirs in need["cargo"]:
+            at = paths[k]
             answers["cargo"].append([k, [d for d in dirs
-                                         if _regular(os.path.join(paths[k], d, ".cargo-checksum.json"))]])
+                                         if (_regular_at(at[0], at[1] + (d, ".cargo-checksum.json"))
+                                             if isinstance(at, tuple)
+                                             else _regular(os.path.join(at, d, ".cargo-checksum.json")))]])
 
 
 def _dep_tree_kind(name, path):
     """True when directory `name` at `path` is a dependency tree: always for
     node_modules / bower_components / site-packages; for vendor / venv /
     .venv / env only when a marker sits directly inside; "go" or "cargo" for a
-    vendor directory of Go's or cargo's (the engine's: collect.rs)."""
+    vendor directory of Go's or cargo's (the engine's: collect.rs). `path` may
+    be (a _Root, the folder's names) (LZ-03)."""
     got = _dir_plan("", False, [[_fs_display(name), "dir", None, False]], [path], [], True)
     for _k, action, extra in got["do"]:
         if action == "walk":
@@ -3126,10 +4017,15 @@ _SPECIAL_CODES = ((_stat.S_ISFIFO, "fifo"), (_stat.S_ISSOCK, "socket"), (_stat.S
 def _check_pycache(rel_dir, path, parent_names, out):
     """__pycache__ is not source-scanned; every .pyc directly inside is
     checked (PEP 552 flags, matching source; the engine's: collect.rs).
-    Symlinks -> Q-SYMLINK."""
+    Symlinks -> Q-SYMLINK. `path`: (a _Root, the folder's names): read from
+    the root's descriptor (LZ-03); a folder or a .pyc that changed while it
+    was read is recorded (_Root.changed_at) and not read."""
+    tree, parts = path
     try:
-        with os.scandir(path) as it:
-            entries = list(it)
+        entries = tree.listdir(parts)
+    except _PathChanged:
+        tree.changed_at(rel_dir)
+        return
     except OSError as exc:
         out.append(unreadable_issue(_fs_display(rel_dir), exc.strerror or type(exc).__name__))
         return
@@ -3142,10 +4038,10 @@ def _check_pycache(rel_dir, path, parent_names, out):
             listed.append([name, "error", exc.strerror or type(exc).__name__])
             continue
         if _stat.S_ISLNK(st.st_mode) or _is_reparse_point(st):
-            listed.append([name, "link", _readlink(e.path)])
+            listed.append([name, "link", _readlink((tree, parts + (e.name,)))])
         elif _stat.S_ISREG(st.st_mode):
             listed.append([name, "file", st.st_size])
-            paths[name] = e.path
+            paths[name] = (parts + (e.name,), st)
         else:
             listed.append([name, "special", "other"])
     headers = {}
@@ -3157,7 +4053,10 @@ def _check_pycache(rel_dir, path, parent_names, out):
             break
         for name in got["need"]:
             try:
-                headers[name] = _bytes_text(_read_prefix(paths[name], 16))
+                headers[name] = _bytes_text(tree.read(paths[name][0], 16, expect=paths[name][1]))
+            except _PathChanged as exc:
+                tree.changed_at(paths[name][0])
+                headers[name] = {"error": exc.strerror or str(exc)}
             except OSError as exc:
                 headers[name] = {"error": exc.strerror or str(exc) or type(exc).__name__}
     out.extend(engine._issues(path, [row])[0] for path, row in got["issues"])
@@ -3165,7 +4064,7 @@ def _check_pycache(rel_dir, path, parent_names, out):
 
 def _readlink(path):
     try:
-        target = os.readlink(path)
+        target = path[0].readlink(path[1]) if isinstance(path, tuple) else os.readlink(path)
     except (OSError, ValueError):
         return "?"
     return link_target_text(target) if os.name == "nt" else target
@@ -3190,7 +4089,9 @@ def link_target_text(target):
 
 def _collect_file(path, rel, st, in_dep, col):
     """Classify and read one regular file (the engine's decisions: collect.rs, collect_file, asked again with what
-    it needs read)."""
+    it needs read). `path`: (a _Root, the file's names), read from the root's descriptor (LZ-03) and held to `st`, the
+    walk's lstat of it: _PathChanged (the file is a link, another kind of file, another file or gone now, or a folder
+    on its way is a link or no folder) is the caller's to record, and nothing of it is kept."""
     disp = _fs_display(rel)
     args = {"rel": disp, "name": _fs_display(os.path.basename(rel)), "size": st.st_size, "dep": _dep_arg(in_dep),
             "cap": SOURCE_SIZE_CAP, "configCap": configsecrets.CONFIG_SCAN_CAP, "windows": _WINDOWS_PATHS,
@@ -3203,7 +4104,10 @@ def _collect_file(path, rel, st, in_dep, col):
             break
         what = need["read"]
         try:
-            data = _bytes_text(_read_prefix(path, need["limit"]))
+            data = _bytes_text(path[0].read(path[1], need["limit"], expect=st) if isinstance(path, tuple)
+                               else _read_prefix(path, need["limit"]))
+        except _PathChanged:
+            raise
         except OSError as exc:
             if what == "sample":                 # not read: the SC-TRUNCATED stands alone, as before
                 answers[what] = ""
@@ -3243,28 +4147,63 @@ def _collect(root, excludes=(), include_deps=False):
     valid UTF-8. Raises ScanTargetError when the root itself cannot be
     listed. What each entry is to the walk is the engine's (collect.rs:
     collect_dir); listing, the folders' identities, reading and counting are
-    this package's."""
+    this package's.
+
+    `root` is a path or a _Root: every folder and file is reached from the
+    root's descriptor (LZ-03). A folder or a file the walk found that is a
+    link or no folder by the time it is opened is recorded (_Root.changed_at)
+    and not read; with a path for `root`, those are SC-TRUNCATED findings in
+    `issues` (scan_project, which gives a _Root, reports them itself)."""
     excludes = sorted(_fs_display(x) for x in set(excludes or ()))
     col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": []}
     issues = col["issues"]
+    try:
+        tree, own = _as_root(root)
+    except OSError as exc:
+        raise ScanTargetError(f"cannot read directory {_fs_display(str(root))}: "
+                              f"{exc.strerror or type(exc).__name__}") from None
+    try:
+        _walk(tree, excludes, include_deps, col)
+        if own:
+            issues.extend(changed_issues(tree))
+    finally:
+        if own:
+            tree.close()
+    return col
+
+
+def _walk(tree, excludes, include_deps, col):
+    try:
+        _walk_tree(tree, excludes, include_deps, col)
+    finally:
+        tree.forget()                   # (the readers after the walk reach each folder by the name it has then)
+
+
+def _walk_tree(tree, excludes, include_deps, col):
+    issues = col["issues"]
     seen_dirs = set()
-    stack = [("", False)]
+    stack = [("", False, ())]
     while stack:
-        rel_dir, in_dep = stack.pop()
-        full_dir = os.path.join(root, rel_dir) if rel_dir else root
+        rel_dir, in_dep, parts = stack.pop()
         try:
-            with os.scandir(full_dir) as it:
-                entries = list(it)
-            st_dir = os.stat(full_dir) if not rel_dir else None
+            entries = tree.listdir(parts)
+            st_dir = tree.lstat(()) if not rel_dir else None
+        except _PathChanged:
+            if not rel_dir:
+                raise ScanTargetError(f"cannot read directory {_fs_display(tree.path)}: it changed while it was "
+                                      f"read") from None
+            tree.changed_at(rel_dir)
+            continue
         except OSError as exc:
             if not rel_dir:
                 raise ScanTargetError(
-                    f"cannot read directory {_fs_display(str(root))}: "
+                    f"cannot read directory {_fs_display(tree.path)}: "
                     f"{exc.strerror or type(exc).__name__}") from None
             issues.append(unreadable_issue(_fs_display(rel_dir), exc.strerror or type(exc).__name__))
             continue
         if st_dir is not None and st_dir.st_ino:
             seen_dirs.add(f"{st_dir.st_dev}:{st_dir.st_ino}")
+        tree.listed(parts, entries)
         listed, stats = [], []
         for e in entries:
             name = _fs_display(e.name)
@@ -3277,7 +4216,7 @@ def _collect(root, excludes=(), include_deps=False):
             stats.append(st)
             mode = st.st_mode
             if _stat.S_ISLNK(mode) or (_stat.S_ISDIR(mode) and _is_reparse_point(st)):
-                listed.append([name, "link", _readlink(e.path)])
+                listed.append([name, "link", _readlink((tree, parts + (e.name,)))])
             elif _stat.S_ISDIR(mode):
                 key = f"{st.st_dev}:{st.st_ino}" if st.st_ino else None
                 listed.append([name, "dir", key, key in seen_dirs])
@@ -3285,18 +4224,22 @@ def _collect(root, excludes=(), include_deps=False):
                 listed.append([name, "special", next((c for test, c in _SPECIAL_CODES if test(mode)), "other")])
             else:
                 listed.append([name, "file", st.st_size])
-        got = _dir_plan(rel_dir, in_dep, listed, [e.path for e in entries], excludes, include_deps)
+        got = _dir_plan(rel_dir, in_dep, listed, [(tree, parts + (e.name,)) for e in entries], excludes,
+                        include_deps)
         seen_dirs.update(got["seen"])
         names = {e.name for e in entries}
         push = []
         for k, action, extra in got["do"]:
             e = entries[k]
             rel = os.path.join(rel_dir, e.name) if rel_dir else e.name
+            at = parts + (e.name,)
             if action == "issue":
                 issues.append(engine._issues(extra[0], [extra[1]])[0])
             elif action == "file":
                 try:
-                    _collect_file(e.path, rel, stats[k], in_dep, col)
+                    _collect_file((tree, at), rel, stats[k], in_dep, col)
+                except _PathChanged:
+                    tree.changed_at(rel)
                 except OSError as exc:
                     reason = (str(exc) if isinstance(exc, _NotRegularFile)
                               else exc.strerror or type(exc).__name__)
@@ -3304,16 +4247,18 @@ def _collect(root, excludes=(), include_deps=False):
                 except Exception as exc:        # one file must never kill the walk
                     issues.append(engine.error_issue(_fs_display(rel), exc))
             elif action == "skip":
-                _count_skipped_tree(root, e.path, _fs_display(rel), col["skipped"])
+                _count_skipped_tree(tree, at, _fs_display(rel), col["skipped"])
+            elif len(at) > MAX_WALK_DEPTH:      # (a folder to walk or a __pycache__ to check, too deep to enter:
+                tree.too_deep.append(_fs_display(rel))  # SC-TRUNCATED, the result incomplete)
             elif action == "pycache":
                 try:
-                    _check_pycache(rel, e.path, names, issues)
+                    _check_pycache(rel, (tree, at), names, issues)
                 except Exception as exc:
                     issues.append(engine.error_issue(_fs_display(rel), exc))
             else:                               # "walk"
-                push.append((rel, in_dep or _dep_of(extra[1], rel)))
+                tree.found.add(at)
+                push.append((rel, in_dep or _dep_of(extra[1], rel), at))
         stack.extend(reversed(push))       # pop order = sorted, depth-first (like os.walk)
-    return col
 
 
 def collect_files(root, extra_excludes, include_deps=False):
@@ -3401,10 +4346,13 @@ class _DependencyTree:
     directories the walk pruned (their '/'-separated paths), when nothing in
     them is to be read either (a project's own hooks: project_hook_checks,
     where a dependency tree is not read without --deps); `project`: a file
-    a hook runs is then read, not scanned."""
+    a hook runs is then read, not scanned. `root`: a path or the scan's _Root,
+    whose descriptor every read starts from (LZ-03): a file found to be one
+    that is a link or behind one when it is read is recorded as changed."""
 
     def __init__(self, root, files, manifests, excludes, pruned=(), project=False):
-        self.root = os.fspath(root)
+        self.tree, _own = _as_root(root)
+        self.root = self.tree.path
         self.sources = {_slash(f["path"]): f for f in files}
         self.manifests = {_slash(m["path"]): m for m in manifests}
         self.excludes = set(excludes or ()) | ALWAYS_PRUNE_DIRS
@@ -3426,18 +4374,9 @@ class _DependencyTree:
             return False
         if self._in_pruned(parts):
             return False
-        path = self.root
-        try:
-            for k, part in enumerate(parts):
-                path = os.path.join(path, part)
-                st = os.lstat(path)
-                if _stat.S_ISLNK(st.st_mode) or _is_reparse_point(st):
-                    return False
-                if k < len(parts) - 1 and not _stat.S_ISDIR(st.st_mode):
-                    return False
-            return _stat.S_ISREG(st.st_mode)
-        except (OSError, ValueError):       # ValueError: a NUL in the name
-            return False
+        # (a link, or a file, on the way: _PathChanged; the file itself: lstat. A file the walk listed that is gone,
+        # a link, another kind of file or another file now is recorded as changed: LZ-03's review, H1)
+        return self.tree.is_regular(tuple(parts))
 
     def _in_pruned(self, parts):
         """Is one of the folders of `parts` (a path's, split at '/') a tree the
@@ -3485,7 +4424,10 @@ class _DependencyTree:
             known["under"][folder] = self._under(folder)
         for path, cap in need["head"]:
             try:
-                data = _read_prefix(os.path.join(self.root, *path.split("/")), cap + 1)
+                data = self.tree.read(self.tree.parts(path), cap + 1)
+            except _PathChanged:
+                self.tree.changed_at(self.tree.parts(path))
+                known["head"].append([path, cap, None])
             except (OSError, ValueError):
                 known["head"].append([path, cap, None])
             else:
@@ -3493,20 +4435,25 @@ class _DependencyTree:
 
     def _entries(self, folder):
         """[[name, a real directory]] of a directory of the tree, or None when
-        it can't be listed (no link is followed to tell a directory)."""
-        where = os.path.join(self.root, *folder.split("/"))
+        it can't be listed (no link is followed to tell a directory, or to
+        reach it). The engine asks for folders of the walk's files' paths (a
+        site-packages folder), so one that is a link or behind one now
+        changed while the tree was read: recorded, and not listed."""
         try:
-            names = sorted(os.listdir(where))
-        except OSError:
+            entries = self.tree.listdir_after(self.tree.parts(folder))
+        except _PathChanged:
+            self.tree.changed_at(self.tree.parts(folder))
+            return None
+        except (OSError, ValueError):
             return None
         out = []
-        for name in names:
+        for e in sorted(entries, key=lambda e: e.name):
             try:
-                st = os.lstat(os.path.join(where, name))
+                st = e.stat(follow_symlinks=False)
             except OSError:
-                out.append([name, False])
+                out.append([e.name, False])
                 continue
-            out.append([name, _stat.S_ISDIR(st.st_mode) and not _is_reparse_point(st)])
+            out.append([e.name, _stat.S_ISDIR(st.st_mode) and not _is_reparse_point(st)])
         return out
 
     def _under(self, folder):
@@ -3519,21 +4466,20 @@ class _DependencyTree:
         parts = folder.split("/")
         if any(p in self.excludes or p in ("", ".", "..") for p in parts) or self._in_pruned(parts + [""]):
             return sorted(out)
-        path = self.root
         try:                                # (the folder itself: a real directory, reached through no link)
-            for part in parts:
-                path = os.path.join(path, part)
-                st = os.lstat(path)
-                if not _stat.S_ISDIR(st.st_mode) or _is_reparse_point(st):
-                    return sorted(out)
+            st = self.tree.lstat(tuple(parts))
+            if not _stat.S_ISDIR(st.st_mode) or _is_reparse_point(st):
+                return sorted(out)
         except (OSError, ValueError):
             return sorted(out)
-        stack = [(path, folder)]
+        stack = [(tuple(parts), folder)]
         while stack:
             where, rel = stack.pop()
             try:
-                with os.scandir(where) as it:
-                    entries = list(it)
+                entries = self.tree.listdir_after(where)
+            except _PathChanged:            # (a folder found here, a link or no folder now)
+                self.tree.changed_at(where)
+                continue
             except OSError:
                 continue
             for e in entries:
@@ -3546,7 +4492,7 @@ class _DependencyTree:
                     continue
                 if _stat.S_ISDIR(st.st_mode):
                     if e.name not in self.excludes and sub not in self.pruned:
-                        stack.append((e.path, sub))
+                        stack.append((where + (e.name,), sub))
                 elif _stat.S_ISREG(st.st_mode):
                     out.add(sub)
         return sorted(out)
@@ -3571,8 +4517,10 @@ class _DependencyTree:
         runs it (only read, to test what the hook runs)."""
         disp = rel.replace("/", os.sep)
         try:
-            data = _read_prefix(os.path.join(self.root, *rel.split("/")), SOURCE_SIZE_CAP + 1)
+            data = self.tree.read(self.tree.parts(rel), SOURCE_SIZE_CAP + 1)
         except OSError as exc:
+            if isinstance(exc, _PathChanged):
+                self.tree.changed_at(disp)
             reason = str(exc) if isinstance(exc, _NotRegularFile) else exc.strerror or type(exc).__name__
             return [truncated_issue(disp, f"it runs at install time but could not be read ({reason})")], None, None
         if len(data) > SOURCE_SIZE_CAP:
@@ -3707,7 +4655,10 @@ def _vendor_text(tree, rel):
     if not tree.is_file(rel):
         return None
     try:
-        data = _read_prefix(os.path.join(tree.root, *rel.split("/")), _VENDOR_TEXT_CAP + 1)
+        data = tree.tree.read(tree.tree.parts(rel), _VENDOR_TEXT_CAP + 1)
+    except _PathChanged:
+        tree.tree.changed_at(tree.tree.parts(rel))
+        return None
     except (OSError, ValueError):
         return None
     return None if len(data) > _VENDOR_TEXT_CAP else data.decode("utf-8", "replace")
@@ -3725,7 +4676,10 @@ def _disk_reader(root, files, manifests, excludes=()):
         if not tree.is_file(rel):
             return None
         try:
-            data = _read_prefix(os.path.join(tree.root, *rel.split("/")), SOURCE_SIZE_CAP + 1)
+            data = tree.tree.read(tree.tree.parts(rel), SOURCE_SIZE_CAP + 1)
+        except _PathChanged:
+            tree.tree.changed_at(tree.tree.parts(rel))
+            return None
         except (OSError, ValueError):
             return None
         if len(data) > SOURCE_SIZE_CAP or looks_binary(data[:2048]):
@@ -3746,11 +4700,14 @@ def _cgo_texts(tree, folder):
     Go package's directory, '/'-separated): what the Go reader reads with its
     cgo preambles. Regular files only, through no link, each at most
     SOURCE_SIZE_CAP bytes."""
-    where = os.path.join(tree.root, *folder.split("/")) if folder else tree.root
+    where = tree.tree.parts(folder) if folder else ()
     out = []
     try:
-        with os.scandir(where) as it:
-            names = sorted(e.name for e in it if os.path.splitext(e.name)[1].lower() in _CGO_EXTS)
+        names = sorted(e.name for e in tree.tree.listdir_after(where)
+                       if os.path.splitext(e.name)[1].lower() in _CGO_EXTS)
+    except _PathChanged:                    # (the folder of files the walk read: a link or no folder now)
+        tree.tree.changed_at(where)
+        return out
     except OSError:
         return out
     for name in names:
@@ -3758,7 +4715,10 @@ def _cgo_texts(tree, folder):
         if not tree.is_file(rel):
             continue
         try:
-            data = _read_prefix(os.path.join(where, name), SOURCE_SIZE_CAP + 1)
+            data = tree.tree.read(where + (name,), SOURCE_SIZE_CAP + 1)
+        except _PathChanged:
+            tree.tree.changed_at(where + (name,))
+            continue
         except (OSError, ValueError):
             continue
         if len(data) <= SOURCE_SIZE_CAP and not looks_binary(data[:HEADER_SAMPLE_BYTES]):
@@ -4027,7 +4987,7 @@ def _apply_redaction(issues, got):
 
 def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                  redact_secrets=True, extra_issues=(), should_stop=None, shown=None, allow_empty=False,
-                 merge_issues=(), extra_files=(), extra_configs=0, collected=None):
+                 merge_issues=(), extra_files=(), extra_configs=0, collected=None, opened=None):
     """The complete project scan, shared by the CLI (main) and the MCP server:
     collect -> scan files -> manifests / binding.gyp -> what the project's own
     install hooks run (project_hook_checks) -> --deps' dependency checks ->
@@ -4074,6 +5034,13 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
     collected       optional dict: given the files this scan counted in its
                     metrics ("files": [{path, content, lang, dep, …}]) and
                     the paths of the config files it read ("configs")
+    opened          optional _Root of `root`, opened by the caller (the MCP
+                    server opens the folder it checked beneath its allowed
+                    root); else the root is opened here. Every read under it
+                    starts from its descriptor (LZ-03): a part of the tree
+                    that changed while it was read (a link or no folder where
+                    the walk found a folder or a file) is SC-TRUNCATED, not
+                    read, and the result is incomplete.
 
     Returns the build_result() dict — project, scannedAt, pass, conditions,
     metrics, counts, ratings, supplyChain, crossFile, perFile, issues — plus
@@ -4081,12 +5048,30 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
     Raises ScanTargetError (usage error) when root does not exist, is not a
     directory, cannot be read, or holds nothing to scan.
     """
-    global REDACT_SECRETS
     root = os.fspath(root)
-    if not os.path.exists(root):
-        raise ScanTargetError(f"{_fs_display(root)} does not exist")
-    if not os.path.isdir(root):
-        raise ScanTargetError(f"{_fs_display(root)} is not a directory")
+    if opened is None:
+        if not os.path.exists(root):
+            raise ScanTargetError(f"{_fs_display(root)} does not exist")
+        if not os.path.isdir(root):
+            raise ScanTargetError(f"{_fs_display(root)} is not a directory")
+        try:
+            tree = _Root(root)
+        except OSError as exc:
+            raise ScanTargetError(f"cannot read directory {_fs_display(root)}: "
+                                  f"{exc.strerror or type(exc).__name__}") from None
+    else:
+        tree = opened
+    try:
+        return _scan_project(tree, root, exclude, include_deps, taint_config, redact_secrets, extra_issues,
+                             should_stop, shown, allow_empty, merge_issues, extra_files, extra_configs, collected)
+    finally:
+        if opened is None:
+            tree.close()
+
+
+def _scan_project(tree, root, exclude, include_deps, taint_config, redact_secrets, extra_issues, should_stop, shown,
+                  allow_empty, merge_issues, extra_files, extra_configs, collected):
+    global REDACT_SECRETS
     saved_redact = REDACT_SECRETS
     REDACT_SECRETS = bool(redact_secrets)
     try:
@@ -4100,9 +5085,10 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                                        on_warn=lambda msg: flow_warnings.append(msg))
             warnings.extend(f"taint config: {m}" for m in
                             _dedupe(get_taint_config_warnings() + flow_warnings))
-        col = _collect(root, exclude, include_deps=include_deps)
+        col = _collect(tree, exclude, include_deps=include_deps)
         files, manifests, configs = col["files"], col["manifests"], col["configs"]
-        if not files and not manifests and not configs and not col["pth"] and not col["issues"] and not allow_empty:
+        if not files and not manifests and not configs and not col["pth"] and not col["issues"] and not tree.changed \
+                and not tree.too_deep and not allow_empty:
             raise ScanTargetError(
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
@@ -4157,7 +5143,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             if stopped:
                 break
             if cf.get("dep") and dep_read is None:
-                dep_read = tree_reader(files, configs, disk=_disk_reader(root, files, manifests, exclude))
+                dep_read = tree_reader(files, configs, disk=_disk_reader(tree, files, manifests, exclude))
             try:
                 issues.extend(scan_config_file(cf["path"], cf["content"], dep_read if cf.get("dep") else read,
                                                dep=bool(cf.get("dep"))))
@@ -4175,7 +5161,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 issues.append(engine.error_issue(mf["path"], exc))
         if not stopped:
             # the project's own install hooks: what they run (project_hook_checks)
-            found, hook_stopped = project_hook_checks(root, files, manifests, issues, exclude, col["skipped"],
+            found, hook_stopped = project_hook_checks(tree, files, manifests, issues, exclude, col["skipped"],
                                                       should_stop)
             issues.extend(found)
             if hook_stopped:
@@ -4184,7 +5170,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                     ".", f"{stopped}: what the project's install hooks run was not checked to the end"))
             else:
                 # --deps: what the dependencies run (install hooks, import-time code)
-                found, extra, dep_stopped = dependency_checks(root, files, manifests, issues, exclude, should_stop)
+                found, extra, dep_stopped = dependency_checks(tree, files, manifests, issues, exclude, should_stop)
                 issues.extend(found)
                 numbered.extend(found)
                 files.extend(extra)
@@ -4216,6 +5202,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         # the flow engine copies raw source lines into its snippets: give
         # them (and every scan_file finding) the file's own redaction
         redact_file_issues(numbered, files)
+        # LZ-03: what changed while the tree was read was not read (_Root)
+        changed = changed_issues(tree)
+        issues.extend(changed)
         if merge_issues:
             issues = merge_findings(issues, merge_issues)
         res = build_result(root, files + list(extra_files), issues)
@@ -4224,8 +5213,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             collected.setdefault("configs", []).extend(cf["path"] for cf in configs[:checked])
         res["metrics"]["configFiles"] = checked + extra_configs
         res["warnings"] = warnings
-        if stopped:
-            res.update(incomplete=True, incompleteReason=stopped)
+        why = ([stopped] if stopped else []) + tree_incomplete(tree)
+        if why:
+            res.update(incomplete=True, incompleteReason="; ".join(why))
         if shown is not None:
             shown.update(flagged_lines(res["issues"], files + manifests + configs))
         # L1: belt-and-braces — no SECRET-rule issue may reach a report or
