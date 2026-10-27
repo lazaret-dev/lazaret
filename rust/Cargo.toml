@@ -8,12 +8,13 @@
 # repository (scripts/sync_pratique.py), not a crate from a registry.
 [workspace]
 resolver = "2"
-members = ["crates/lazaret-engine", "crates/lazaret-ffi", "crates/lazaret-verify", "crates/lazaret-net",
-           "crates/pratique"]
+members = ["crates/lazaret-archive", "crates/lazaret-engine", "crates/lazaret-ffi", "crates/lazaret-verify",
+           "crates/lazaret-net", "crates/pratique"]
 # What `cargo build` and `cargo test` take with no -p: Lazaret's crates. pratique (taken as it is upstream,
 # scripts/sync_pratique.py) is built as their dependency, and its own tests run on their own in CI
 # (`cargo test -p pratique --lib` and its tests that need nothing installed).
-default-members = ["crates/lazaret-engine", "crates/lazaret-ffi", "crates/lazaret-verify", "crates/lazaret-net"]
+default-members = ["crates/lazaret-archive", "crates/lazaret-engine", "crates/lazaret-ffi", "crates/lazaret-verify",
+                   "crates/lazaret-net"]
 
 [workspace.package]
 version = "0.1.9"

@@ -1,0 +1,15 @@
+[package]
+name = "lazaret-archive"
+description = "Bounded, safe, native archive extraction for Lazaret (no I/O, no unsafe, no external crates)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+lazaret-verify = { path = "../lazaret-verify" }

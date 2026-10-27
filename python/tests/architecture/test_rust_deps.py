@@ -22,7 +22,8 @@ class RustDepsTests(unittest.TestCase):
 
     def test_the_workspace_has_no_external_crates(self):
         names = self.s.members()
-        self.assertEqual(sorted(names), ["lazaret-engine", "lazaret-ffi", "lazaret-net", "lazaret-verify", "pratique"])
+        self.assertEqual(sorted(names), ["lazaret-archive", "lazaret-engine", "lazaret-ffi", "lazaret-net", "lazaret-verify",
+                                         "pratique"])
         self.assertEqual(self.s.lock_problems(names), [])
         for name, directory in names.items():
             self.assertEqual(self.s.manifest_problems(name, directory, names), [], name)

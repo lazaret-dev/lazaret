@@ -3,6 +3,13 @@
 version = 3
 
 [[package]]
+name = "lazaret-archive"
+version = "0.1.9"
+dependencies = [
+ "lazaret-verify",
+]
+
+[[package]]
 name = "lazaret-engine"
 version = "0.1.9"
 dependencies = [
