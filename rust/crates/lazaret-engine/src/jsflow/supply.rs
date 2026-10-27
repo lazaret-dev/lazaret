@@ -5098,6 +5098,22 @@ thread_local! {
     static DIALECT: std::cell::Cell<Dialect> = const { std::cell::Cell::new(Dialect::Js) };
 }
 
+/// EVAL-LITERAL: the last text's reading, kept aside while the strings it hands an eval call are read as texts of their
+/// own (signs::eval_literal_reasons), and given back when the guard is dropped, so that the text's next test does not
+/// read it again (a bundle's tree is seconds of work).
+pub(crate) struct KeepLast(Option<(Dialect, std::sync::Arc<[u32]>, Result<Rc<Facts>, Unread>)>);
+
+pub(crate) fn keep_last() -> KeepLast {
+    KeepLast(LAST.with(|l| l.borrow_mut().take()))
+}
+
+impl Drop for KeepLast {
+    fn drop(&mut self) {
+        let kept = self.0.take();
+        LAST.with(|l| *l.borrow_mut() = kept);
+    }
+}
+
 /// Reads the texts the supply-chain tree is given in `dialect` until the guard is dropped (TS-STRIP: the API's
 /// `dialect`, for a call given a TypeScript file's text; a hook's target by its name), as own_release names the
 /// release (signs.rs). Without one, a text is read as JavaScript first, as before.

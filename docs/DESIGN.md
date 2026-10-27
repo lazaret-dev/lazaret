@@ -725,6 +725,25 @@ JavaScript twin, `js/src/lib/received.js`, was retired in 0.1.8).
   given it as arguments runs that program, and a usage text's parser
   (`argparse`, `optparse`, `docopt`) gives the command line; the text
   follower answers for a text the tree can't read, and for JavaScript.
+- **Code in a string an eval call runs (EVAL-LITERAL, 0.1.9).** `eval("…")`,
+  `Function("…")`, `new Function("a", "…")`, a global object's eval or
+  Function by a computed name (`globalThis["ev" + "al"]("…")`, `window[k]("…")`)
+  and Python's `eval`, `exec` and `compile` run the string they are handed;
+  to the tests it was a string, so a send written inside one was quiet
+  (found and first fixed by the external review agent, card 609dd639,
+  Oct 21–22). The import-time and install-script tests now read each such
+  string (`evalcode::codes`: a string literal or a template with no holes,
+  or several joined by `+`, read as the runtime reads them; the call found
+  on the text's tokens, so one in a comment or a string is none) with
+  their own reading, as a text of its own, and give what it finds at the
+  call's line, noted " (in a string it runs as code)". Strings in strings
+  are read four deep (`_EVAL_DEPTH`); a text that nests them deeper is
+  SC-TRUNCATED, never quiet. Each string is charged to the call's budget,
+  its length and a fixed amount for its reading, which runs the whole
+  test, so a text of many runs out (SC-TRUNCATED) rather than on. A
+  string handed through a name (`eval(code)`) is not read: the
+  received-code flows and the decoded view read what they can of those.
+  docs/RUST_ENGINE.md §24.
 
 **The second reading (0.1.8).** When the first reading finds nothing, a text of
 up to `_DL_LOGICAL_MAX_CHARS` (1,000,000) characters is read once more as

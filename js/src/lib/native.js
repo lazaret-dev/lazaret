@@ -40,7 +40,10 @@ export const EXHAUSTED = "reading it spent the engine's work budget (a pattern t
 // the supply-chain tree did not read whole (the review of Oct 20: the parser refused code V8 compiles, the model's
 // budget ran out; signs.rs TREE_UNREAD): the file is SC-TRUNCATED beside what the text follower found
 export const TREE_CUT = "the supply-chain tree did not read it whole: ";
-const CUT_PREFIXES = ["the text follower reads at most ", TREE_CUT];
+// and a text that nests the strings eval calls run deeper than the tests read them (EVAL-LITERAL: signs.rs
+// eval_literal_reasons, _EVAL_DEPTH)
+const EVAL_CUT = "the strings eval calls run as code are read ";
+const CUT_PREFIXES = ["the text follower reads at most ", TREE_CUT, EVAL_CUT];
 const isCut = (why) => typeof why === "string" && CUT_PREFIXES.some((p) => why.startsWith(p));
 /** Why a call answered as one that ran out (BIG-BUNDLE-TAIL): the limit a reading of its text met before the text's
  * end, or the tree's not reading it whole, in the engine's words, else EXHAUSTED (its work budget spent). A worker's

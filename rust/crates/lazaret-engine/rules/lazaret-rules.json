@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.106.0",
+ "rule_set": "2.107.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12638,6 +12638,16 @@
   },
   "_EVAL_BY_NAME": {
    "value": "\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]"
+  },
+  "_EVAL_CALL_RE": {
+   "flags": "",
+   "re": "\\b(?:eval|Function|exec|compile|getattr|globalThis|window|self|global|top|parent|frames|builtins|__builtins__)\\b|\\\\u(?:00[4-7][0-9A-Fa-f]|\\{0*[4-7][0-9A-Fa-f]\\})"
+  },
+  "_EVAL_DEPTH": {
+   "value": 4
+  },
+  "_EVAL_NOTE": {
+   "value": " (in a string it runs as code)"
   },
   "_EXEC_CALL_RE": {
    "flags": "",

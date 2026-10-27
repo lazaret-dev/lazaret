@@ -2091,6 +2091,27 @@ aggregate):
   16 listed as before, so no verdict is weaker; the same on every route, native and WebAssembly). Owed:
   John's `bench.py all` (the popular set: a release that ships a checkpoint or a pickle moves; joblib's wheel becomes
   INCOMPLETE for its own `.pkl.bz2`/`.pkl.xz`/`.pkl.lzma` test files).
+- **The code a text hands an eval call as a string is read as code (EVAL-LITERAL; the engine's, for both packages;
+  rule set 2.107.0).** `eval("…")`, `Function("…")`, `new Function("a", "…")` and a global object's eval
+  or Function by a computed name (`globalThis["ev" + "al"]("…")`) run the string they are handed, and so do Python's
+  `eval`, `exec` and `compile`; the import-time and install-script tests read it as a string, so the whole environment
+  or a credential file sent from inside one was quiet in every route the tests serve: the registry's import-time code,
+  install scripts and action scan, and both CLIs' `--deps` (found and first fixed by the external review agent, card
+  609dd639, Oct 21–22). Now each such string (a string literal or a template with no holes, or several joined by `+`;
+  escaped quotes, `\x41`, `\u0041`, `\u{41}`; Python's adjacent, raw, bytes and triple-quoted strings; the call found
+  on the text's tokens, so one in a comment or a string is none) is read by the same test as a text of its own, and
+  what it finds is given at the call's line, noted " (in a string it runs as code)". Strings in strings are read four
+  deep (`_EVAL_DEPTH`): a text that nests them deeper is SC-TRUNCATED ("the strings eval calls run as code are read 4
+  deep (_EVAL_DEPTH), and this text nests them deeper"; both packages' `EVAL_CUT`), never quiet; each string read is
+  charged to the call's budget, a step a character and a fixed amount for the reading itself (50,000 steps in
+  JavaScript, 200,000 in Python), so a text of many strings runs out (SC-TRUNCATED) rather than on; a call's arguments
+  are found in one reading of the text's brackets, calls nested in each other's arguments too; a text that ends inside
+  a call (`eval(` at its end) is read. A string handed through a name (`eval(code)`) is not read here. On 10,765 JavaScript
+  files of popular packages (the latest releases of 39 from npm, lodash, moment, jquery, three, webpack,
+  @babel/standalone, core-js, mathjax, underscore, ejs, handlebars, doT, lodash.template, vue, angular and hogan.js
+  among them, twenty local ones and fourteen local bundles; some 280 hand such a call a string) both tests answer as
+  before for every file, in the same CPU. docs/RUST_ENGINE.md, section 24.
+
 - **A big text's tail is read: the supply-chain tree reads a file up to 16,000,000 characters, and the text follower
   a text whole or says where it stopped (BIG-BUNDLE-TAIL, D-8; the engine's, for both packages; rule set 2.106.0).**
   The tree read a JavaScript or Python text up to 2,000,000 characters; past that the text follower

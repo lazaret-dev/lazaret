@@ -241,6 +241,10 @@ rust/
     src/strarr.rs            javascript-obfuscator's string arrays and proxy objects, for the
                              decoded view
     src/jcstr.rs             JS-Confuser's string concealing, for the decoded view (D-11, 0.1.9)
+    src/evalcode.rs          the strings a text hands an eval call (eval, Function, a global
+                             object's by a computed name; Python's eval, exec, compile), which
+                             the import-time and install-script tests read as code (§24,
+                             EVAL-LITERAL, 0.1.9)
     src/lex/                 the lexers (§15): js.rs (JavaScript, TypeScript, JSX: templates and
                              their holes, regular expressions), py.rs (Python, with pyparse's
                              tokenizer), go.rs and rs.rs (Go and Rust: raw strings, runes and
@@ -3459,3 +3463,94 @@ module held; aws-sdk-go v1, 207 million characters, now peaks at 2.4 GB, from 3.
   `goVendorData`; a main module below `go 1.23` builds them), followed through the files of each folder named.
 
 Both are linear in the text, and nothing in them panics on any input (`vendor::tests`).
+
+## 24. Code an eval call runs from a string (EVAL-LITERAL)
+
+`eval("…")`, `Function("…")` and `new Function("a", "…")`, and a global object's eval or Function by a name the text
+computes (`globalThis["ev" + "al"]("…")`), run the string they are handed as code; so do Python's `eval("…")`,
+`exec("…")` and `compile("…", …)`. The import-time and install-script tests read a text's code, and a string is not
+code to them: the supply-chain tree reads a literal as a value, the text follower's patterns read what a text sends,
+not what a string holds, so a send written inside such a string was quiet, in every route the tests serve (found and
+first fixed by the external review agent, card 609dd639, Oct 21–22: its pass 5, `eval_literal_codes`, and the EOF
+guard of its integration pass). `evalcode.rs` finds those strings and `signs::eval_literal_reasons` has the test read
+each as a text of its own.
+
+**The calls** (`evalcode::codes`) are read on the text's tokens (§15's lexers, which the decoded view has already
+lexed, so the call costs a walk of them): a call in a comment, a string or a regular expression is none, and a comment
+between a name and its `(` changes nothing. The callee is `eval` or `Function` (Python: `eval`, `exec`, `compile`),
+bare or as a member of a global object (`_GLOBAL_EVAL_RECEIVERS`: `window.eval`, `globalThis.Function`,
+`builtins.exec`), parenthesized (`(0, eval)(…)`), called optionally (`eval?.(…)`) or through `call` (`eval.call(null,
+"…")`), its name written with JavaScript's escapes (`\u0065val`) or in a form Python's NFKC reads as the name; or a
+global object's member by a computed name (`self["Func" + "tion"]`), which runs what its name's value says, and any of
+its arguments when the name is not a constant (`window[k]("…")`); in Python `getattr(builtins, "exec")` and
+`__builtins__["exec"]`. Not a declaration (`function eval(`, `def exec(`) nor another object's member
+(`redis.eval(…)`, `re.compile(…)`). eval's string is its first argument, Function's its last (the ones before it name
+its parameters). An argument is a string when the runtime makes it of literals alone: a string literal or a template
+with no holes, several joined by `+` (in Python adjacent ones too), each read as its runtime reads it (`lex::value`:
+escaped quotes, `\x41`, `\u0041`, `\u{41}`, line continuations; Python's raw, bytes and triple-quoted strings,
+`\N{…}`). `_EVAL_CALL_RE` (the names, and an escape that may write one) gates the walk.
+
+**The reading** (`eval_literal_reasons`). The import-time test (`import_time_risk_with`) and the install-script test
+(`install_script_risk_text`) read each string, and each string the text's decoded view hands such a call (a string
+array's `globalThis[_0x1f(3)](_0x1f(4))`), with their own reading, as a text of its own in the text's language (the
+install-script test as a script: no shell reads it); each reason found is given once, with `_EVAL_NOTE` (" (in a
+string it runs as code)"; a view's with `_DV_NOTE` too), at the line of the call (the text's own reasons keep theirs,
+first; a reason the text gives itself is not given again: `exec("bash -i …")` read as Python is one reverse shell). A
+reason's strength is read by its start (`import_time_severity`, the action scan's `judge`), so the note changes no
+severity. Each string read is charged to the call's budget before it is read: a step a character, and a fixed amount
+for the reading itself (`signs::EVAL_STRING_STEPS_JS`, 50,000 steps; `EVAL_STRING_STEPS_PY`, 200,000), which runs the
+whole test on the string (its trees, text followers and decoded view: some 35 to 75 µs for a short JavaScript string,
+130 to 200 µs for a Python one, which its length did not cover). The default budget, `budget::DEFAULT_STEPS`
+(4,000,000,000 steps), covers 80,000 short JavaScript strings or 20,000 Python ones, and a text that hands more runs
+out rather than on (SC-TRUNCATED, its work budget spent). That step budget is the bound, not a time: a string costs its
+fixed amount and its length, so the time a text takes to spend the budget grows with its strings' lengths (the
+external review of Oct 28: 100,000 different payloads, 9 MB, ran out of budget in some 30 s on a debug build).
+A call's arguments are found stepping over the brackets in them, whose ends are found once for the
+text (`evalcode::pairs`), a step a token read: a text of calls nested in each other's arguments is read once, not once
+for each call (`eval(` nested 100,000 deep answers at once with the tree's "nesting too deep" cut, as it did before
+EVAL-LITERAL); each call's line is counted on from the one before, and the strings the decoded view adds are told from
+the text's in a set. The text's own
+readings, which each tree and the decoded view keep for the text's next test (one text a thread:
+`jsflow::supply::keep_last`, `pyflow::supply::keep_last`, the decoded view's `DvKept`), are kept aside while its
+strings are read and given back after: without that, the install-script test of an 11 MB bundle read after its
+import-time test took 10 s instead of 3, its tree and view read again. Strings in strings are read `_EVAL_DEPTH` (4)
+deep; a text that nests them deeper is a cut (`budget::cut`, "the strings eval calls run as code are read 4 deep
+(_EVAL_DEPTH), and this text nests them deeper"): the file is SC-TRUNCATED, beside what was found, never quiet, in
+those words (both packages read them as a cut: `engine.EVAL_CUT`, npm's `EVAL_CUT`). A text that ends inside a call
+(`eval(` at its end) is no call: nothing indexes past the tokens.
+
+**Not read**: a template with holes, a string joined with anything else (`"a" + x`), a name or a call that holds the
+string (`eval(code)`; `eval(atob("…"))` is the decoded view's and the received-code flows'), `Function.apply`,
+`Reflect.apply(eval, …)`, `[].constructor.constructor("…")`, Node's `vm.runInThisContext("…")` and a string timer
+(`setTimeout("…")`, which Node refuses).
+
+**Before and after.** Every form above, written in a synthetic inert file (the whole environment or the user's
+`.npmrc` sent with `fetch` or `https.request`, a download piped to `sh` with its name escaped), was quiet before in
+every route: the import-time test, the install-script test, the registry's import-time code (an npm package's main),
+its install script (a `postinstall`), the action scan, a wheel's module, and both CLIs' `--deps` (a dependency's file
+and its hook's script). Now each is found at the call's line, natively and in WebAssembly alike, CRITICAL (the
+download run through a shell is MAJOR in an action, as it is anywhere in one); strings nested five deep are
+SC-TRUNCATED and the release INCOMPLETE; benign strings (`eval("1+1")`, `new Function("a", "b", "return a+b")`,
+`Function("return this")`, a JSON text, a minified module's own code) are quiet. On 10,765 JavaScript files of popular
+packages (206 MB: the latest releases of 39 from npm, among them lodash, moment, jquery, three, webpack,
+@babel/standalone, core-js, mathjax, underscore, ejs, handlebars, doT, lodash.template, vue, angular, hogan.js and
+nunjucks; twenty local packages, typescript, pdfjs-dist and mermaid among them; and the fourteen local bundles), some
+280 of which hand such a call a string (hogan.js's compiled templates, mathjax's, underscore's, pdf.js's …), both
+tests answer as before for every file, and their CPU is the same (the import-time test 81.6 s before, 79.1 s now; the
+install-script test 37.2 and 38.2 s).
+
+**Amended after the gates (Oct 27).** The gates found the reading uncharged where it cost most, on synthetic inert
+texts of many short strings: each call's line counted from the text's start (F-1) and the decoded view's strings told
+from the text's one by one (F-3), so 40,000 `eval('var aN = N;')` took 8 s a test and 2 MB more than 45; with that
+fixed, each reading still ran the whole test for its length's steps alone (F-2: 2 MB of Python's `exec('aN = N')`, 15
+s); and a walk of each call to its end read `eval(` nested 100,000 deep once for each call, spending the budget in 8
+to 9 s where the tree's "nesting too deep" answered at once (F-4). Now, natively (CPU seconds a test, before the fix
+and after, on a shared machine): 40,000 evals 7.8 → 1.2 s and 40,000 Python execs 10.8 → 3.1 s (out of budget: 20,000
+are read); 2 MB of evals (73,000) more than 45 → 2.3 to 3.2 s, answered; 2 MB and 16 MB of Python execs, and 16 MB of
+evals, more than 45 → 3 to 6 s, out of budget (SC-TRUNCATED); `eval(` or `window[` nested 100,000 deep 8.3 → 0.04 s,
+the tree's cut, as before EVAL-LITERAL (0.04 s). In WebAssembly each of these shapes answered in 7.5 s or less (40,000
+evals 21.4 → 2.5 s). The benign corpora answer as before, natively and in WebAssembly: 16,944 files of popular
+packages and 72 local bundles, each within 25 million steps, a 160th of the budget. Of the thirty that name such
+calls most, the most strings read is 150 (a webpack eval-devtool bundle's modules: 0.2% of the 80,000 the budget
+covers; in Python 13, pandas' `test_eval.py`, of 20,000), and the most budget needed 21 million steps (yarn's
+`cli.js`), 0.5% of it.

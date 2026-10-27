@@ -3655,6 +3655,21 @@ thread_local! {
     static LAST: RefCell<Option<(std::sync::Arc<[u32]>, Result<Rc<Facts>, Option<PyStr>>)>> = const { RefCell::new(None) };
 }
 
+/// EVAL-LITERAL: the last text's reading, kept aside while the strings it hands an eval call are read as texts of their
+/// own (signs::eval_literal_reasons), and given back when the guard is dropped (as jsflow::supply::keep_last).
+pub(crate) struct KeepLast(Option<(std::sync::Arc<[u32]>, Result<Rc<Facts>, Option<PyStr>>)>);
+
+pub(crate) fn keep_last() -> KeepLast {
+    KeepLast(LAST.with(|l| l.borrow_mut().take()))
+}
+
+impl Drop for KeepLast {
+    fn drop(&mut self) {
+        let kept = self.0.take();
+        LAST.with(|l| *l.borrow_mut() = kept);
+    }
+}
+
 /// BIG-BUNDLE-TAIL (the review of Oct 20, HIGH 3): why the tree did not read a Python text it was given, in words,
 /// when the pass stopped at its budget (its note's words: a file past its budget, a reading past its steps, the
 /// iteration cap). None when the tree read it, when the text is past the scans' largest file (SC-TRUNCATED by its

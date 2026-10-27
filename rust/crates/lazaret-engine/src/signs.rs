@@ -3303,6 +3303,23 @@ thread_local! {
     static DV_MEMO: std::cell::RefCell<Option<(DvKey, Option<&'static str>, Reading)>> = const { std::cell::RefCell::new(None) };
 }
 
+/// EVAL-LITERAL: the decoded view's last reading, kept aside while the strings a text hands an eval call are read as
+/// texts of their own, and given back when the guard is dropped (as jsflow::supply::keep_last).
+struct DvKept(Option<(DvKey, Option<&'static str>, Reading)>);
+
+impl DvKept {
+    fn take() -> DvKept {
+        DvKept(DV_MEMO.with(|m| m.borrow_mut().take()))
+    }
+}
+
+impl Drop for DvKept {
+    fn drop(&mut self) {
+        let kept = self.0.take();
+        DV_MEMO.with(|m| *m.borrow_mut() = kept);
+    }
+}
+
 /// core._dv_reading: decoded_view's reading of `text` and the line of the
 /// string array it reads, the last text's kept.
 fn dv_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> Reading {
@@ -4171,6 +4188,11 @@ fn install_script_risk_text(p: &Pack, text: &[u32], shell: bool, command: bool, 
     if concealed_strings_line(p, text, lang).is_some() {
         reasons.push(p.text("_JC_TECHNIQUE_REASON"));
     }
+    // EVAL-LITERAL: the code the script hands an eval call as a string, read by this test as a script of its own (in
+    // the script's language: no shell reads it)
+    for (_, r) in eval_literal_reasons(p, text, lang, &reasons, &mut |code: &[u32]| install_script_risk_with(p, code, false, false, lang)) {
+        push_new(&mut reasons, r);
+    }
     reasons
 }
 
@@ -4761,7 +4783,132 @@ pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declare
         reasons.push(p.text("_JC_TECHNIQUE_REASON"));
         line = line.or(Some(jc));
     }
+    // EVAL-LITERAL: the code the text hands an eval call as a string, read by this test as a text of its own
+    for (at, r) in eval_literal_reasons(p, text, lang, &reasons, &mut |code: &[u32]| import_time_risk_with(p, code, lang, declared).0) {
+        if !reasons.contains(&r) {
+            reasons.push(r);
+            line = line.or(Some(at));
+        }
+    }
     (reasons, line)
+}
+
+thread_local! {
+    /// EVAL-LITERAL: how deep in strings eval calls run the text being read lies (0: a file's own text).
+    static EVAL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One string deeper while it lives (and back when it is dropped, a panic's unwinding included).
+struct EvalDeeper;
+
+impl EvalDeeper {
+    fn enter() -> EvalDeeper {
+        EVAL_DEPTH.with(|d| d.set(d.get() + 1));
+        EvalDeeper
+    }
+}
+
+impl Drop for EvalDeeper {
+    fn drop(&mut self) {
+        EVAL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+/// EVAL-LITERAL: the steps each string read as a text of its own is charged on top of its length, in JavaScript and in
+/// Python (F-2, the gates of Oct 27). A reading runs the whole test, its trees, text followers and decoded view: some
+/// 35 to 75 µs for a short JavaScript string and 130 to 200 µs for a Python one, which a step a character did not
+/// cover (2 MB of Python's `exec('aN = N')` read on for 15 s a test). Charged at about the rate of the budget's other
+/// steps, DEFAULT_STEPS (4,000,000,000 steps) covers 80,000 short JavaScript strings or 20,000 Python ones, and a text
+/// that hands more runs out rather than on (SC-TRUNCATED). The bound is that step budget, not a time: a string costs
+/// this and its length, so the time a text takes to spend the budget grows with its strings' lengths (the external
+/// review of Oct 28: 100,000 different payloads, 9 MB, ran out in some 30 s on a debug build). The most a benign text
+/// of the corpora hands is 150, a webpack eval-devtool bundle's modules (13 in Python), each text within a 160th of the
+/// budget.
+pub(crate) const EVAL_STRING_STEPS_JS: u64 = 50_000;
+pub(crate) const EVAL_STRING_STEPS_PY: u64 = 200_000;
+
+/// The 1-based line of each offset of `codes` (evalcode::codes': in order) in `text`, each line counted once from the
+/// last (F-1, the gates of Oct 27: counted from the start for each, a text of 40,000 calls took 8 s, not 0.3).
+fn lines_in_order(text: &[u32], codes: Vec<(usize, PyStr)>) -> Vec<(usize, PyStr)> {
+    let (mut line, mut from) = (1, 0);
+    codes
+        .into_iter()
+        .map(|(at, code)| {
+            line = if at >= from { line + pystr::count_char(text, c('\n'), from, at) } else { line_of(text, at) };
+            from = at;
+            (line, code)
+        })
+        .collect()
+}
+
+/// EVAL-LITERAL (0.1.9; found and first fixed by the external review agent, card 609dd639, Oct 21–22): what a test
+/// finds in the code a JavaScript or Python text (or its decoded view: `globalThis[_0x1f(3)](_0x1f(4))`) hands an
+/// eval call as a string (evalcode::codes), read by `read` (the test's own reading of a text) as a text of its own:
+/// (the 1-based line of the call, each reason with `_EVAL_NOTE`, a view's with `_DV_NOTE` too), each once, and none the
+/// text gives itself (`have`: a reason one of them begins with, a reverse shell's in `exec("bash -i …")`). Each
+/// string read is charged to the call's budget before it is read, a step a character and `EVAL_STRING_STEPS_*` for the
+/// reading itself, so a text of many strings runs out rather than on. Strings in strings are read `_EVAL_DEPTH` deep:
+/// a text that nests them deeper is not read whole, which the call says (budget::cut: the file is SC-TRUNCATED, beside
+/// what was found), never an answer of nothing.
+fn eval_literal_reasons(
+    p: &Pack,
+    text: &[u32],
+    lang: Option<&str>,
+    have: &[PyStr],
+    read: &mut dyn FnMut(&[u32]) -> Vec<PyStr>,
+) -> Vec<(usize, PyStr)> {
+    let Some(lang) = lang.filter(|l| *l == "js" || *l == "py") else {
+        return Vec::new();
+    };
+    // (line, string, whether only the decoded view hands it)
+    let mut found: Vec<(usize, PyStr, bool)> =
+        lines_in_order(text, crate::evalcode::codes(p, text, lang)).into_iter().map(|(line, code)| (line, code, false)).collect();
+    if let Some(view) = dv_view(p, text, Some(lang)) {
+        let view: &[u32] = &view;
+        let _gate = crate::textgate::open(view);
+        // (each string once: the text's found already, in a set; codes gives the view's each once)
+        let known: HashSet<&[u32]> = found.iter().map(|(_, s, _)| s.as_slice()).collect();
+        let more: Vec<(usize, PyStr)> =
+            lines_in_order(view, crate::evalcode::codes(p, view, lang)).into_iter().filter(|(_, s)| !known.contains(s.as_slice())).collect();
+        found.extend(more.into_iter().map(|(line, code)| (line, code, true)));
+    }
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let deep = p.usize("_EVAL_DEPTH");
+    if EVAL_DEPTH.with(|d| d.get()) >= deep {
+        crate::budget::cut(&format!(
+            "the strings eval calls run as code are read {deep} deep (_EVAL_DEPTH), and this text nests them deeper"
+        ));
+        return Vec::new();
+    }
+    let (note, dv) = (p.text("_EVAL_NOTE"), p.text("_DV_NOTE"));
+    let reading = if lang == "py" { EVAL_STRING_STEPS_PY } else { EVAL_STRING_STEPS_JS };
+    let mut out: Vec<(usize, PyStr)> = Vec::new();
+    // (the text's own readings, its trees' and its decoded view's, kept aside while its strings are read and given
+    // back after: the text's next test reads none of them again)
+    let _kept = (crate::jsflow::supply::keep_last(), crate::pyflow::supply::keep_last(), DvKept::take());
+    for (at, code, in_view) in found {
+        if !crate::budget::spend(code.len() as u64 + reading) {
+            break;
+        }
+        let _deeper = EvalDeeper::enter();
+        let _gate = crate::textgate::open(&code);
+        for r in read(&code) {
+            if have.iter().any(|h| h.starts_with(&r)) {
+                continue;
+            }
+            // (a reason of a string in the string: noted already)
+            let mut r = if pystr::find(&r, &note, 0).is_some() { r } else { cat(&[&r, &note]) };
+            if in_view && pystr::find(&r, &dv, 0).is_none() {
+                r = cat(&[&r, &dv]);
+            }
+            if !out.iter().any(|(_, x)| *x == r) {
+                out.push((at, r));
+            }
+        }
+    }
+    out
 }
 
 /// The packages a package manager is asked to install in the command lines a text hands an exec call (a command

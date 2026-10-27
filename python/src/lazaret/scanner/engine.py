@@ -49,7 +49,10 @@ CUT_PREFIX = "the text follower reads at most "
 # parser refused code V8 compiles, the model's budget ran out; signs.rs TREE_UNREAD): the file is SC-TRUNCATED beside
 # what the text follower found, where its code runs
 TREE_CUT = "the supply-chain tree did not read it whole: "
-CUT_PREFIXES = (CUT_PREFIX, TREE_CUT)
+# how the engine words a text that nests the strings eval calls run deeper than the tests read them (EVAL-LITERAL:
+# signs.rs eval_literal_reasons, _EVAL_DEPTH): the file is SC-TRUNCATED, beside what was found
+EVAL_CUT = "the strings eval calls run as code are read "
+CUT_PREFIXES = (CUT_PREFIX, TREE_CUT, EVAL_CUT)
 
 
 class EngineError(RuntimeError):
@@ -222,7 +225,8 @@ def error_issue(path, exc):
 def exhausted_why(exc):
     """Why a call answered as one that ran out (BIG-BUNDLE-TAIL): the limit a reading of its text met before the
     text's end, in the engine's words (the text follower's: "the text follower reads at most ..."; the supply-chain
-    tree's: TREE_CUT), else EXHAUSTED (its work budget spent)."""
+    tree's: TREE_CUT; the strings eval calls run, nested past the depth the tests read: EVAL_CUT), else EXHAUSTED (its
+    work budget spent)."""
     message = str(exc)
     return message if message.startswith(CUT_PREFIXES) else EXHAUSTED
 
