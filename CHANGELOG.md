@@ -1828,7 +1828,9 @@ aggregate):
   policy 1.2.3.4 (a critical `requireExplicitPolicy`), was answered on both transports. **The native transport**
   (pratique's main of Oct 27, `57c22cb0`, NET-1, under Changed; pratique processes no policy) now refuses a chain with
   a critical one of the four wherever it is: the server's certificate, an intermediate or the trust anchor (an anchor
-  that carries one is not used). One that is not critical is ignored, as before. The same holds wherever pratique
+  that carries one is not used). The refusal names the extension (and, for an anchor, which anchor is left out) and
+  says that `LAZARET_NETWORK=python` has OpenSSL process certificate policies. One that is not critical is ignored, as
+  before. The same holds wherever pratique
   judges a chain for Lazaret: npm's and PyPI's Sigstore attestations too. **Python's transport**, which Lazaret uses by
   itself and not only with `LAZARET_NETWORK=python` (a redirect to another host that the native transport hands over,
   from the Go guard or an SCA feed's download; a proxy reached over TLS and the other cases the native client does not

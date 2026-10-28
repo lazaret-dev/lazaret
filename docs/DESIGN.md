@@ -2506,8 +2506,13 @@ was taken as if it were not there, so a private CA's requireExplicitPolicy
 held nothing). **The native transport:** pratique processes no certificate
 policy, and since its main of Oct 27 (`57c22cb0`) a critical one of the
 four refuses the chain wherever it is, the trust anchor included (an anchor
-that carries one is never used, and the refusal says the chain has no
-trusted root); one that is not critical is ignored, as before. **Python's
+that carries one is never used, so a chain that ends at it has no trusted
+root); one that is not critical is ignored, as before. The refusal says
+which extension it is (pratique gives its OID on a certificate the server
+sent, and only "no trusted root" for an anchor: `lazaret-net`'s
+`explain_refusal` names the extension, and the anchor left out, from the
+store's anchors that mark one critical) and that Python's transport, with
+`LAZARET_NETWORK=python`, has OpenSSL process them. **Python's
 transport** (urllib and the keep-alive pool on `nativenet.tls_context()`,
 secret verification on `secretverify_http.default_context()`), which
 Lazaret uses by itself, not only with `LAZARET_NETWORK=python`: a redirect

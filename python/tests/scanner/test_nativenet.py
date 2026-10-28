@@ -596,10 +596,15 @@ class PolicyExtensionTests(unittest.TestCase):
                 server.stop()
                 nativenet.configure_roots(None)
 
+    NAMES = {oid: name for name, (oid, _value) in EXTENSIONS.items()}
+
     def assertRefused(self, oid, **choices):
+        """Refused for the extension, which the refusal names, with what to do (the native transport's explanation)."""
         kind, message = self.outcome(**choices)
         self.assertEqual(kind, "tls", message)
         self.assertIn(f"unrecognized critical extension {oid}", message)
+        self.assertIn(f"that is {self.NAMES[oid]}, a certificate-policy extension", message)
+        self.assertIn("LAZARET_NETWORK=python", message)
 
     def test_an_intermediate_with_a_policy_and_no_constraint_is_answered(self):
         self.assertEqual(self.outcome(intermediate=[self.POLICY]), ("answered", b"hello"))
@@ -640,13 +645,15 @@ class PolicyExtensionTests(unittest.TestCase):
     def test_a_critical_one_on_the_trust_anchor_refuses_the_chain(self):
         """The anchor is judged as the rest of the path: pratique never uses an anchor with a critical extension it
         does not process (its bulk loading parses each one when it is first needed, and leaves out one that does not
-        pass), so the chain has no trusted root, and the refusal says so rather than naming the extension. Each one not
-        critical: answered."""
+        pass), so the chain has no trusted root; the refusal says so, then which anchor is left out for which extension,
+        and what to do. Each one not critical: answered."""
         for name, (oid, value) in self.EXTENSIONS.items():
             with self.subTest(name):
                 kind, message = self.outcome(intermediate=[self.POLICY], root_extensions=[(oid, value, True)])
                 self.assertEqual(kind, "tls", message)
                 self.assertIn("unable to build a chain to a trusted root", message)
+                self.assertRegex(message, rf"the trust anchor \[[^]]+\] is not used because it marks {name} critical")
+                self.assertIn("LAZARET_NETWORK=python", message)
                 self.assertEqual(self.outcome(intermediate=[self.POLICY], root_extensions=[(oid, value, False)]),
                                  ("answered", b"hello"))
 

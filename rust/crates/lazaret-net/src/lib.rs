@@ -84,6 +84,23 @@ pub const DECODE_RATIO_FLOOR: u64 = 1024 * 1024;
 /// them). John's to decide (docs/0.1.9-progress.md, NET-1, pratique's B-92).
 pub const WEB_PKI_RULES: bool = false;
 
+/// The certificate-policy extensions (RFC 5280 4.2.1.4, 4.2.1.5, 4.2.1.11 and 4.2.1.14), by OID and name. pratique
+/// processes none of them, so since its main of Oct 27 a critical one refuses the chain wherever it is (the external
+/// report's LZ-01): a server's certificate or an intermediate that carries one is refused as pratique says
+/// ("unrecognized critical extension 2.5.29.36 in [...]"), and a trust anchor that carries one is never used, so a
+/// chain that ends at it has no trusted root. A refusal of either kind says which extension it is and what to do
+/// ([`explain_refusal`]).
+pub const POLICY_EXTENSIONS: [(&str, &str); 4] = [
+    ("2.5.29.32", "certificatePolicies"),
+    ("2.5.29.33", "policyMappings"),
+    ("2.5.29.36", "policyConstraints"),
+    ("2.5.29.54", "inhibitAnyPolicy"),
+];
+
+/// What a refusal for a critical certificate-policy extension adds: why, and the transport that processes them.
+pub const POLICY_HINT: &str = "Lazaret's network code does not process certificate policies, so it refuses a chain \
+    that marks one critical (LZ-01); Python's transport has OpenSSL process them: set LAZARET_NETWORK=python to use it";
+
 /// Why a request did not give a response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
@@ -164,7 +181,10 @@ fn classify(e: NetError) -> Failure {
         }
         NetError::Tls(m) => Failure::Tls(m),
         NetError::Alert(level, desc) => Failure::Tls(format!("TLS alert received (level {level}, description {desc})")),
-        NetError::Verify(v) => Failure::Tls(format!("certificate: {v}")),
+        NetError::Verify(v) => {
+            let anchors = POLICY_ANCHORS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            Failure::Tls(explain_refusal(&format!("certificate: {v}"), &anchors))
+        }
         NetError::Io(io) => match io.kind() {
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => Failure::Timeout(io.to_string()),
             _ => Failure::Network(io.to_string()),
@@ -178,6 +198,112 @@ fn classify(e: NetError) -> Failure {
         NetError::Decode(pratique::inflate::Error::OutputLimit { .. }) => Failure::TooLarge,
         // (and whatever a later pratique adds)
         other => Failure::Http(other.to_string()),
+    }
+}
+
+/// A certificate refusal (`message`, as [`classify`] words it) with what a critical certificate-policy extension
+/// (LZ-01) has to do with it, where it has: pratique names the extension's OID on a certificate the server sent, and
+/// says only that the chain has no trusted root when the anchor it ends at carries one (`anchors`: the store's anchors
+/// that do, [`policy_anchors`]); then the extension is named and [`POLICY_HINT`] follows. Any other refusal as it is.
+pub fn explain_refusal(message: &str, anchors: &[(String, Vec<&'static str>)]) -> String {
+    for (oid, name) in POLICY_EXTENSIONS {
+        if message.contains(&format!("unrecognized critical extension {oid} ")) {
+            return format!("{message}: that is {name}, a certificate-policy extension; {POLICY_HINT}");
+        }
+    }
+    if message.contains("is neither a trusted root nor sent by the server") {
+        for (subject, names) in anchors {
+            if message.contains(&format!("the issuer [{subject}] of certificate [")) {
+                return format!(
+                    "{message}: the trust anchor [{subject}] is not used because it marks {} critical, a \
+                     certificate-policy extension; {POLICY_HINT}",
+                    names.join(" and ")
+                );
+            }
+        }
+    }
+    message.to_string()
+}
+
+/// The anchors of `store` that mark a certificate-policy extension critical ([`POLICY_ANCHORS`]).
+fn policy_anchors(store: &TrustStore) -> Vec<(String, Vec<&'static str>)> {
+    store.certificates().filter_map(critical_policy_extensions).collect()
+}
+
+/// A certificate's subject (as pratique's messages write it) and the certificate-policy extensions it marks critical,
+/// if any; None for one that marks none, or that this reading does not get through (pratique then refuses or uses it
+/// on its own grounds, and the refusal stays as pratique words it).
+fn critical_policy_extensions(der: &[u8]) -> Option<(String, Vec<&'static str>)> {
+    use pratique::asn1::{self, Der};
+    let mut top = Der::new(der);
+    let mut cert = top.sequence().ok()?;
+    let mut tbs = cert.sequence().ok()?;
+    tbs.optional(0xa0).ok()?; // version
+    tbs.expect(asn1::TAG_INTEGER).ok()?; // serialNumber
+    tbs.expect(asn1::TAG_SEQUENCE).ok()?; // signature
+    tbs.expect(asn1::TAG_SEQUENCE).ok()?; // issuer
+    tbs.expect(asn1::TAG_SEQUENCE).ok()?; // validity
+    let subject = tbs.expect(asn1::TAG_SEQUENCE).ok()?;
+    tbs.expect(asn1::TAG_SEQUENCE).ok()?; // subjectPublicKeyInfo
+    tbs.optional(0x81).ok()?; // issuerUniqueID
+    tbs.optional(0x82).ok()?; // subjectUniqueID
+    let extensions = tbs.optional(0xa3).ok()??;
+    let mut list = Der::new(extensions.content).sequence().ok()?;
+    let mut names = Vec::new();
+    while !list.is_empty() {
+        let mut ext = list.sequence().ok()?;
+        let oid = asn1::oid_to_string(ext.expect(asn1::TAG_OID).ok()?.content);
+        let critical = matches!(ext.optional(asn1::TAG_BOOLEAN), Ok(Some(b)) if b.content.iter().any(|&v| v != 0));
+        if let Some((_, name)) = POLICY_EXTENSIONS.iter().find(|(o, _)| *o == oid) {
+            if critical && !names.contains(name) {
+                names.push(*name);
+            }
+        }
+    }
+    (!names.is_empty()).then(|| (describe_name(subject.raw), names))
+}
+
+/// A name as pratique's messages write it (its `x509::describe_name`, which it keeps to itself): CN, O, OU and C, in
+/// order, at most eight, each value cut at 64 characters with control characters made `?`, joined by ", ".
+fn describe_name(name_der: &[u8]) -> String {
+    use pratique::asn1::{self, Der};
+    fn label(oid: &[u8]) -> Option<&'static str> {
+        match oid {
+            [0x55, 0x04, 0x03] => Some("CN"),
+            [0x55, 0x04, 0x0a] => Some("O"),
+            [0x55, 0x04, 0x0b] => Some("OU"),
+            [0x55, 0x04, 0x06] => Some("C"),
+            _ => None,
+        }
+    }
+    fn parts(name_der: &[u8]) -> Option<Vec<String>> {
+        let mut outer = Der::new(name_der);
+        let mut rdns = outer.sequence().ok()?;
+        let mut parts = Vec::new();
+        while !rdns.is_empty() && parts.len() < 8 {
+            let set = rdns.expect(asn1::TAG_SET).ok()?;
+            let mut atvs = Der::new(set.content);
+            while !atvs.is_empty() {
+                let mut atv = atvs.sequence().ok()?;
+                let oid = atv.expect(asn1::TAG_OID).ok()?.content;
+                let value = atv.next().ok()?;
+                let Some(label) = label(oid) else { continue };
+                let text = match value.tag {
+                    asn1::TAG_UTF8_STRING | asn1::TAG_PRINTABLE_STRING | asn1::TAG_IA5_STRING | 0x14 => {
+                        String::from_utf8_lossy(value.content).into_owned()
+                    }
+                    _ => "<unsupported string type>".to_string(),
+                };
+                let clean: String = text.chars().take(64).map(|c| if c.is_control() { '?' } else { c }).collect();
+                parts.push(format!("{label}={clean}"));
+            }
+        }
+        Some(parts)
+    }
+    match parts(name_der) {
+        Some(parts) if !parts.is_empty() => parts.join(", "),
+        Some(_) => "<name without common attributes>".to_string(),
+        None => "<unreadable name>".to_string(),
     }
 }
 
@@ -469,6 +595,9 @@ struct Base {
 
 static BASE: Mutex<Option<Base>> = Mutex::new(None);
 static ROOTS: Mutex<Option<Arc<String>>> = Mutex::new(None);
+/// The trust anchors of the store last made that mark a certificate-policy extension critical, which pratique never
+/// uses: (their subject as pratique's messages write it, the extensions' names). [`explain_refusal`] reads it.
+static POLICY_ANCHORS: Mutex<Vec<(String, Vec<&'static str>)>> = Mutex::new(Vec::new());
 
 /// The trust anchors: `roots` (PEM), or the system's CA bundle (`SSL_CERT_FILE` first); with [`WEB_PKI_RULES`].
 fn trust_store(roots: Option<&str>) -> Result<TrustStore, Failure> {
@@ -489,6 +618,7 @@ fn trust_store(roots: Option<&str>) -> Result<TrustStore, Failure> {
 
 fn new_base(roots: Option<&str>) -> Result<Client, Failure> {
     let store = trust_store(roots)?;
+    *POLICY_ANCHORS.lock().unwrap_or_else(|p| p.into_inner()) = policy_anchors(&store);
     Ok(Client::with_tls_config(ClientConfig::new(store)).user_agent(USER_AGENT).http2(true))
 }
 

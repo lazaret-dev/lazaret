@@ -468,16 +468,48 @@ fn a_critical_policy_extension_refuses_the_chain() {
             let on_leaf = trust_store(Some(&pki.root_pem())).unwrap().verify_server_chain(&[leaf], "localhost", now);
             let root = with_extension(&pki.root, &root_key, &oid, critical, value);
             let on_anchor = trust_store(Some(&pem(&root))).unwrap().verify_server_chain(&pki.chain, "localhost", now);
+            let anchors = policy_anchors(&trust_store(Some(&pem(&root))).unwrap());
             if critical {
                 let refused = on_leaf.map(|_| ()).unwrap_err().to_string();
                 assert!(refused.contains(&format!("unrecognized critical extension {dotted}")), "{name} on the leaf: {refused}");
-                assert!(on_anchor.is_err(), "{name} on the anchor: taken");
+                // the refusal says which extension it is and what to do
+                let said = explain_refusal(&refused, &[]);
+                assert!(said.starts_with(&refused), "{said}");
+                assert!(said.contains(&format!("that is {name}, a certificate-policy extension")), "{said}");
+                assert!(said.contains("LAZARET_NETWORK=python"), "{said}");
+                let refused = on_anchor.map(|_| ()).unwrap_err().to_string();
+                assert!(refused.contains("is neither a trusted root nor sent by the server"), "{name} on the anchor: {refused}");
+                assert_eq!(anchors.len(), 1, "{name}");
+                assert_eq!(anchors[0].1, vec![*name]);
+                let said = explain_refusal(&refused, &anchors);
+                assert!(said.contains(&format!("the trust anchor [{}] is not used because it marks {name} critical", anchors[0].0)),
+                        "{said}");
+                assert!(said.contains("LAZARET_NETWORK=python"), "{said}");
+                // pratique's own words for the anchor's name: the trust anchor named is the issuer it could not find
+                assert!(refused.contains(&format!("the issuer [{}] of certificate [", anchors[0].0)), "{refused}");
             } else {
                 on_leaf.unwrap_or_else(|e| panic!("{name}, not critical, on the leaf: {e}"));
                 on_anchor.unwrap_or_else(|e| panic!("{name}, not critical, on the anchor: {e}"));
+                assert!(anchors.is_empty(), "{name}, not critical: {anchors:?}");
             }
         }
     }
+}
+
+#[test]
+fn a_refusal_for_anything_else_is_left_as_it_is() {
+    let anchors = vec![("CN=Policy Root".to_string(), vec!["policyConstraints"])];
+    for message in [
+        "certificate: certificate has expired [CN=x]",
+        "certificate: unrecognized critical extension 1.2.3.4 in [CN=x]",
+        "certificate: unable to build a chain to a trusted root for [CN=x]: the issuer [CN=Other Root] of certificate [CN=x] is neither a trusted root nor sent by the server",
+    ] {
+        assert_eq!(explain_refusal(message, &anchors), message);
+    }
+    // a refusal for an anchor that marks none is as pratique says it
+    let unknown = "certificate: unable to build a chain to a trusted root for [CN=x]: the issuer [CN=Policy Root] of certificate [CN=x] is neither a trusted root nor sent by the server";
+    assert_eq!(explain_refusal(unknown, &[]), unknown);
+    assert!(explain_refusal(unknown, &anchors).contains("LAZARET_NETWORK=python"));
 }
 
 #[test]
