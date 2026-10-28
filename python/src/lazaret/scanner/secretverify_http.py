@@ -53,6 +53,10 @@ MAX_PATH = 2000
 USER_AGENT = "lazaret-secret-verify"
 #: the oldest TLS version a secret is sent over (nativenet.TLS_FLOOR: Lazaret's floor on every transport)
 TLS_FLOOR = ssl.TLSVersion.TLSv1_2
+#: OpenSSL's X509_V_FLAG_POLICY_CHECK, as nativenet.X509_V_FLAG_POLICY_CHECK (Python's ssl has no name for it): the
+#: certificate-policy processing of RFC 5280 6.1 in the chain check, so a private CA's policy constraints hold on this
+#: transport too (LZ-01)
+X509_V_FLAG_POLICY_CHECK = 0x80
 #: the statuses that redirect (pratique's `is_redirect`): with a Location, one is TransportError "redirect"
 REDIRECTS = (301, 302, 303, 307, 308)
 #: the budget lazaret-net's request is opened with: an answer that declares a length up to it is read to `max_bytes` and cut,
@@ -146,11 +150,13 @@ class _Connection(http.client.HTTPSConnection):
 
 
 def default_context():
-    """Python's default context (the system's trust anchors, the hostname checked) with `TLS_FLOOR` as its floor."""
+    """Python's default context (the system's trust anchors, the hostname checked) with `TLS_FLOOR` as its floor and
+    OpenSSL's certificate-policy check (`X509_V_FLAG_POLICY_CHECK`)."""
     context = ssl.create_default_context()
     low = context.minimum_version
     if low == ssl.TLSVersion.MINIMUM_SUPPORTED or 0 <= low < TLS_FLOOR:
         context.minimum_version = TLS_FLOOR
+    context.verify_flags |= X509_V_FLAG_POLICY_CHECK
     return context
 
 

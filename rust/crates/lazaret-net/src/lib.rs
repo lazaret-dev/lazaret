@@ -6,8 +6,8 @@
 //!
 //! * **hosts**: the hosts the caller may reach, as Lazaret writes them (`registry.npmjs.org`,
 //!   `*.gallerycdn.vsassets.io`): a `*.` entry stands for exactly one DNS label, and an entry without a port is
-//!   the default port only (pratique's `HostRules` with `one_label_wildcards` and `default_port_only`). A
-//!   request without a rule is refused here: there is no "any host".
+//!   the default port only (pratique's `HostRules` as it makes them since its B-75, Lazaret's rule being its
+//!   default: [`host_rule`]). A request without a rule is refused here: there is no "any host".
 //! * **the URL**: https only, no credentials, printable ASCII, at most 2,048 bytes (`UrlLimits::strict`).
 //! * **bounds**: a byte budget for the body (a larger body is [`Failure::TooLarge`], whatever the server
 //!   declared), a timeout for connecting and for each read and write, an optional limit on the whole request,
@@ -24,10 +24,12 @@
 //! one connection per origin that every request to it shares, and any other is spoken to in HTTP/1.1 with
 //! keep-alive. The clients share their connections (pratique's clones share the pool and the HTTP/2 registry),
 //! made on first use with the trust anchors [`configure`] was given or else the system's CA bundle
-//! (`SSL_CERT_FILE` first). A process that forks gets new connections in the child: the parent's are left alone,
-//! neither used nor closed from the child (a TLS close from the child would end the parent's session, and an
-//! HTTP/2 connection's reader and writer threads are not in the child). Proxies are the caller's to choose: from
-//! the environment (`HTTPS_PROXY`, `NO_PROXY`), one given, or none.
+//! (`SSL_CERT_FILE` first), held to RFC 5280's rules and not to the CA/Browser Forum's ([`WEB_PKI_RULES`]: those
+//! anchors may be a private PKI's, a company's own CA or its TLS-intercepting proxy's root). A process that forks
+//! gets new connections in the child: the parent's are left alone, neither used nor closed from the child (a TLS
+//! close from the child would end the parent's session, and an HTTP/2 connection's reader and writer threads are
+//! not in the child). Proxies are the caller's to choose: from the environment (`HTTPS_PROXY`, `NO_PROXY`), one
+//! given, or none.
 //!
 //! **TLS 1.3, or TLS 1.2 with a server that speaks nothing newer** (pratique's B-36, its default minimum since the
 //! drop of Oct 7: ECDHE with AEAD suites only, the extended master secret required, the downgrade check of RFC 8446
@@ -71,6 +73,16 @@ pub const USER_AGENT: &str = concat!("lazaret/", env!("CARGO_PKG_VERSION"));
 pub const MAX_DECODE_RATIO: u64 = 200;
 /// The decoded size from which [`MAX_DECODE_RATIO`] holds (a small body of one byte repeated compresses further).
 pub const DECODE_RATIO_FLOOR: u64 = 1024 * 1024;
+/// Whether a server's chain is held to the CA/Browser Forum's rules as well as RFC 5280's (pratique's
+/// `TrustStore::with_web_pki_rules`, its B-92, on by default since its commit of Oct 9: the leaf's extendedKeyUsage
+/// names serverAuth, no Ed25519 key or signature, issuer names byte for byte, matching key identifiers). Off: the
+/// setting is pratique's per store, not per anchor, and every store Lazaret makes may hold a private PKI's anchors,
+/// whose certificates follow RFC 5280 alone: `SSL_CERT_FILE` (a company's bundle, a TLS-intercepting proxy's root),
+/// the system's bundle (where `update-ca-certificates` puts a company's root), what Python trusts (Windows' store,
+/// with the roots a domain pushes) and what a caller gives [`configure`]. So a chain is judged as before this take, and
+/// as OpenSSL judges it for Python's transport (a leaf with no extendedKeyUsage, names compared as RFC 5280 compares
+/// them). John's to decide (docs/0.1.9-progress.md, NET-1, pratique's B-92).
+pub const WEB_PKI_RULES: bool = false;
 
 /// Why a request did not give a response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,7 +470,8 @@ struct Base {
 static BASE: Mutex<Option<Base>> = Mutex::new(None);
 static ROOTS: Mutex<Option<Arc<String>>> = Mutex::new(None);
 
-fn new_base(roots: Option<&str>) -> Result<Client, Failure> {
+/// The trust anchors: `roots` (PEM), or the system's CA bundle (`SSL_CERT_FILE` first); with [`WEB_PKI_RULES`].
+fn trust_store(roots: Option<&str>) -> Result<TrustStore, Failure> {
     let store = match roots {
         Some(pem) => {
             let mut store = TrustStore::empty();
@@ -471,7 +484,18 @@ fn new_base(roots: Option<&str>) -> Result<Client, Failure> {
         None => pratique::sys::system_trust_store()
             .map_err(|e| Failure::Setup(format!("no trust anchors: {e} (set SSL_CERT_FILE, or give them to configure)")))?,
     };
+    Ok(store.with_web_pki_rules(WEB_PKI_RULES))
+}
+
+fn new_base(roots: Option<&str>) -> Result<Client, Failure> {
+    let store = trust_store(roots)?;
     Ok(Client::with_tls_config(ClientConfig::new(store)).user_agent(USER_AGENT).http2(true))
+}
+
+/// The rule of a request's hosts: pratique's `HostRules` as it makes them, which is Lazaret's rule (its B-75, "Lazaret's
+/// rule is the default"): a `*.` entry is exactly one valid DNS label, and an entry without a port is the default port.
+fn host_rule(hosts: &[String]) -> Result<HostRules, Failure> {
+    HostRules::new(hosts).map_err(classify)
 }
 
 /// Sets the trust anchors (PEM; None: the system's CA bundle) for the requests made from now on, and closes the
@@ -538,8 +562,7 @@ fn client_for(req: &Request, hops: &Arc<Hops>) -> Result<Client, Failure> {
     }
     let mut client = base()?;
     if !req.any_host {
-        let rules = HostRules::new(&req.hosts).map_err(classify)?.one_label_wildcards(true).default_port_only(true);
-        client = client.allowed_hosts(rules);
+        client = client.allowed_hosts(host_rule(&req.hosts)?);
     }
     let timeout = if req.timeout.is_zero() { Duration::from_secs(30) } else { req.timeout };
     let mut client = client

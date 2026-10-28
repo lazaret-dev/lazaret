@@ -2489,10 +2489,79 @@ answered only 1.2 to John's network): ECDHE with AEAD suites only, the
 extended master secret required, RFC 8446's downgrade check, no
 renegotiation or resumption, the certificate checks of 1.3; every reply
 says which version it came over. Trust anchors: `SSL_CERT_FILE`, the system bundle, or what Python's
-`ssl` loads (Windows' store); `SSL_CERT_DIR` alone is not read. The library
-has not had an independent review, which Lazaret had asked for before
-relying on its TLS; decision 12 (John, Oct 6) made it the default anyway,
-with urllib one variable away.
+`ssl` loads (Windows' store); `SSL_CERT_DIR` alone is not read. A server's
+chain is held to RFC 5280's rules, as OpenSSL holds urllib's, and not to
+the CA/Browser Forum's, which pratique's stores apply by default since its
+commit of Oct 9 (its B-92: the leaf names serverAuth, RSA and ECDSA only,
+issuer names byte for byte, matching key identifiers): pratique sets that
+per store, and each of those stores may hold a private PKI's anchors (a
+company's CA, its TLS-intercepting proxy's root put in the system bundle or
+in `SSL_CERT_FILE`, a domain's roots in Windows' store), whose certificates
+need follow RFC 5280 alone (`lazaret-net`'s `WEB_PKI_RULES`, off; John's to
+decide).
+
+Certificate policies (the external report's LZ-01, CWE-295: a critical
+certificatePolicies, policyMappings, policyConstraints or inhibitAnyPolicy
+was taken as if it were not there, so a private CA's requireExplicitPolicy
+held nothing). **The native transport:** pratique processes no certificate
+policy, and since its main of Oct 27 (`57c22cb0`) a critical one of the
+four refuses the chain wherever it is, the trust anchor included (an anchor
+that carries one is never used, and the refusal says the chain has no
+trusted root); one that is not critical is ignored, as before. **Python's
+transport** (urllib and the keep-alive pool on `nativenet.tls_context()`,
+secret verification on `secretverify_http.default_context()`), which
+Lazaret uses by itself, not only with `LAZARET_NETWORK=python`: a redirect
+to another host that the native transport hands over (LZ-02's, from the Go
+guard or an SCA feed's download), the `UsePython` cases, and no native
+library. There OpenSSL processes the policies (RFC 5280 6.1, with no
+initial policy set), since `X509_V_FLAG_POLICY_CHECK` is set in both
+contexts; before, OpenSSL checked none, and since it knows the four, a
+critical one did not refuse the chain either. A chain that fails the
+processing (an explicit policy required and none valid; a policy extension
+that does not parse, critical or not) is refused there, and one that passes
+it is taken; the trust anchor's own extensions are not part of the processing
+(RFC 5280 6.1 starts below the anchor), so a critical one there is not
+applied either. So a private CA whose chain fails OpenSSL's policy processing
+is refused on both transports, and one whose CAs mark a policy extension
+critical (RFC 5280 says policyConstraints and inhibitAnyPolicy MUST be) and
+whose chain passes it is taken by Python's transport only: where Lazaret
+falls back to it, or everywhere with `LAZARET_NETWORK=python`; no setting
+of `lazaret-net`'s takes it (John's to decide whether one should). The
+check refuses nothing public: pratique's 74 captured public chains (the 55
+that verify), Mozilla's 121 roots, this machine's bundle and Sigstore's 10
+certificates verify alike with `openssl verify -policy_check` (OpenSSL
+3.0.13, Python 3.13's here). OpenSSL processes policies only once the chain
+has verified to a trusted anchor, so only a CA the machine trusts can hand
+it a policy tree. OpenSSL before 3.0.9, 3.1.1 and 1.1.1u (CVE-2023-0464 and
+CVE-2023-0465, March 2023; distributions backport the fixes without
+changing the version) could spend exponential time on a tree made to grow,
+and skipped an invalid policy of a leaf; the flag is set on every version
+all the same (fail closed), so on such an OpenSSL a trusted CA could stall
+a handshake, and a policy it got wrong in a leaf goes unseen. The public
+web's chains carry certificatePolicies, never critically, and none of the
+other three; Sigstore's carry none. OpenSSL builds one path and does not try
+another when it fails the processing, so a chain with a clean alternative
+path can still be refused there. Not every chain the native transport
+refuses and Python's takes is a policy case: a policy extension, not
+critical, whose length is not DER's is refused by pratique for the
+certificate's encoding (4 of the 70 such chains in the independent review's
+set of 200). Two clients process no
+policy, as before: the npm package's `--verify-secrets` (`js/src/verify.js`,
+`node:https`: Node has no setting for OpenSSL's policy flag; it takes the
+report's chain) and the Postgres client (`pg/connection.py`), as `psql`'s
+libpq does not either.
+
+The native random source: where the kernel's `getrandom` is refused (an old
+kernel, a sandbox that blocks the call), pratique since `57c22cb0` reads
+`/dev/urandom` only once `/dev/random` opens and polls readable, and fails
+otherwise: where `/dev/random` is missing too, every native request fails
+(kind "network", "No such file or directory"), with no fall-back to urllib,
+where the library before it read `/dev/urandom` and answered. Failing
+closed is the library's choice, and Lazaret keeps it.
+
+pratique has not had an independent review, which Lazaret had asked for
+before relying on its TLS; decision 12 (John, Oct 6) made it the default
+anyway, with urllib one variable away.
 
 The other callers (NET-1's second part): the guard's `Fetcher.open` (and so
 `fetch`, `fetch_to_file`, the Go relay and the pip index's relay) sends an

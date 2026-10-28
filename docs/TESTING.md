@@ -160,7 +160,15 @@ Notes:
   an HTTPS server Python's `ssl` serves on 127.0.0.1, with a root made when
   the module starts (`tests/_pki.py`: ECDSA on P-256, signed with SHA-256, in
   Python, the same on every machine; macOS's `openssl` is LibreSSL, whose
-  certificates Python and pratique refused: MAC-TESTS), and
+  certificates Python and pratique refused: MAC-TESTS; its
+  `PrivateRootTests` serve certificates a private CA may issue, with no
+  extended key usage or an issuer name in another case and string type,
+  which the native client takes as OpenSSL does, and its
+  `PolicyExtensionTests` chains whose intermediate, server certificate or
+  root carries a certificate-policy extension, which it refuses when the
+  extension is critical: LZ-01; `PythonTransportPolicyTests` reach urllib
+  through an SCA feed's automatic fall-back, whose context has OpenSSL
+  process the policies), and
   `cargo test -p lazaret-net` against pratique's own TLS 1.3 and HTTP/2
   test server. pratique's tests are its own (`cargo test --release -p
   pratique --lib` takes about 25 s after a 3-minute build, and its

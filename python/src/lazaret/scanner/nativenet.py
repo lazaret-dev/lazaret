@@ -29,9 +29,14 @@ openers take `HTTPSHandler`, which uses it.
 
 Trust anchors: `SSL_CERT_FILE` when it is set (as OpenSSL reads it); else the system's CA bundle (the files
 pratique knows: Debian's, Red Hat's, SUSE's, macOS's /etc/ssl/cert.pem, Homebrew's, FreeBSD's); else the
-certificates Python's default context loads (on Windows, the system's certificate store). A proxy: the one urllib
-would use, from `HTTPS_PROXY` / `NO_PROXY` (followed on every redirect hop), or from the system's settings (macOS,
-Windows) when the environment names none.
+certificates Python's default context loads (on Windows, the system's certificate store); a server's chain is held to
+RFC 5280's rules under them, as OpenSSL holds urllib's, not to the CA/Browser Forum's (lazaret-net's `WEB_PKI_RULES`:
+those anchors may be a private PKI's, a company's CA or its TLS-intercepting proxy's root), and a chain with a critical
+certificate-policy extension, which pratique does not process, is refused (LZ-01). Python's transport has OpenSSL
+process the policies (`X509_V_FLAG_POLICY_CHECK`): a chain that fails that is refused there too, and one that passes
+it (a critical policy extension whose policies hold) is taken by Python's transport alone. A proxy: the one
+urllib would use, from `HTTPS_PROXY` / `NO_PROXY` (followed on every redirect hop), or from the system's settings
+(macOS, Windows) when the environment names none.
 
 A document comes compressed (`gzip`: a budget of at most GZIP_BUDGET asks for `gzip, deflate`, and the body is decoded
 within its budget); a download comes as published. `LAZARET_GZIP=0` asks for no compressed body.
@@ -62,6 +67,17 @@ from lazaret.scanner import _native
 ENV = "LAZARET_NETWORK"
 #: the oldest TLS version Lazaret speaks, on either transport
 TLS_FLOOR = ssl.TLSVersion.TLSv1_2
+#: OpenSSL's X509_V_FLAG_POLICY_CHECK (openssl/x509_vfy.h, 0x80; Python's ssl has no VERIFY_ name for it): the chain
+#: check does RFC 5280 6.1's certificate-policy processing. Without it OpenSSL knows the four policy extensions, so a
+#: critical one does not refuse the chain, and it enforces none of them: a private CA's requireExplicitPolicy holds
+#: nothing on Python's transport, which Lazaret reaches by itself (a redirect the native transport hands over, the
+#: `UsePython` cases, no native library), not only with LAZARET_NETWORK=python (the external report's LZ-01; John,
+#: Oct 27: fail closed). With it a chain that fails the processing (an explicit policy required and none valid; a policy
+#: extension that does not parse) is refused here too. OpenSSL evaluates policies only once the chain has verified to
+#: a trusted anchor, so only a CA this machine trusts can send it a policy tree; OpenSSL before 3.0.9, 3.1.1 and
+#: 1.1.1u could take exponential time on one (CVE-2023-0464) or skip an invalid leaf policy (CVE-2023-0465), and the
+#: flag is set on those too (docs/DESIGN.md, NET-1).
+X509_V_FLAG_POLICY_CHECK = 0x80
 #: which protocol: "auto" (the default: documents over HTTP/2, downloads over HTTP/1.1), "2" (HTTP/2 for every
 #: request), "1.1" (HTTP/1.1 only). HTTP/2 is offered, never forced: a server that does not pick it gets HTTP/1.1.
 HTTP_ENV = "LAZARET_HTTP"
@@ -94,12 +110,14 @@ class UsePython(Exception):
 def tls_context():
     """The context Python's transport makes Lazaret's connections with: urllib's own default (PEP 476's: the system's
     trust anchors and `SSL_CERT_FILE`, the hostname checked; or what the process put in its place), offering
-    HTTP/1.1 as urllib does, with `TLS_FLOOR` as its floor."""
+    HTTP/1.1 as urllib does, with `TLS_FLOOR` as its floor and OpenSSL's certificate-policy check
+    (`X509_V_FLAG_POLICY_CHECK`)."""
     context = getattr(ssl, "_create_default_https_context", ssl.create_default_context)()
     context.set_alpn_protocols(["http/1.1"])
     low = context.minimum_version
     if low == ssl.TLSVersion.MINIMUM_SUPPORTED or 0 <= low < TLS_FLOOR:
         context.minimum_version = TLS_FLOOR
+    context.verify_flags |= X509_V_FLAG_POLICY_CHECK
     return context
 
 

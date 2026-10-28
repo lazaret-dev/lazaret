@@ -27,7 +27,7 @@ A working HTTPS client: you can `get`/`post` over TLS 1.3 (or TLS 1.2, with a se
 | CMS / PKCS#7 signatures (Java `META-INF/*.RSA`, `.p7s`, S/MIME) and RFC 3161 time stamps: BER reader, signer verification (RSA PKCS#1 and PSS, ECDSA P-256/P-384, Ed25519), chain to the caller's roots at the signature's time (pure, no I/O) | 45 messages made by OpenSSL and the JDK's `jarsigner` verify; 1,886 damaged messages judged by `openssl cms -verify` and replayed, each region of a message pinned as exactly OpenSSL's verdict, stricter, or deliberately more lenient; 2 fuzz targets; not Authenticode yet (B-70 phase 2, B-80) |
 
 Checked against real public servers from a normal network (B-97 in `BACKLOG.md`): 43 of 49 live hosts, and 52 real certificate chains replayed offline. The six that failed were servers that spoke only TLS 1.2 to the client of then, `registry.npmjs.org` among them. With TLS 1.2 (B-36, see "TLS versions" below) the same network gave 42 of 42 hosts that must connect, npm and `www.globalsign.com` over TLS 1.2; the badssl.com test servers are refused, by design, because they do not do the extended master secret. A second run on 2026-10-08 (B-102), with the test sites of B-100: 48 of 48 hosts that must connect, every refusal for the right reason (15 certificates, 6 servers offering only TLS 1.0, 1.1, CBC, RSA key exchange, finite-field DH or no encryption, 21 without the extended master secret), the revoked test sites refused as revoked (4 of 4 with the built-in Mozilla roots; 2 of 4 with macOS's bundle, which lacks the roots of the other two), and 74 real chains replayed offline.
-Test run at last check: 1,564 unit (including the mutation fuzzers; 24 more are ignored by default: 20 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 336 of them also run without the `net` feature), 2 Go-vector, 1 CMS-vector, 2 inflate-vector (1,295 cases), 6 real-chain, 6 real-revocation, 2 Wycheproof (894 vectors), 4 built-in-roots (`mozilla-roots`), 15 real Sigstore, 5 synthetic Sigstore, 3 real Rekor, 3 synthetic TUF (58 repositories judged by python-tuf), 52 OpenSSL interop (12 of them TLS 1.2, 2 with a live OCSP responder, 1 of session resumption), 17 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 1 native-store (B-101), 16 doc tests (17 with `mozilla-roots`, 21 with `server` as well), no warnings; `tools/server_interop.sh` (67 checks), `tools/h2_interop.sh` (41, and 43 with h2spec: 146 of 146, and 147 of 147 strict), `tools/acme_interop.sh` (24, against Pebble), `tools/proxy_interop.sh` (21, with real package managers and registries) and `tools/tlsfuzzer.sh` (41 runs of 40 scripts) pass.
+Test run at last check: 1,589 unit (including the mutation fuzzers; 24 more are ignored by default: 20 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 337 of them also run without the `net` feature), 2 Go-vector, 2 chain-case (90 generated chains), 1 CMS-vector, 2 inflate-vector (1,295 cases), 6 real-chain, 6 real-revocation, 2 Wycheproof (894 vectors), 4 built-in-roots (`mozilla-roots`), 15 real Sigstore, 6 synthetic Sigstore, 3 real Rekor, 3 synthetic TUF (58 repositories judged by python-tuf), 52 OpenSSL interop (12 of them TLS 1.2, 2 with a live OCSP responder, 1 of session resumption), 17 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 1 native-store (B-101), 16 doc tests (17 with `mozilla-roots`, 21 with `server` as well), no warnings; `tools/server_interop.sh` (67 checks), `tools/h2_interop.sh` (41, and 43 with h2spec: 146 of 146, and 147 of 147 strict), `tools/acme_interop.sh` (24, against Pebble), `tools/proxy_interop.sh` (21, with real package managers and registries) and `tools/tlsfuzzer.sh` (41 runs of 40 scripts) pass.
 
 ## Security warning
 
@@ -147,7 +147,9 @@ about a fifth less CPU per byte than rustls's. On x86-64 ring and aws-lc-rs are 
 times slower than theirs. A full handshake costs 1.3 to 1.4 times rustls's client CPU (0.14 against 0.10 to 0.11 ms on the
 M5, 0.46 to 0.48 against 0.33 to 0.37 on x86-64); X25519 is 1.2 times ring on the M5 and now quicker than ring on x86-64 (62
 against 73 to 74 us); Ed25519 and RSA verification are level with aws-lc-rs on the M5 and 1.2 to 1.4 times ring; ECDSA P-256
-is 1.2 to 1.3 times both. What is left to close, in order: B-106.
+is 1.2 to 1.3 times both. What is left to close, in order: B-106. Signing, which a server pays once per full handshake
+(B-115): ECDSA P-256 takes 0.058 ms on the x86-64 VM and 0.021 ms on the M5's, about seven times quicker than before a table
+of the generator's multiples; RSA-2048 1.15 and 0.47 ms, about twice OpenSSL's time on x86-64.
 
 **Two threads on one TLS connection.** `TlsStream::split()` gives a `TlsReadHalf` and a `TlsWriteHalf` that two threads can use at
 once (B-39), for protocols where both sides send at the same time (an echo larger than the socket buffers stops a single
@@ -286,24 +288,26 @@ one of these is an error when the rule is made, not a rule that quietly does som
 connect to, as the URL gives it (the part after the last `@`, lower case, ASCII: an internationalized name is matched in its `xn--` form, and
 an address written as `2130706433` does not match the entry for the address it means).
 
-The rule is loose unless it is told otherwise, and a caller that wants it tight says so with two switches and a set of limits on the URL:
+The rule is tight unless it is told otherwise (Lazaret's rule is the default since 2026-10-09: before, both switches were off), and a caller that
+wants it loose says so; the limits on the URL are asked for apart:
 
 | | default | switch |
 |---|---|---|
-| `*.example.com` matches | one label or more (`a.example.com`, `a.b.example.com`) | `one_label_wildcards(true)`: exactly one valid label (`[a-z0-9]`, inner `-`, at most 63 bytes), so `a.example.com` and not `a.b.example.com`, `evilexample.com` or an `_` name |
-| a host with no port in its entry matches | any port | `default_port_only(true)`: the scheme's default port only (`:443` counts as the default); a wildcard never matches an explicit port, and a host on another port needs an entry of its own, `host:port` |
+| `*.example.com` matches | exactly one valid label (`[a-z0-9]`, inner `-`, at most 63 bytes), so `a.example.com` and not `a.b.example.com`, `evilexample.com` or an `_` name | `one_label_wildcards(false)`: one label or more (`a.example.com`, `a.b.example.com`) |
+| a host with no port in its entry matches | the scheme's default port only (`:443` counts as the default); a wildcard never matches an explicit port, and a host on another port needs an entry of its own, `host:port` | `default_port_only(false)`: any port |
 | the URL | anything the parser takes | `Client::url_limits(UrlLimits::strict())`: https only, no `user:password@`, printable ASCII only (no space or control character, nothing over `~`), at most 2,048 bytes; each can be asked for alone (`https_only`, `refuse_credentials`, `printable_ascii_only`, `max_length`) and the reason of a refusal begins `URL not allowed` |
 
 The rule of a module that reaches the Marketplace's hosts (`<publisher>.gallerycdn.vsassets.io`, `<publisher>.gallery.vsassets.io`, and no other
 host) is therefore
-`client.clone().allowed_hosts(HostRules::new(["marketplace.visualstudio.com", "*.gallerycdn.vsassets.io", "*.gallery.vsassets.io"])?.one_label_wildcards(true).default_port_only(true)).url_limits(UrlLimits::strict())`,
+`client.clone().allowed_hosts(HostRules::new(["marketplace.visualstudio.com", "*.gallerycdn.vsassets.io", "*.gallery.vsassets.io"])?).url_limits(UrlLimits::strict())`,
 and it holds on the first URL and on every hop. The text of a URL is judged as it came: the caller's string, and for a redirect the `Location` value as
 well as the URL it resolves to.
 
 **A refusal is an error of its own.** A request or a redirect that the client's rules do not allow is `Error::Refused(Refused { hop, by, reason })`, not an
 `Error::Io`, `Tls` or `Http`, so a caller can tell "the module was not allowed to go there" from "the network failed" or "the server was bad": `hop` is 0 for
 the request itself and 1, 2, ... for the redirect it was following (`is_redirect()` says which, so a report can say "redirect blocked"), and `by` is
-`RefusedBy::HostRule`, `UrlLimit`, `Scheme` (plain http without `allow_insecure_http`, or a redirect from https to http) or `Hook` (the enum is `#[non_exhaustive]`).
+`RefusedBy::HostRule`, `UrlLimit`, `Scheme` (plain http without `allow_insecure_http`, or a redirect from https to http), `Hook` or `ProxyRule` (see below; the
+enum is `#[non_exhaustive]`).
 Nothing was sent to the host it names. Its `Display` begins `request refused:` or `redirect N refused:`, and the reason names the host and never the path, the
 query, a credential or a header value.
 
@@ -312,7 +316,9 @@ at another origin), so a token should not be set that way. `Client::hop_headers(
 followed**, after the host rule and the limits on a URL have allowed that URL and before anything is sent there, with the URL, the method the hop will have
 (a 303 makes a GET), the hop's number, the URL that redirected to it and whether that crossed an origin; the headers it returns go with that hop and with no
 other, so each host gets its own credentials (`GITHUB_TOKEN` to `api.github.com`, a private registry's token to the registry, nothing to a CDN that a redirect
-names) and a token never follows a redirect to another host. An `Err` from the hook refuses the hop: nothing is sent there, and the request fails with `Error::Refused` (`by: Hook`, with the hop's number and the hook's message as the reason). A header it gives replaces the caller's of the same name, a bad name or value (or `Host`, `Connection`, `Content-Length`) is an error that never says the
+names) and a token never follows a redirect to another host. An `Err` from the hook refuses the hop: nothing is sent there, and the request fails with `Error::Refused` (`by: Hook`, with the hop's number and the hook's message as the reason). So the hook is also the check of each hop on any other ground: it sees the
+URL with its path and query, the method, the hop's number and where it came from, and can refuse a path the caller does not expect, a DELETE, a second redirect
+or a hop to another origin (`Ok(vec![])` lets a hop go with no headers). A header it gives replaces the caller's of the same name, a bad name or value (or `Host`, `Connection`, `Content-Length`) is an error that never says the
 value, and it is called once for a hop though the request is sent again on another connection. The async client and the clones apply their own hook. Its headers are never kept: there is no cache of
 responses, a connection is for one origin only (the pools of HTTP/1.1, HTTP/2 and HTTP/3 are keyed by scheme, host, port and proxy, so HTTP/2 connections are never
 coalesced across hosts), and the names it gives are marked never-indexed in HPACK and QPACK, as `Authorization` and `Cookie` are. A header that the *caller* sets other
@@ -320,8 +326,26 @@ than `Authorization`, `Cookie` and `Proxy-Authorization` (a `PRIVATE-TOKEN`, say
 A host whose last label is a number (`1`, `0x7f`) is an address to a resolver, not a name, so a wildcard never matches it.
 
 Clones of a client share their connections, so `client.clone().allowed_hosts(rules)` is a client for one caller, and the limits of `timeout`,
-`total_timeout`, `max_redirects`, `max_body_bytes` and `url_limits` are set on the clone the same way; the async client and the `*_async` methods apply the
-rule too, and with HTTP/3 on, an `Alt-Svc` alternative is used only if the rule allows its host and port (the origin's own host when it names none). A POST
+`total_timeout`, `max_redirects`, `max_body_bytes` and `url_limits` are set on the clone the same way. One request can set them for itself too:
+`request(..).timeout(t)`, `.total_timeout(t)`, `.max_redirects(n)` and `.max_body_bytes(n)` replace the client's for that request (a pooled connection it takes
+is given the request's limits), and `.allowed_hosts(rules)` is a rule of the request's own that holds **as well as** the client's (both must allow a host,
+so a request can narrow the client's rule and cannot widen it). The async client and the `*_async` methods apply all of it, and with HTTP/3 on, an
+`Alt-Svc` alternative is used only if the rules allow its host and port (the origin's own host when it names none), checked again for each request when
+it is dialed or its connection is used, since the alternatives are shared by clones and requests whose rules differ.
+
+**A rule for the proxy.** `Client::allowed_proxies(HostRules)` names the proxies a request may go through, however the proxy was named (`Client::proxy`,
+`HTTPS_PROXY`, the system's settings); a request whose proxy is not in it is refused (`by: ProxyRule`) before anything connects, and is not sent direct
+instead. It is for a process that does not trust all of its environment: a variable that a package's install script or a build step set cannot send its
+requests through a proxy of its choosing. A proxy's default port is 8080 (what `http://proxy` without a port means here), so with the rule as it is made an
+entry names its port: `proxy.corp.example:3128`.
+
+**The system's proxy.** `Client::proxy_from_system()` goes through the proxy the environment names (`HTTPS_PROXY`, `NO_PROXY`) or, when the environment
+says nothing about proxies (none of `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` in either case is set), the one macOS or Windows is set to use:
+macOS's secure web proxy and its list of hosts that go direct (globs, address prefixes such as `169.254/16`, "exclude simple hostnames"), read with
+`SCDynamicStoreCopyProxies`; Windows' `ProxyServer` (one for all, or the `https=` entry) and `ProxyOverride` (with `<local>`) from the current user's
+Internet Settings, when `ProxyEnable` is set. That is the order Python's `urllib` keeps, so pip and the client go the same way. The settings are read
+once, when the client is made; `SystemProxy::read()` gives them, and `notes()` says what is set and **not followed**: a PAC file (a script, which this
+library does not run), discovery (WPAD), a SOCKS proxy. The scanning proxy's default client uses it. A POST
 with a JSON body is `request("POST", url).header("Accept", "application/json").header("Content-Type", "application/json").body(json)`:
 the caller's `Accept` replaces the default `*/*`, a 307 or 308 repeats the method and the body, a 303 (or a 302 of a POST) makes a GET with no body, and
 credentials are dropped when a redirect changes the origin.
@@ -371,8 +395,9 @@ responders answer from responses signed in advance (RFC 5019), and what stops an
 ## Constant-time status
 
 X25519, the P-256/P-384 key exchange (`src/crypto/ecdh.rs`), GHASH, Poly1305, ChaCha20 and AES contain no
-secret-dependent branches or table lookups (X25519 key generation looks up a table of multiples of the base point, but reads
-every entry of a row at each lookup and keeps the one it needs with masks: `crypto/x25519_base.rs`), and a statistical timing harness (`src/crypto/timing.rs`, dudect style,
+secret-dependent branches or table lookups (X25519 key generation, and since B-115 P-256/P-384 key pairs and ECDSA's nonce
+point, look up a table of multiples of the base point, but read every entry of a row at each lookup and keep the one they
+need with masks: `crypto/x25519_base.rs`, `crypto/ecdh.rs`), and a statistical timing harness (`src/crypto/timing.rs`, dudect style,
 with deliberately leaky positive controls) found no timing dependence on keys or data on x86-64 or on an Apple M5 Max
 (backlog B-24, B-58), with one exception that is not explained: on an Intel Xeon cloud VM the 32-bit-limb Poly1305 (which
 64-bit builds do not use) reads |t| 4 to 12 for an all-zero key against random keys (B-95). Known on the M5 under macOS: the one-pass AES-GCM seal (B-85) takes about 0.1 ns longer per KiB for random plaintext than for all-zero plaintext (under 0.1 percent, measured to +/- 0.01 ns; it was twice that before the kernel stopped reading its ciphertext back, and the 3.5 times slower two-pass seal shows none). The likely cause is the CPU predicting the values loads return, which DIT does not turn off; what it could reveal is whether the plaintext holds long runs of one value, to someone timing many seals on the same machine (B-24). The Linux VM on the same CPU shows none of it. Copying memory shows the same kind of difference there, much larger. The harness earned its keep on the P-256/P-384 code: the first version showed |t| above 100
@@ -465,7 +490,8 @@ which verifies the real registry as any client would; a host that does not verif
 Python and Go at it and make them trust its CA (`write_trust_files` writes the CA, and a bundle of the machine's roots and
 the CA). Behind a gateway that inspects TLS (Zscaler, Netskope), the proxy trusts the company's root wherever the machine
 has it (the CA bundle file, the macOS Keychain or the Windows store, the files `SSL_CERT_FILE` and the like name), puts it
-in the programs' bundle too, and goes through the proxy its own `HTTPS_PROXY` names.
+in the programs' bundle too, and goes through the proxy its own `HTTPS_PROXY` names or, when its environment names none, the one macOS's or
+Windows' network settings name (`Proxy::upstream_notes` says which, and that a PAC file is not followed).
 
 ```rust
 use pratique::proxy::{Decision, Exchange, Proxy, Scanner};
@@ -565,7 +591,7 @@ src/zeroize.rs     wiping secrets (with the SIMD kernels, OS randomness and the 
 
 examples/       fetch (curl-like; `--http2`, `--http3` (QUIC first, TCP if that fails), `--alt-svc` (QUIC where the origin said it offers it), `--parallel N`, `--max-bytes N`), serve (the HTTP server over TLS 1.3 or plain TCP with pages for tests and tools, needs `--features server`), async_get, probe (negotiation report), sumdb (look a module up in the Go checksum database), cms_verify (check a CMS / PKCS#7 signature file), sigstore_verify (check Sigstore attestations of a file), native_roots (what the OS's own store trusts and leaves out), bench (the primitives) and bench_net (handshakes, requests and transfers on loopback, `--features server`; see BENCHMARKS.md)
 tests/          OpenSSL interop tests, the HTTP/2 client against Go's server (h2_client_interop.rs), the HTTP/3 client against aioquic (h3_client_interop.rs), replays of vectors judged by Go (go_vectors.rs) and by OpenSSL (cms_vectors.rs) and fixtures (tests/data)
-tools/          bench.sh (runs the benchmarks, compares with and records into bench/results.tsv; see BENCHMARKS.md), generators for test vectors and fixtures (Python, uses the `cryptography` package; the CMS ones also run the `openssl` command line tool and the JDK's `jarsigner`), check_features.sh, go_oracle.sh (runs Go's sumdb packages as an independent judge), server_interop.sh and h2_interop.sh (the server against OpenSSL, curl, headless Chromium, Go, python-h2 and h2spec), bench_server.sh with bench_server.go (the server's load test against Go's `net/http`), h2_oracle_server.go (Go's HTTP/2 server for `tests/h2_client_interop.rs`), bench_h2.sh with bench_client.go and bench_delay_proxy.go (the benchmark against Go's client above), hpack_oracle.* and h2_frame_oracle.py (HPACK and frames against Go, Python and hyperframe), gen_quic_vectors.py (packets made by aioquic), quicgo_oracle/ (frame payloads read by quic-go's parser), quic_interop_server.py (an aioquic HTTP/3 server, with an HTTPS side on TCP that advertises it, for `examples/quic_probe.rs` and `tests/h3_client_interop.rs`) and qpack_interop.py (QPACK against ls-qpack)
+tools/          bench.sh (runs the benchmarks, compares with and records into bench/results.tsv; see BENCHMARKS.md), generators for test vectors and fixtures (Python, uses the `cryptography` package; the CMS ones also run the `openssl` command line tool and the JDK's `jarsigner`), check_features.sh, go_oracle.sh (runs Go's sumdb packages as an independent judge), server_interop.sh and h2_interop.sh (the server against OpenSSL, curl, headless Chromium, Go, python-h2 and h2spec), bench_server.sh with bench_server.go (the server's load test against Go's `net/http`), h2_oracle_server.go (Go's HTTP/2 server for `tests/h2_client_interop.rs`), bench_h2.sh with bench_client.go and bench_delay_proxy.go (the benchmark against Go's client above), hpack_oracle.* and h2_frame_oracle.py (HPACK and frames against Go, Python and hyperframe), gen_quic_vectors.py (packets made by aioquic), quicgo_oracle/ (frame payloads read by quic-go's parser), quic_interop_server.py (an aioquic HTTP/3 server, with an HTTPS side on TCP that advertises it, for `examples/quic_probe.rs` and `tests/h3_client_interop.rs`) and qpack_interop.py (QPACK against ls-qpack), chain_judges.sh with gen_chain_cases.py and chain_judge.go (chain validation against OpenSSL, Go and Apple's verifier, B-92)
 fuzz/           coverage-guided fuzzer (std-only, stable Rust) and its 52 targets: `sh fuzz/run_all.sh 3600`
 ```
 
@@ -573,7 +599,7 @@ fuzz/           coverage-guided fuzzer (std-only, stable Rust) and its 52 target
 
 ```rust
 let client = pratique::Client::new()?            // trusts the OS CA bundle (or SSL_CERT_FILE)
-    .proxy_from_env();                           // optional: HTTPS_PROXY / NO_PROXY
+    .proxy_from_env();                           // optional: HTTPS_PROXY / NO_PROXY (proxy_from_system: or macOS's or Windows' setting)
 let resp = client.get("https://example.com/")?;
 println!("{} {}", resp.status, resp.text());
 
@@ -628,13 +654,20 @@ constraints (DNS, e-mail, URI and IP names) are enforced; RSA keys below the sto
 this code does not know refuses the chain unless the caller lists it with `with_critical_extension` (for those it interprets
 itself). What the certificate says (every SAN entry, every extension with its critical flag) is for the caller to compare;
 nothing is matched but the host name, if one is given. Revocation is separate (`revocation`). `verify_server_chain` is the
-`VerifyOptions::tls_server` case of the same code.
+`VerifyOptions::tls_server` case of the same code, which also holds a TLS server's chain to the CA/Browser Forum's Baseline
+Requirements where they bind a client (`VerifyOptions::web_pki`, since 2026-10-10): the leaf's extendedKeyUsage must be
+there, name serverAuth and not name anyExtendedKeyUsage; no key or signature in the path may be Ed25519 (the rules allow RSA
+and ECDSA); each issuer name must be byte for byte the issuing certificate's subject name (RFC 5280 would compare without
+case); and an authorityKeyIdentifier must match the issuer's subjectKeyIdentifier. Those are the cases where the library
+was looser than Apple's verifier (`tools/chain_judges.sh`). `TrustStore::with_web_pki_rules(false)` turns them off for a
+store of private anchors (an internal CA that issues without extendedKeyUsage, or with Ed25519 keys).
 
 ### Ed25519
 
 `pratique::crypto::ed25519::verify(public_key, message, signature) -> bool` is in the pure part, and Ed25519 keys and
 signatures work in certificates, CRLs, OCSP responses and TLS 1.3 (`PublicKey::Ed25519`, `SigAlg::Ed25519`, signature scheme
-0x0807; RFC 8410 requires the algorithm parameters to be absent, so a NULL there is refused). Signing is behind `net`: `pratique::sign` (B-109).
+0x0807; a TLS server's chain only under a store of private anchors, `TrustStore::with_web_pki_rules(false)`, since the
+CA/Browser Forum's rules allow RSA and ECDSA only; RFC 8410 requires the algorithm parameters to be absent, so a NULL there is refused). Signing is behind `net`: `pratique::sign` (B-109).
 
 Implementations disagree about some Ed25519 signatures, so this one follows a single reference exactly: Go's
 `crypto/ed25519`, the one the Go checksum database and `go` itself use. A signature verifies if and only if it is 64

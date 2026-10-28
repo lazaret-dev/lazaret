@@ -39,6 +39,8 @@ OID_CN = "2.5.4.3"
 OID_SKI, OID_KEY_USAGE, OID_SAN, OID_BASIC, OID_AKI, OID_EKU = (
     "2.5.29.14", "2.5.29.15", "2.5.29.17", "2.5.29.19", "2.5.29.35", "2.5.29.37")
 OID_SERVER_AUTH = "1.3.6.1.5.5.7.3.1"
+OID_CERT_POLICIES, OID_POLICY_MAPPINGS, OID_POLICY_CONSTRAINTS, OID_INHIBIT_ANY_POLICY = (
+    "2.5.29.32", "2.5.29.33", "2.5.29.36", "2.5.29.54")
 OID_PBES2, OID_PBKDF2, OID_HMAC_SHA256, OID_AES256_CBC = (
     "1.2.840.113549.1.5.13", "1.2.840.113549.1.5.12", "1.2.840.113549.2.9", "2.16.840.1.101.3.4.1.42")
 
@@ -227,12 +229,33 @@ def _time(when):
     return _tlv(0x18, when.strftime("%Y%m%d%H%M%SZ").encode("ascii"))
 
 
-def _name(common_name):
-    return _seq(_tlv(0x31, _seq(_oid(OID_CN), _tlv(0x0c, common_name.encode("utf-8")))))
+def _name(common_name, tag=0x0c):
+    """A name of one common name, a UTF8String (or the string type `tag` names: 0x13 PrintableString)."""
+    return _seq(_tlv(0x31, _seq(_oid(OID_CN), _tlv(tag, common_name.encode("utf-8")))))
 
 
 def _extension(oid, value, critical=False):
     return _seq(_oid(oid), *([_tlv(0x01, b"\xff")] if critical else []), _tlv(0x04, value))
+
+
+def certificate_policies(*oids):
+    """certificatePolicies' value (RFC 5280 4.2.1.4): a PolicyInformation of each policy's OID, no qualifier."""
+    return _seq(*(_seq(_oid(o)) for o in oids))
+
+
+def policy_mappings(*pairs):
+    """policyMappings' value (RFC 5280 4.2.1.5): each (issuerDomainPolicy, subjectDomainPolicy) pair of OIDs."""
+    return _seq(*(_seq(_oid(issuer), _oid(subject)) for issuer, subject in pairs))
+
+
+def require_explicit_policy(skip_certs):
+    """policyConstraints' value (RFC 5280 4.2.1.11) with requireExplicitPolicy alone."""
+    return _seq(_tlv(0x80, _int(skip_certs)[2:]))
+
+
+def inhibit_any_policy(skip_certs):
+    """inhibitAnyPolicy's value (RFC 5280 4.2.1.14)."""
+    return _int(skip_certs)
 
 
 def _pem(label, der):
@@ -241,11 +264,11 @@ def _pem(label, der):
 
 
 # ---------------------------------------------------------------- certificates
-def _certificate(subject, subject_key, issuer, issuer_key, issuer_id, extensions, days):
+def _certificate(subject, subject_key, issuer, issuer_key, issuer_id, extensions, days, issuer_tag=0x0c):
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
     spki = _seq(_seq(_oid(OID_EC_PUBLIC_KEY), _oid(OID_P256)), _bits(subject_key.point()))
     serial = secrets.randbits(127) | 1 << 126
-    tbs = _seq(_tlv(0xa0, _int(2)), _int(serial), _seq(_oid(OID_ECDSA_SHA256)), _name(issuer),
+    tbs = _seq(_tlv(0xa0, _int(2)), _int(serial), _seq(_oid(OID_ECDSA_SHA256)), _name(issuer, issuer_tag),
                _seq(_time(now - datetime.timedelta(hours=1)), _time(now + datetime.timedelta(days=days))),
                _name(subject), spki, _tlv(0xa3, _seq(*extensions)))
     return _seq(tbs, _seq(_oid(OID_ECDSA_SHA256)), _bits(issuer_key.sign(tbs)))
@@ -258,30 +281,57 @@ def _key_id(key):
 class Pki:
     """A root and a server's certificate under it. `root_pem`: the root's PEM text; `root`, `cert`, `key`: the files
     (in `folder`) of the root, the server's certificate and the server's key (PKCS #8; encrypted under `password` when
-    one is given)."""
+    one is given).
+
+    Two choices make the server's certificate one that a private CA may issue and that the CA/Browser Forum's rules
+    for a public one refuse (pratique's B-92): `server_auth=False`, no extended key usage at all; `issuer_as`, the
+    issuer's name written in the server's certificate as RFC 5280 still matches it with the root's (another case, as a
+    PrintableString).
+
+    `intermediate`, a list of extensions (`(oid, value, critical)`), puts a CA between them, "Lazaret test
+    intermediate", with its basic constraints, key usage and key identifiers and those extensions; `cert` is then the
+    server's certificate and the intermediate's, the chain a server sends. `leaf_extensions` are more of the server's
+    certificate's, and `root_extensions` more of the root's (the trust anchor's). (`certificate_policies`,
+    `policy_mappings`, `require_explicit_policy` and `inhibit_any_policy` make the values of the policy extensions, which
+    pratique processes no policy of: the external report LZ-01.)"""
 
     def __init__(self, folder, dns=("localhost",), ips=("127.0.0.1",), days=2, root_name="Lazaret test root",
-                 server_name="localhost", password=None):
+                 server_name="localhost", password=None, server_auth=True, issuer_as=None, intermediate=None,
+                 leaf_extensions=(), root_extensions=()):
         root_key, server_key = Key(), Key()
         root_id = _key_id(root_key)
         root = _certificate(root_name, root_key, root_name, root_key, root_id, [
             _extension(OID_BASIC, _seq(_tlv(0x01, b"\xff")), critical=True),
             _extension(OID_KEY_USAGE, _bits(b"\x06", unused=1), critical=True),        # keyCertSign, cRLSign
             _extension(OID_SKI, _tlv(0x04, root_id)),
-            _extension(OID_AKI, _seq(_tlv(0x80, root_id)))], days)
+            _extension(OID_AKI, _seq(_tlv(0x80, root_id))),
+            *(_extension(oid, value, critical) for oid, value, critical in root_extensions)], days)
         names = [_tlv(0x82, h.encode("ascii")) for h in dns] + [_tlv(0x87, ipaddress.ip_address(a).packed)
                                                                   for a in ips]
-        server = _certificate(server_name, server_key, root_name, root_key, root_id, [
+        issuer, issuer_key, issuer_id, chain = root_name, root_key, root_id, b""
+        if intermediate is not None:
+            inter_key = Key()
+            issuer, issuer_key, issuer_id = "Lazaret test intermediate", inter_key, _key_id(inter_key)
+            chain = _certificate(issuer, inter_key, root_name, root_key, root_id, [
+                _extension(OID_BASIC, _seq(_tlv(0x01, b"\xff")), critical=True),
+                _extension(OID_KEY_USAGE, _bits(b"\x06", unused=1), critical=True),    # keyCertSign, cRLSign
+                _extension(OID_SKI, _tlv(0x04, issuer_id)),
+                _extension(OID_AKI, _seq(_tlv(0x80, root_id))),
+                *(_extension(oid, value, critical) for oid, value, critical in intermediate)], days)
+        server = _certificate(server_name, server_key, issuer_as or issuer, issuer_key, issuer_id, [
             _extension(OID_SAN, _seq(*names)),
             _extension(OID_BASIC, _seq(), critical=True),
             _extension(OID_KEY_USAGE, _bits(b"\x80", unused=7), critical=True),        # digitalSignature
-            _extension(OID_EKU, _seq(_oid(OID_SERVER_AUTH))),
+            *([_extension(OID_EKU, _seq(_oid(OID_SERVER_AUTH)))] if server_auth else []),
             _extension(OID_SKI, _tlv(0x04, _key_id(server_key))),
-            _extension(OID_AKI, _seq(_tlv(0x80, root_id)))], days)
+            _extension(OID_AKI, _seq(_tlv(0x80, issuer_id))),
+            *(_extension(oid, value, critical) for oid, value, critical in leaf_extensions)], days,
+            issuer_tag=0x13 if issuer_as else 0x0c)
         self.root_pem = _pem("CERTIFICATE", root)
         self.root, self.cert, self.key = (os.path.join(folder, n) for n in ("root.pem", "cert.pem", "key.pem"))
         key = (_pem("PRIVATE KEY", server_key.pkcs8()) if password is None
                else _pem("ENCRYPTED PRIVATE KEY", encrypted_pkcs8(server_key.pkcs8(), password)))
-        for path, text in ((self.root, self.root_pem), (self.cert, _pem("CERTIFICATE", server)), (self.key, key)):
+        served = _pem("CERTIFICATE", server) + (_pem("CERTIFICATE", chain) if chain else "")
+        for path, text in ((self.root, self.root_pem), (self.cert, served), (self.key, key)):
             with open(path, "w", encoding="ascii", newline="\n") as f:
                 f.write(text)

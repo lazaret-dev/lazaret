@@ -7,17 +7,30 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::thread;
-use pratique::tls::pki::TestPki;
+use pratique::crypto::ecdsa::Curve;
+use pratique::tls::pki::{CertSpec, KeyPair, TestPki};
 use pratique::http::h2_server;
 use pratique::tls::server::{ServerConfig, ServerStream};
 
-/// One root for every test (the trust anchors are the process's), configured once.
+/// One root for every test, and `private_root` beside it (the trust anchors are the process's), configured once.
 fn pki() -> &'static TestPki {
     static PKI: OnceLock<TestPki> = OnceLock::new();
     PKI.get_or_init(|| {
         let pki = TestPki::new(&["127.0.0.1", "localhost"]).unwrap();
-        configure(Some(&pki.root_pem())).unwrap();
+        configure(Some(&format!("{}{}", pki.root_pem(), private_root().1))).unwrap();
         pki
+    })
+}
+
+/// A second root, ECDSA P-256 (its key, and its certificate as PEM), under which a test issues the certificates a
+/// private PKI's server may have (`TestPki::with_keys` with this key: the same name and key as the anchor).
+fn private_root() -> &'static (KeyPair, String) {
+    static ROOT: OnceLock<(KeyPair, String)> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let key = KeyPair::generate_ecdsa(Curve::P256).unwrap();
+        let pem = TestPki::with_keys(CertSpec::server(&["localhost"]), &key, KeyPair::generate_ecdsa(Curve::P256).unwrap())
+            .root_pem();
+        (key, pem)
     })
 }
 
@@ -326,8 +339,8 @@ fn the_url_rules_hold() {
 
 #[test]
 fn a_wildcard_is_one_label_on_the_default_port() {
-    let rules = HostRules::new(["marketplace.visualstudio.com", "*.gallerycdn.vsassets.io"]).unwrap()
-        .one_label_wildcards(true).default_port_only(true);
+    // (the rule as client_for makes it: pratique's default since its B-75, with no switch set here)
+    let rules = host_rule(&["marketplace.visualstudio.com".to_string(), "*.gallerycdn.vsassets.io".to_string()]).unwrap();
     assert!(rules.allows("ms-python.gallerycdn.vsassets.io", 443, 443));
     assert!(!rules.allows("a.b.gallerycdn.vsassets.io", 443, 443), "two labels");
     assert!(!rules.allows("gallerycdn.vsassets.io", 443, 443), "the domain itself");
@@ -345,6 +358,125 @@ fn a_server_the_anchors_do_not_vouch_for_is_refused() {
     match fetch(&request(&server, "/")) {
         Err(Failure::Tls(_)) => {}
         other => panic!("an unknown root: {other:?}"),
+    }
+}
+
+/// The trust anchors as Lazaret holds them ([`WEB_PKI_RULES`]): a private PKI's server, as a company's CA or its
+/// TLS-intercepting proxy may issue its certificate, is answered as before pratique's B-92 (RFC 5280's rules, as OpenSSL
+/// holds Python's transport to), where pratique's default store, under the CA/Browser Forum's rules, refuses it: a
+/// leaf with no extendedKeyUsage, an Ed25519 leaf. A leaf that follows those rules is taken by both.
+#[test]
+fn a_private_pkis_server_is_answered_under_rfc_5280s_rules() {
+    let _ = pki();
+    let (root_key, root_pem) = private_root();
+    let names = ["127.0.0.1", "localhost"];
+    let mut no_eku = CertSpec::server(&names);
+    no_eku.server_auth = false;
+    let cases = [
+        ("a leaf with no extendedKeyUsage", TestPki::with_keys(no_eku, root_key, KeyPair::generate_ecdsa(Curve::P256).unwrap()),
+         Some("extendedKeyUsage")),
+        ("an Ed25519 leaf", TestPki::with_keys(CertSpec::server(&names), root_key, KeyPair::generate().unwrap()), Some("Ed25519")),
+        ("an ECDSA leaf that names serverAuth", TestPki::with_keys(CertSpec::server(&names), root_key,
+                                                                   KeyPair::generate_ecdsa(Curve::P256).unwrap()), None),
+    ];
+    let mut web = TrustStore::empty();
+    web.add_pem(root_pem);
+    let now = pratique::sys::now_unix();
+    for (what, private, why) in &cases {
+        match (web.verify_server_chain(&private.chain, "localhost", now), why) {
+            (Err(e), Some(why)) => assert!(e.to_string().contains(why), "{what}: {e}"),
+            (Ok(_), None) => {}
+            (other, _) => panic!("{what}: pratique's default store says {:?}", other.map(|_| "ok")),
+        }
+        trust_store(Some(root_pem.as_str())).unwrap().verify_server_chain(&private.chain, "localhost", now)
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+        let server = serve_with(private, |_| Some(response(200, &[], b"ok")));
+        let reply = fetch(&request(&server, "/")).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!(reply.body, b"ok", "{what}");
+    }
+}
+
+/// Issuer names written otherwise than the subject of the certificate that issued them (another case, string type and
+/// spaces: pratique's fixtures, at the time its tests judge them): RFC 5280 compares names so, and Lazaret's anchors
+/// take the chain, where the CA/Browser Forum's rule 7.1.4.1 wants the bytes and pratique's default store refuses it.
+#[test]
+fn issuer_names_are_compared_as_rfc_5280_compares_them() {
+    const AT: i64 = 1_789_430_400;
+    let root = include_str!("../../pratique/tests/data/nm_root.pem");
+    let chain: Vec<Vec<u8>> = [include_str!("../../pratique/tests/data/nm_leaf.pem"),
+                                include_str!("../../pratique/tests/data/nm_inter.pem")]
+        .iter().map(|p| pratique::pem::parse(p).remove(0).data).collect();
+    let mut web = TrustStore::empty();
+    web.add_pem(root);
+    let refused = web.verify_server_chain(&chain, "name.example.test", AT).map(|_| ()).unwrap_err().to_string();
+    assert!(refused.contains("byte for byte"), "{refused}");
+    trust_store(Some(root)).unwrap().verify_server_chain(&chain, "name.example.test", AT).unwrap();
+}
+
+/// `cert` (DER) with one more extension (its OID's content octets, critical or not, its value), signed again by `issuer`.
+fn with_extension(cert: &[u8], issuer: &KeyPair, oid: &[u8], critical: bool, value: &[u8]) -> Vec<u8> {
+    use pratique::asn1::{write, Der};
+    let mut outer = Der::new(cert);
+    let mut whole = outer.sequence().unwrap();
+    let (tbs, algorithm) = (whole.expect(0x30).unwrap(), whole.expect(0x30).unwrap());
+    let mut fields = Der::new(tbs.content);
+    let mut out = Vec::new();
+    while !fields.is_empty() {
+        let field = fields.next().unwrap();
+        if field.tag != 0xa3 {
+            out.extend_from_slice(field.raw);
+            continue;
+        }
+        let list = Der::new(field.content).expect(0x30).unwrap();
+        let flag = if critical { write::boolean(true) } else { Vec::new() };
+        let added = write::sequence(&[&write::oid(oid), &flag, &write::octet_string(value)]);
+        out.extend(write::context(3, true, &write::sequence(&[list.content, &added])));
+    }
+    let tbs = write::sequence(&[&out]);
+    let signature = issuer.sign(&tbs);
+    write::sequence(&[&tbs, algorithm.raw, &write::bit_string(0, &signature)])
+}
+
+/// The external security report's LZ-01 (CWE-295) under Lazaret's trust anchors ([`WEB_PKI_RULES`] off): pratique
+/// processes no certificate policy, and since its main of Oct 27 (57c22cb0) a critical certificatePolicies,
+/// policyMappings, policyConstraints or inhibitAnyPolicy refuses the chain, on the leaf or on the anchor, where it was
+/// taken as if it were not there; one that is not critical is ignored, as before. (A private CA's chain over the native
+/// transport: test_nativenet's PolicyExtensionTests.)
+#[test]
+fn a_critical_policy_extension_refuses_the_chain() {
+    use pratique::asn1::write;
+    let root_key = KeyPair::generate_ecdsa(Curve::P256).unwrap();
+    let pki = TestPki::with_keys(CertSpec::server(&["localhost"]), &root_key, KeyPair::generate_ecdsa(Curve::P256).unwrap());
+    let policy = |o: &str| write::sequence(&[&write::oid_str(o)]);
+    let cases: [(&str, &str, Vec<u8>); 4] = [
+        ("certificatePolicies", "2.5.29.32", write::sequence(&[&policy("1.2.3.4")])),
+        ("policyMappings", "2.5.29.33",
+         write::sequence(&[&write::sequence(&[&write::oid_str("1.2.3.4"), &write::oid_str("1.2.3.5")])])),
+        ("policyConstraints", "2.5.29.36", write::sequence(&[&write::context(0, false, &[0])])),
+        ("inhibitAnyPolicy", "2.5.29.54", write::integer(&[0])),
+    ];
+    let now = pratique::sys::now_unix();
+    let pem = |der: &[u8]| {
+        let text = pratique::pem::base64_encode(der);
+        let lines: Vec<&str> = text.as_bytes().chunks(64).map(|l| std::str::from_utf8(l).unwrap()).collect();
+        format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n", lines.join("\n"))
+    };
+    for (name, dotted, value) in &cases {
+        let oid = pratique::asn1::oid_from_string(dotted).unwrap();
+        for critical in [false, true] {
+            let leaf = with_extension(&pki.chain[0], &root_key, &oid, critical, value);
+            let on_leaf = trust_store(Some(&pki.root_pem())).unwrap().verify_server_chain(&[leaf], "localhost", now);
+            let root = with_extension(&pki.root, &root_key, &oid, critical, value);
+            let on_anchor = trust_store(Some(&pem(&root))).unwrap().verify_server_chain(&pki.chain, "localhost", now);
+            if critical {
+                let refused = on_leaf.map(|_| ()).unwrap_err().to_string();
+                assert!(refused.contains(&format!("unrecognized critical extension {dotted}")), "{name} on the leaf: {refused}");
+                assert!(on_anchor.is_err(), "{name} on the anchor: taken");
+            } else {
+                on_leaf.unwrap_or_else(|e| panic!("{name}, not critical, on the leaf: {e}"));
+                on_anchor.unwrap_or_else(|e| panic!("{name}, not critical, on the anchor: {e}"));
+            }
+        }
     }
 }
 

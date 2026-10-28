@@ -305,8 +305,10 @@ nothing in it is edited by hand. Its repository is {UPSTREAM}; it was called tin
   (the workspace's, in `rust/Cargo.toml`, apply) and cargo warns about each one.
 - **Lazaret's crates on it:** `lazaret-verify` (the pure part: `default-features = false`, no I/O, no `unsafe`;
   the engine and the WebAssembly build use it) and `lazaret-net` (the network: Lazaret's host rule, URL
-  limits, timeouts and byte budgets, and credentials given to each hop's own host through `Client::hop_headers`;
-  linked into the native library only). `scripts/check_rust_deps.py` refuses the engine linking the network part.
+  limits, timeouts and byte budgets, credentials given to each hop's own host through `Client::hop_headers`, and
+  trust anchors held to RFC 5280's rules rather than the CA/Browser Forum's, `WEB_PKI_RULES`, since they may be a
+  private PKI's; linked into the native library only). `scripts/check_rust_deps.py` refuses the engine linking the
+  network part.
 - **The next take:** `python3 scripts/sync_pratique.py PATH [--rev REV]` (a checkout of {UPSTREAM}: the commit's
   files, with the commit recorded here; or a folder or tarball of the library), then the gates.
   `python3 scripts/sync_pratique.py --verify` checks this folder against `vendored.sha256` (CI does).
@@ -316,8 +318,9 @@ nothing in it is edited by hand. Its repository is {UPSTREAM}; it was called tin
   never HTTP/3 (`rust/crates/lazaret-net`).
 - **Its tests in Lazaret's CI:** `cargo test --release -p pratique --lib` and the tests that need nothing
   installed (`go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic`, `rekor_real`, `real_chains`,
-  `inflate_vectors`; `real_chains` replays chains captured from real servers when `tests/data/real_chains/` is
-  in the source, and skips without it).
+  `inflate_vectors`, `tuf_sigstore`, `tuf_synthetic`, `wycheproof`, `real_revocation`, `chain_cases`;
+  `real_chains` replays chains captured from real servers when `tests/data/real_chains/` is in the source, and
+  skips without it).
 """
 
 

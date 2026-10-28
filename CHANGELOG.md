@@ -1535,6 +1535,32 @@ aggregate):
   Tests: `test_review_project_hooks` (8) and `review-project-hooks.test.js`, on inert stand-ins (an "obfuscated" file
   that only names five `_0x` variables, `.invalid` hosts), and `test_js_parity_project_hooks` (the two CLIs, with and
   without `--deps`).
+- **pratique's main of Oct 27, 57c22cb0: certificate-policy extensions no longer ignored (LZ-01), Lazaret's host rule
+  the library's default, and a company's own CA still trusted (NET-1).** `rust/crates/pratique` is pratique's `main` at
+  `57c22cb0`, the merge of its pull request #1 (its tree is the branch's `fa1e6304`): the two commits John pushed on Oct
+  26 and the two module files the second lacked. It fixes the external report's LZ-01 (under Fixed). Also for Lazaret's
+  client: a host name with the Kelvin sign (U+212A) is the ASCII name it lower-cases to, as a browser makes it, where it
+  became an A-label the library itself refuses; a response framed by any `Transfer-Encoding` but one `chunked` is
+  refused (`identity, chunked` and `chunked, chunked` were read); a redirect's `Location` with a colon before its first
+  `/`, `?` or `#` is read as a URL, not a path (`localhost:8443/x`, `https:/x` and `mailto:…` are refused, where they
+  were followed as paths under the redirecting URL's), one whose query or fragment holds `://` (`/ok?u=https://…`,
+  `/ok#https://…`) as the path it is, on the same host and under the same host rule (it was refused), and an empty one
+  as the URL itself (a loop, stopped at the redirect limit); a certificate whose TLS feature extension does not read is
+  refused; and where the kernel's random call is refused (an old kernel, a sandbox that blocks it), the library reads
+  `/dev/urandom` only once `/dev/random` opens and says the pool is seeded, and fails otherwise: where `/dev/random` is
+  missing too, every request over the native transport now fails ("No such file or directory"), with no fall-back to
+  urllib, where it was answered (a change of behaviour; it fails closed). The library's host rule is Lazaret's by
+  default (a `*.` host is one DNS label, a host without a port the default port), so Lazaret's network layer no longer
+  asks for it; what a request may reach is unchanged. The library holds a TLS server's certificate chain to the
+  CA/Browser Forum's rules by default (the server's certificate names serverAuth, no Ed25519, issuer names byte for
+  byte, key identifiers that match). Lazaret does not: its trust anchors may be a company's own CA or its
+  TLS-intercepting proxy's root, in `SSL_CERT_FILE` or the system's bundle, whose certificates need follow only RFC
+  5280, as OpenSSL (Python's transport) takes them, so such a proxy keeps working. A certificate of version 1 or 2 that
+  carries extensions is refused, for any purpose. Also in the take, unused by Lazaret: a request's own limits and host
+  rule, a rule for the proxies a client may use, macOS's and Windows' proxy settings (Lazaret reads them through urllib,
+  as before), faster ECDSA and RSA signing, RSA-2048 key generation, cancellable sockets for the library's async
+  runtime, streaming SHA-1 and strict Ed25519 verification for other protocols, a cookie date that crashed the cookie
+  jar (Lazaret keeps no cookie), and the library's chain verification judged beside OpenSSL's, Go's and Apple's.
 - **pratique's production server commit, f28b6d39: a stricter TLS client, and a proxy's login decoded (NET-1).**
   `rust/crates/pratique` is pratique's `f28b6d39`. Most of the commit is the library's server, behind its `server`
   feature, which no package of Lazaret's builds (only `lazaret-net`'s tests use it): the HTTP/1.1 and HTTP/2 server,
@@ -1794,6 +1820,36 @@ aggregate):
   Python rather than CPython's code.
 
 ### Fixed
+
+- **Security: a private CA's certificate policies hold, on both transports (LZ-01, the external security report of
+  Oct 27; CWE-295, improper certificate validation; no rule-set change).** A critical certificatePolicies,
+  policyMappings, policyConstraints or inhibitAnyPolicy was taken as if it were not there, so that a private CA's
+  policy constraints held nothing: a server whose certificate has no policy, under an intermediate that requires the
+  policy 1.2.3.4 (a critical `requireExplicitPolicy`), was answered on both transports. **The native transport**
+  (pratique's main of Oct 27, `57c22cb0`, NET-1, under Changed; pratique processes no policy) now refuses a chain with
+  a critical one of the four wherever it is: the server's certificate, an intermediate or the trust anchor (an anchor
+  that carries one is not used). One that is not critical is ignored, as before. The same holds wherever pratique
+  judges a chain for Lazaret: npm's and PyPI's Sigstore attestations too. **Python's transport**, which Lazaret uses by
+  itself and not only with `LAZARET_NETWORK=python` (a redirect to another host that the native transport hands over,
+  from the Go guard or an SCA feed's download; a proxy reached over TLS and the other cases the native client does not
+  take; no native library), now has OpenSSL process the policies (`X509_V_FLAG_POLICY_CHECK` in `nativenet.tls_context`
+  and secret verification's context): a chain that fails RFC 5280's policy processing (an explicit policy required and
+  none valid, as in the report's chain: "no explicit policy"; a policy extension that does not parse) is refused there
+  too, and one that passes it is taken. So a private CA whose chain fails OpenSSL's policy processing is refused on
+  both transports, and one whose CAs mark a policy extension critical (RFC 5280 says policyConstraints and
+  inhibitAnyPolicy must be) and whose chain passes it is taken by Python's transport alone. The public web's chains
+  carry certificatePolicies, never critically, and none of the other three, and OpenSSL's policy check refuses none of
+  them (55 captured public chains, Mozilla's 121 roots, this machine's bundle, Sigstore's 10 certificates), so nothing
+  Lazaret reaches today changes. Not the npm package's `--verify-secrets` (Node's https has no setting for the policy
+  check) nor the Postgres client (as `psql`): they process no policy, as before. On an OpenSSL older than 3.0.9, 3.1.1 or 1.1.1u without the fixes of CVE-2023-0464
+  and CVE-2023-0465, a CA the machine trusts could make the check slow, or have an invalid leaf policy skipped
+  (`docs/DESIGN.md`, NET-1). Tests: `test_nativenet`'s `PolicyExtensionTests` (9: each of the four critical on an
+  intermediate, certificatePolicies on the server's certificate, each on the root, each not critical), no longer
+  expected failures, and `PythonTransportPolicyTests` (5: the report's chain reached through an SCA feed's automatic
+  fall-back to urllib, refused, and answered without the flag; a clean chain answered; a critical policy extension
+  whose policies hold, taken by Python's transport); `test_tls_floor` (both contexts set the flag); `lazaret-net`'s
+  `a_critical_policy_extension_refuses_the_chain` (Lazaret's trust store, each of the four on the leaf and on the
+  anchor, critical or not).
 
 - **Security: the MCP server's path tools read only beneath the root they were checked under (LZ-03, the external
   security report of Oct 27; CWE-367, time-of-check time-of-use; Low; no rule-set change).** `scan_files` resolved a

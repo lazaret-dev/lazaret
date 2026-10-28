@@ -11,6 +11,7 @@ import functools
 import gzip
 import hashlib
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -26,7 +27,7 @@ from unittest import mock
 
 from lazaret.registry import guard, repo
 from lazaret.registry.ecosystems import base
-from lazaret.scanner import nativenet
+from lazaret.scanner import nativenet, sca_feeds
 from tests import _pki
 
 
@@ -488,6 +489,246 @@ class NativeTransportTests(unittest.TestCase):
             server.stop()
         finally:
             tmp.cleanup()
+
+
+class PrivateRootTests(unittest.TestCase):
+    """A server whose certificate a private CA issued (a company's own, or its TLS-intercepting proxy's), as such a CA
+    may issue it and the CA/Browser Forum's rules for a public one do not allow: no extended key usage, or the issuer's
+    name written otherwise than the root's (another case, a PrintableString). The native transport takes it, with the
+    root given by a caller or named by SSL_CERT_FILE, as Python's transport (OpenSSL) does: lazaret-net holds its
+    anchors to RFC 5280's rules (`WEB_PKI_RULES`), not to the CA/Browser Forum's, which pratique's stores apply by
+    default since its B-92."""
+
+    @classmethod
+    def setUpClass(cls):
+        if os.environ.get(nativenet.ENV, "").strip().lower() == "python":
+            raise unittest.SkipTest("LAZARET_NETWORK=python")
+        if not nativenet.available():
+            raise unittest.SkipTest(f"no native transport here ({nativenet.why_not()})")
+        cls.env = mock.patch.dict(os.environ, NO_PROXY_ENV, clear=True)
+        cls.env.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env.stop()
+        nativenet.configure_roots(None)
+
+    def answered(self, **choices):
+        with tempfile.TemporaryDirectory() as tmp:
+            pki = _pki.Pki(tmp, **choices)
+            server, port = serve(pki.cert, pki.key)
+            url, host = f"https://localhost:{port}/ok", f"localhost:{port}"
+            try:
+                for how in ("given", "SSL_CERT_FILE"):
+                    with self.subTest(how=how):
+                        if how == "given":
+                            nativenet.configure_roots(pki.root_pem)
+                        else:
+                            with mock.patch.dict(os.environ, {"SSL_CERT_FILE": pki.root}):
+                                nativenet.configure_roots(None)          # (the system's anchors: SSL_CERT_FILE first)
+                        reply = nativenet.request(url, hosts=[host], max_bytes=100, timeout=10)
+                        self.assertEqual((reply.status, reply.body), (200, b"hello"))
+                with urllib.request.urlopen(url, context=ssl.create_default_context(cafile=pki.root), timeout=10) as r:
+                    self.assertEqual(r.read(), b"hello", "and Python's transport")
+            finally:
+                server.stop()
+                nativenet.configure_roots(None)
+
+    def test_a_leaf_with_no_extended_key_usage(self):
+        self.answered(server_auth=False)
+
+    def test_an_issuer_name_written_in_another_case_and_string_type(self):
+        self.answered(issuer_as="LAZARET TEST ROOT")
+
+    def test_both(self):
+        self.answered(server_auth=False, issuer_as="LAZARET TEST ROOT")
+
+
+class PolicyExtensionTests(unittest.TestCase):
+    """The external security report LZ-01 (CWE-295): pratique processes no certificate policy (its x509 module says
+    so), and up to its commit 5bd271cb it took a critical certificatePolicies, policyMappings, policyConstraints or
+    inhibitAnyPolicy as if the extension were not there, so a private CA's requireExplicitPolicy held nothing: a leaf
+    with no policy under an intermediate with a critical requireExplicitPolicy 0 and the policy 1.2.3.4 was taken
+    (`openssl verify -policy 1.2.3.4` refuses it). Since pratique's main of Oct 27 (57c22cb0) a critical one of these
+    refuses the chain, as an extension the verifier does not process (RFC 5280 6.1, fail closed), wherever it is in the
+    path, the trust anchor included; one that is not critical is ignored, as before (pratique processes none of them;
+    Python's transport has OpenSSL process them: PythonTransportPolicyTests). Over the native transport (lazaret-net's trust store, `WEB_PKI_RULES` off), against a server on 127.0.0.1
+    that sends the leaf and the intermediate, the root given; the chains are tests/_pki.py's."""
+
+    POLICY = (_pki.OID_CERT_POLICIES, _pki.certificate_policies("1.2.3.4"), False)
+    #: each policy extension, as a CA's certificate may carry it (the OID's dotted form names it in the refusal)
+    EXTENSIONS = {
+        "certificatePolicies": (_pki.OID_CERT_POLICIES, _pki.certificate_policies("1.2.3.4")),
+        "policyMappings": (_pki.OID_POLICY_MAPPINGS, _pki.policy_mappings(("1.2.3.4", "1.2.3.5"))),
+        "policyConstraints": (_pki.OID_POLICY_CONSTRAINTS, _pki.require_explicit_policy(0)),
+        "inhibitAnyPolicy": (_pki.OID_INHIBIT_ANY_POLICY, _pki.inhibit_any_policy(0)),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        if os.environ.get(nativenet.ENV, "").strip().lower() == "python":
+            raise unittest.SkipTest("LAZARET_NETWORK=python")
+        if not nativenet.available():
+            raise unittest.SkipTest(f"no native transport here ({nativenet.why_not()})")
+        cls.env = mock.patch.dict(os.environ, NO_PROXY_ENV, clear=True)
+        cls.env.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env.stop()
+        nativenet.configure_roots(None)
+
+    def outcome(self, **choices):
+        """What the native transport makes of a server with this chain: ("answered", the body) or (the kind, the
+        message) of its NetError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pki = _pki.Pki(tmp, **choices)
+            server, port = serve(pki.cert, pki.key)
+            host = f"localhost:{port}"
+            try:
+                nativenet.configure_roots(pki.root_pem)
+                try:
+                    reply = nativenet.request(f"https://{host}/ok", hosts=[host], max_bytes=100, timeout=10)
+                except nativenet.NetError as exc:
+                    return exc.kind, str(exc)
+                return "answered", reply.body
+            finally:
+                server.stop()
+                nativenet.configure_roots(None)
+
+    def assertRefused(self, oid, **choices):
+        kind, message = self.outcome(**choices)
+        self.assertEqual(kind, "tls", message)
+        self.assertIn(f"unrecognized critical extension {oid}", message)
+
+    def test_an_intermediate_with_a_policy_and_no_constraint_is_answered(self):
+        self.assertEqual(self.outcome(intermediate=[self.POLICY]), ("answered", b"hello"))
+
+    def test_a_critical_policy_constraint_on_the_intermediate_refuses_the_chain(self):
+        self.assertRefused(_pki.OID_POLICY_CONSTRAINTS,
+                           intermediate=[(_pki.OID_POLICY_CONSTRAINTS, _pki.require_explicit_policy(0), True),
+                                         self.POLICY])
+
+    def test_a_policy_constraint_that_is_not_critical_is_ignored(self):
+        # (not critical: an extension pratique does not process is ignored, as before)
+        self.assertEqual(self.outcome(intermediate=[(_pki.OID_POLICY_CONSTRAINTS, _pki.require_explicit_policy(0),
+                                                     False), self.POLICY]), ("answered", b"hello"))
+
+    def test_a_critical_inhibit_any_policy_on_the_intermediate_refuses_the_chain(self):
+        self.assertRefused(_pki.OID_INHIBIT_ANY_POLICY,
+                           intermediate=[(_pki.OID_INHIBIT_ANY_POLICY, _pki.inhibit_any_policy(0), True), self.POLICY])
+
+    def test_a_critical_policy_mapping_on_the_intermediate_refuses_the_chain(self):
+        self.assertRefused(_pki.OID_POLICY_MAPPINGS,
+                           intermediate=[self.POLICY, (_pki.OID_POLICY_MAPPINGS,
+                                                       _pki.policy_mappings(("1.2.3.4", "1.2.3.5")), True)])
+
+    def test_critical_certificate_policies_on_the_intermediate_refuse_the_chain(self):
+        self.assertRefused(_pki.OID_CERT_POLICIES,
+                           intermediate=[(_pki.OID_CERT_POLICIES, _pki.certificate_policies("1.2.3.4"), True)])
+
+    def test_critical_certificate_policies_on_the_leaf_refuse_the_chain(self):
+        self.assertRefused(_pki.OID_CERT_POLICIES, intermediate=[self.POLICY],
+                           leaf_extensions=[(_pki.OID_CERT_POLICIES, _pki.certificate_policies("1.2.3.4"), True)])
+
+    def test_each_one_not_critical_is_ignored(self):
+        for name, (oid, value) in self.EXTENSIONS.items():
+            with self.subTest(name):
+                others = [] if oid == _pki.OID_CERT_POLICIES else [self.POLICY]     # (an extension appears once)
+                self.assertEqual(self.outcome(intermediate=[*others, (oid, value, False)]), ("answered", b"hello"))
+
+    def test_a_critical_one_on_the_trust_anchor_refuses_the_chain(self):
+        """The anchor is judged as the rest of the path: pratique never uses an anchor with a critical extension it
+        does not process (its bulk loading parses each one when it is first needed, and leaves out one that does not
+        pass), so the chain has no trusted root, and the refusal says so rather than naming the extension. Each one not
+        critical: answered."""
+        for name, (oid, value) in self.EXTENSIONS.items():
+            with self.subTest(name):
+                kind, message = self.outcome(intermediate=[self.POLICY], root_extensions=[(oid, value, True)])
+                self.assertEqual(kind, "tls", message)
+                self.assertIn("unable to build a chain to a trusted root", message)
+                self.assertEqual(self.outcome(intermediate=[self.POLICY], root_extensions=[(oid, value, False)]),
+                                 ("answered", b"hello"))
+
+
+class PythonTransportPolicyTests(unittest.TestCase):
+    """LZ-01 on Python's transport, which Lazaret reaches by itself and not only with LAZARET_NETWORK=python: a redirect
+    the native transport refuses because it leads to another host (LZ-02) is made again on urllib (here an SCA feed's
+    download, `sca_feeds.fetch`; the Go guard's does the same), as is every request `nativenet` sends to Python's
+    transport (`UsePython`), and every request where there is no native library. Its context
+    (`nativenet.tls_context()`) has OpenSSL process the certificate policies (`X509_V_FLAG_POLICY_CHECK`), so a private
+    CA's requireExplicitPolicy holds there too: the external report's chain (an intermediate with a critical
+    requireExplicitPolicy 0 and the policy 1.2.3.4, a server certificate with no policy) is refused, "no explicit
+    policy", where without the flag urllib answered it. A chain whose critical policy extensions OpenSSL processes and
+    finds valid is taken by Python's transport, and refused by the native one, which processes none.
+
+    A feed host on localhost (a clean chain) redirects to a server on another port; SSL_CERT_FILE holds both roots."""
+
+    LZ01 = [(_pki.OID_POLICY_CONSTRAINTS, _pki.require_explicit_policy(0), True),
+            (_pki.OID_CERT_POLICIES, _pki.certificate_policies("1.2.3.4"), False)]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = mock.patch.dict(os.environ, NO_PROXY_ENV, clear=True)
+        cls.env.start()
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.feed = _pki.Pki(cls.tmp.name, root_name="Lazaret test feed root")       # (the feed's host: a clean chain)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env.stop()
+        cls.tmp.cleanup()
+        if nativenet.available():
+            nativenet.configure_roots(None)
+
+    def download(self, flag=True, **choices):
+        """What an SCA feed's download gets when the feed's host redirects to a server with this chain: ("answered",
+        the body) or ("refused", the FeedError's message)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pki = _pki.Pki(tmp, **choices)
+            roots = os.path.join(tmp, "roots.pem")
+            with open(roots, "w", encoding="ascii") as f:
+                f.write(self.feed.root_pem + pki.root_pem)
+            feed, feed_port = serve(self.feed.cert, self.feed.key)
+            server, port = serve(pki.cert, pki.key)
+            try:
+                with mock.patch.dict(os.environ, {"SSL_CERT_FILE": roots}), \
+                        mock.patch.object(sca_feeds._HANDLERS[1], "_context", None), \
+                        mock.patch.object(nativenet, "X509_V_FLAG_POLICY_CHECK",
+                                          nativenet.X509_V_FLAG_POLICY_CHECK if flag else 0):
+                    if nativenet.available():
+                        nativenet.configure_roots(None)             # (the native transport's anchors: SSL_CERT_FILE)
+                    out = io.BytesIO()
+                    try:
+                        sca_feeds.fetch(f"https://localhost:{feed_port}/to-port/{port}", out, 1000)
+                    except sca_feeds.FeedError as exc:
+                        return "refused", str(exc)
+                    return "answered", out.getvalue()
+            finally:
+                server.stop()
+                feed.stop()
+
+    def test_the_contexts_ask_openssl_to_process_policies(self):
+        self.assertEqual(nativenet.X509_V_FLAG_POLICY_CHECK, 0x80)
+        self.assertTrue(nativenet.tls_context().verify_flags & nativenet.X509_V_FLAG_POLICY_CHECK)
+
+    def test_the_external_reports_chain_reached_through_the_automatic_fall_back_is_refused(self):
+        kind, message = self.download(intermediate=self.LZ01)
+        self.assertEqual(kind, "refused", message)
+        self.assertIn("explicit policy", message)                  # (OpenSSL's X509_V_ERR_NO_EXPLICIT_POLICY)
+
+    def test_without_the_policy_check_urllib_answered_it(self):
+        # (the control: the fall-back happens, and the flag is what refuses the chain)
+        self.assertEqual(self.download(flag=False, intermediate=self.LZ01), ("answered", b"hello"))
+
+    def test_a_clean_chain_reached_through_the_fall_back_is_answered(self):
+        self.assertEqual(self.download(intermediate=[self.LZ01[1]]), ("answered", b"hello"))
+
+    def test_a_critical_policy_extension_whose_policies_hold_is_taken_by_pythons_transport_alone(self):
+        # (critical certificatePolicies on the server's certificate, nothing that constrains them: OpenSSL processes
+        # them and the chain is valid; the native transport, which processes none, refuses it: PolicyExtensionTests)
+        self.assertEqual(self.download(intermediate=[self.LZ01[1]], leaf_extensions=[
+            (_pki.OID_CERT_POLICIES, _pki.certificate_policies("1.2.3.4"), True)]), ("answered", b"hello"))
 
 
 class ChoiceTests(unittest.TestCase):

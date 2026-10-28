@@ -176,6 +176,14 @@ class ContextTests(unittest.TestCase):
                 with mock.patch.object(ssl, "create_default_context", lambda *a, **k: self.lowered_to(low)):
                     self.assertEqual(secretverify_http.default_context().minimum_version, want)
 
+    def test_both_contexts_have_openssl_process_certificate_policies(self):
+        # (LZ-01 on Python's transport: X509_V_FLAG_POLICY_CHECK, which Python's ssl names no constant for)
+        self.assertEqual(secretverify_http.X509_V_FLAG_POLICY_CHECK, nativenet.X509_V_FLAG_POLICY_CHECK)
+        for name, context in (("nativenet.tls_context", nativenet.tls_context()),
+                              ("secretverify_http.default_context", secretverify_http.default_context())):
+            with self.subTest(name):
+                self.assertTrue(context.verify_flags & nativenet.X509_V_FLAG_POLICY_CHECK)
+
     def test_the_context_is_urllibs_default_otherwise(self):
         context = nativenet.tls_context()
         self.assertEqual((context.verify_mode, context.check_hostname), (ssl.CERT_REQUIRED, True))
