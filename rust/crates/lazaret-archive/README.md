@@ -11,7 +11,7 @@ Lazaret's existing ZIP implementation is separate and unchanged.
 | TAR | Regular files and directories; ustar, PAX `path`/`size` (plus times, ownership, comments, `hdrcharset` and extended attributes, which are ignored), PAX global headers holding only `comment`/`mtime` (`git archive`), and GNU long names |
 | GZIP | One in-memory file, with optional `FNAME` recovery |
 | TAR.GZ / TGZ | Inflate with the workspace decoder, then parse as TAR |
-| RAR4 / RAR5 | **Store-method members only**, with header and member CRC checks; RAR 7's locator and metadata records, comments and recovery records are skipped |
+| RAR4 / RAR5 | **Store-method members only**, with header and member CRC checks; RAR 7's locator and metadata records, comments and recovery records are skipped, and so is a RAR5 header of unknown type, as unrar skips it |
 | 7-Zip | Copy, DEFLATE, LZMA1, LZMA2; encoded headers, multiple files per folder, empty entries, and CRC checks |
 | Bzip2 | One in-memory file; block and combined CRC checks, multi-block and concatenated streams (pbzip2), unused selectors (lbzip2) |
 | XZ | One in-memory file; single-filter LZMA2 blocks, index verification, None/CRC32/CRC64 checks |
@@ -54,6 +54,19 @@ pieces), metadata over 1 MiB, and data after a single zero block. Callers that k
 should be (from a file name, as the extractor that opens them does) should use
 `extract_as`; `detect` refuses bytes a TAR reader would find members in after
 skipping a bad first block.
+
+Where an extractor stops with an error and another reads on, the crate reads on when
+that returns every member either writes. A RAR5 header of a type the format does not
+define is one such case: unrar and unar skip it, with or without its
+`HFL_SKIPIFUNKNOWN` flag (which governs what an archiver does with it when updating
+the archive), while 7-Zip stops there having written only the members before it. The
+crate skips it as unrar does and returns the members on both sides, except where an
+extractor reads the header as something else, which is `Error::Ambiguous`: a type of
+2^32 or more (unrar reads its low 32 bits, so it may be a file or end header), type 0
+(libarchive's end marker), a flagged header with anything after its flags field
+(libarchive reads on from there, so a file block in it is written by bsdtar), and a
+flagged header whose flags field takes ten bytes (libarchive ends the archive there
+without an error, so bsdtar writes none of the members after it).
 
 Where only the *path* an entry lands at depends on the extractor or file system, every
 entry is returned and the archive says so: `Archive::collisions` groups entries some

@@ -273,7 +273,9 @@ pub(crate) fn extract5(data: &[u8], limits: Limits) -> Result<crate::Archive> {
         }
         let mut cursor = Cursor::new(&data[start..header_end]);
         let kind = cursor.vint()?;
+        let flags_at = cursor.pos;
         let flags = cursor.vint()?;
+        let flags_width = cursor.pos - flags_at;
         let extra_size = if flags & 1 != 0 { size(cursor.vint()?, "RAR5 extra size")? } else { 0 };
         let data_size = if flags & 2 != 0 { cursor.vint()? } else { 0 };
         let payload_end = header_end.checked_add(size(data_size, "RAR5 member size")?).ok_or(Error::Limit("RAR5 member size"))?;
@@ -351,10 +353,37 @@ pub(crate) fn extract5(data: &[u8], limits: Limits) -> Result<crate::Archive> {
                 }
                 return Ok(out.finish(Format::Rar5));
             }
-            _ if flags & 4 != 0 => out.reserve_metadata(header_size.saturating_add(data_size))?,
-            _ => return Err(Error::Unsupported("unknown RAR5 header")),
+            // Any other type. unrar and unar skip the header and its data area, its fields unread, whether
+            // or not it carries HFL_SKIPIFUNKNOWN (0x0004), a flag that tells an archiver what to do with the
+            // block when updating the archive. 7-Zip stops there with an error, having written only the
+            // members before it. The crate skips it too, except where some extractor reads it otherwise:
+            // - unrar keeps a header's type in 32 bits, so a type over that is read as its low 32 bits
+            //   (2^32 + 2 is a file header it writes; 2^32 + 5 ends the archive);
+            // - libarchive (bsdtar) takes type 0 for its end marker and stops there without an error;
+            // - libarchive skips a header with HFL_SKIPIFUNKNOWN by reading the next block right after its
+            //   flags field, so sizes, fields or an extra area after it are read as headers (a file block
+            //   there is written);
+            // - libarchive ends the archive, without an error, at a header with HFL_SKIPIFUNKNOWN whose
+            //   flags field takes ten bytes (a non-minimal encoding, or bit 63 set), so the members after
+            //   it are not written by bsdtar.
+            _ if kind > u64::from(u32::MAX) => {
+                return Err(Error::Ambiguous("a RAR5 header type over 32 bits (unrar reads its low 32 bits)"));
+            }
+            0 => return Err(Error::Ambiguous("a RAR5 header of type 0 (libarchive ends the archive there)")),
+            _ if flags & 4 != 0 && (flags & 3 != 0 || cursor.remaining() > 0) => {
+                return Err(Error::Ambiguous("an unknown RAR5 header that libarchive reads into and unrar skips"));
+            }
+            _ if flags & 4 != 0 && flags_width == 10 => {
+                return Err(Error::Ambiguous(
+                    "an unknown RAR5 header whose flags take ten bytes (libarchive ends the archive there)"));
+            }
+            _ => {
+                // An extra area that does not fit in the header is refused. unrar refuses one only when it
+                // is at least the whole header's size, so this is stricter than unrar, and a refusal.
+                if extra_size > cursor.remaining() { return Err(Error::Corrupt("RAR5 extra-area size mismatch")); }
+                out.reserve_metadata(header_size.saturating_add(data_size))?;
+            }
         }
-        extra(&mut cursor, extra_size)?;
         pos = payload_end;
     }
 }
@@ -410,9 +439,13 @@ mod tests {
     }
 
     fn rar5_block(kind: u64, specific: &[u8], extra_data: &[u8], payload: &[u8], out: &mut Vec<u8>) {
+        rar5_block_flags(kind, 0, specific, extra_data, payload, out);
+    }
+
+    fn rar5_block_flags(kind: u64, flags: u64, specific: &[u8], extra_data: &[u8], payload: &[u8], out: &mut Vec<u8>) {
         let mut body = Vec::new();
         vi(kind, &mut body);
-        let flags = if extra_data.is_empty() { 0 } else { 1 } | if payload.is_empty() { 0 } else { 2 };
+        let flags = flags | if extra_data.is_empty() { 0 } else { 1 } | if payload.is_empty() { 0 } else { 2 };
         vi(flags, &mut body);
         if !extra_data.is_empty() { vi(extra_data.len() as u64, &mut body); }
         if !payload.is_empty() { vi(payload.len() as u64, &mut body); }
@@ -485,6 +518,187 @@ mod tests {
         assert_eq!(good[at], b'h');
         good[at] ^= 1;
         assert_eq!(extract5(&good, Limits::default()), Err(Error::Checksum("RAR5 member")));
+    }
+
+    /// An archive of a.txt and b.txt with `block` between them.
+    fn rar5_around(block: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
+        let mut out = b"Rar!\x1a\x07\x01\x00".to_vec();
+        rar5_block(1, &[0], &[], &[], &mut out);
+        rar5_file("a.txt", b"benign a", 0, &[], &mut out);
+        block(&mut out);
+        rar5_file("b.txt", b"benign b", 0, &[], &mut out);
+        rar5_block(5, &[0], &[], &[], &mut out);
+        out
+    }
+
+    fn names(archive: &crate::Archive) -> Vec<&str> {
+        archive.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn unknown_rar5_headers_are_skipped_as_unrar_skips_them() {
+        // unrar 7.00 and unar write a.txt and b.txt for each of these; 7-Zip stops at the header with an
+        // error after a.txt; bsdtar stops with an error at an unknown header without HFL_SKIPIFUNKNOWN (4).
+        let hidden: &[u8] = b"bytes in the unknown header's data area";
+        let mut record = Vec::new();
+        vi(3, &mut record);
+        vi(9, &mut record);                                // an unknown extra record type
+        record.extend_from_slice(b"xy");
+        for kind in [6, 127, 200, u64::from(u32::MAX)] {
+            // Without the flag: any body, extra area or data area.
+            for flags in [0, 0x08, 0x10, 0x20, 0x40] {
+                for (specific, extra_data, payload) in [
+                    (&b""[..], &[][..], &[][..]),
+                    (&b""[..], &[][..], hidden),
+                    (&b"\x05\x00junk"[..], &[][..], &[][..]),
+                    (&b""[..], &record[..], &[][..]),
+                    (&b"\x07\x01zz"[..], &record[..], hidden),
+                ] {
+                    let input = rar5_around(|out| rar5_block_flags(kind, flags, specific, extra_data, payload, out));
+                    let got = extract5(&input, Limits::default())
+                        .unwrap_or_else(|e| panic!("kind {kind} flags {flags:#x}: {e:?}"));
+                    assert_eq!(names(&got), ["a.txt", "b.txt"], "kind {kind} flags {flags:#x}");
+                    assert_eq!(got.entries[1].data, b"benign b");
+                }
+            }
+            // With the flag and nothing after the flags field, where libarchive reads on from too.
+            for flags in [4, 4 | 0x08, 4 | 0x10, 4 | 0x20, 4 | 0x40] {
+                let input = rar5_around(|out| rar5_block_flags(kind, flags, &[], &[], &[], out));
+                assert_eq!(names(&extract5(&input, Limits::default()).unwrap()), ["a.txt", "b.txt"]);
+            }
+        }
+        // Before the main header, and twice in a row.
+        let mut early = b"Rar!\x1a\x07\x01\x00".to_vec();
+        rar5_block_flags(6, 4, &[], &[], &[], &mut early);
+        early.extend_from_slice(&rar5(&[("a.txt", b"benign a")])[8..]);
+        assert_eq!(names(&extract5(&early, Limits::default()).unwrap()), ["a.txt"]);
+        let twice = rar5_around(|out| {
+            rar5_block_flags(6, 0, &[], &[], &[], out);
+            rar5_block_flags(7, 4, &[], &[], &[], out);
+        });
+        assert_eq!(names(&extract5(&twice, Limits::default()).unwrap()), ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn unknown_rar5_headers_other_extractors_read_are_ambiguous() {
+        let ambiguous = |input: &[u8]| matches!(extract5(input, Limits::default()), Err(Error::Ambiguous(_)));
+        // unrar reads a type of 2^32 or more by its low 32 bits: 2^32 + 2 is a file header it writes,
+        // 2^32 + 5 ends the archive.
+        for kind in [1u64 << 32, (1 << 32) + 2, (1 << 32) + 5, (1 << 34) + 2, u64::MAX] {
+            for flags in [0, 4] {
+                let input = rar5_around(|out| rar5_block_flags(kind, flags, &[], &[], &[], out));
+                assert!(ambiguous(&input), "kind {kind:#x} flags {flags:#x}");
+            }
+        }
+        // libarchive ends the archive at type 0.
+        for flags in [0, 4] {
+            assert!(ambiguous(&rar5_around(|out| rar5_block_flags(0, flags, &[], &[], &[], out))));
+        }
+        // With HFL_SKIPIFUNKNOWN, libarchive reads on right after the flags field: a file block in the
+        // header's body, or in its data area after the size field, is written by bsdtar.
+        let mut inner = Vec::new();
+        rar5_file("hidden.txt", b"not skipped by bsdtar", 0, &[], &mut inner);
+        let mut record = Vec::new();
+        vi(2, &mut record);
+        vi(2, &mut record);
+        record.extend_from_slice(&[0; 1]);
+        for (specific, extra_data, payload) in [
+            (&inner[..], &[][..], &[][..]),
+            (&b""[..], &[][..], &inner[..]),
+            (&b""[..], &record[..], &[][..]),
+            (&b"\x05\x00junk"[..], &[][..], &[][..]),
+        ] {
+            let input = rar5_around(|out| rar5_block_flags(6, 4, specific, extra_data, payload, out));
+            assert!(ambiguous(&input));
+        }
+        // libarchive ends the archive without an error (bsdtar writes a.txt only) at a flagged header whose
+        // flags field takes ten bytes: the value 4 in a non-minimal encoding, or 4 with bit 63 set. These
+        // are the external review's fe_flags_nonminimal10 and fe_flags_hi63; unrar and unar write both.
+        for flags in [[0x84, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00],
+                      [0x84, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]] {
+            for kind in [6, 127, 200, u64::from(u32::MAX)] {
+                let mut body = Vec::new();
+                vi(kind, &mut body);
+                body.extend_from_slice(&flags);
+                assert!(ambiguous(&rar5_around(|out| rar5_raw(&body, out))), "kind {kind} flags {flags:x?}");
+            }
+        }
+    }
+
+    /// A RAR5 block of `body` (its type, flags and the rest, as given), framed with its size and CRC.
+    fn rar5_raw(body: &[u8], out: &mut Vec<u8>) {
+        let mut framed = Vec::new();
+        vi(body.len() as u64, &mut framed);
+        framed.extend_from_slice(body);
+        out.extend_from_slice(&crc32(0, &framed).to_le_bytes());
+        out.extend_from_slice(&framed);
+    }
+
+    #[test]
+    fn wide_flags_without_the_ten_byte_skip_shape_are_still_skipped() {
+        // Controls for the ten-byte case above. A flagged header whose flags take nine bytes (bit 56 set),
+        // and an unflagged one whose flags take ten (0 non-minimal, or bit 63 alone), are skipped as unrar
+        // and unar skip them. bsdtar writes both members from the first and stops with an error at the others.
+        let around = |body: &[u8]| rar5_around(|out| rar5_raw(body, out));
+        let mut nine = Vec::new();
+        vi(6, &mut nine);
+        vi(4 | (1 << 56), &mut nine);
+        assert_eq!(nine.len(), 10);                        // one byte of type, nine of flags
+        assert_eq!(names(&extract5(&around(&nine), Limits::default()).unwrap()), ["a.txt", "b.txt"]);
+        for flags in [[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00],
+                      [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]] {
+            let mut body = Vec::new();
+            vi(6, &mut body);
+            body.extend_from_slice(&flags);
+            assert_eq!(names(&extract5(&around(&body), Limits::default()).unwrap()), ["a.txt", "b.txt"]);
+        }
+    }
+
+    #[test]
+    fn a_skipped_header_s_data_area_is_not_read_as_headers() {
+        // A whole file block inside an unflagged unknown header's data area: unrar, unar and the crate skip
+        // it; 7-Zip and bsdtar stop with an error at the header.
+        let mut inner = Vec::new();
+        rar5_file("hidden.txt", b"not a member", 0, &[], &mut inner);
+        let input = rar5_around(|out| rar5_block_flags(6, 0, &[], &[], &inner, out));
+        assert_eq!(names(&extract5(&input, Limits::default()).unwrap()), ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn unknown_rar5_headers_stay_bounded_and_checked() {
+        // An extra area that does not fit in the header is refused.
+        let mut body = Vec::new();
+        vi(6, &mut body);
+        vi(1, &mut body);
+        vi(50, &mut body);
+        let mut framed = Vec::new();
+        vi(body.len() as u64, &mut framed);
+        framed.extend_from_slice(&body);
+        let input = rar5_around(|out| {
+            out.extend_from_slice(&crc32(0, &framed).to_le_bytes());
+            out.extend_from_slice(&framed);
+        });
+        assert_eq!(extract5(&input, Limits::default()), Err(Error::Corrupt("RAR5 extra-area size mismatch")));
+
+        // The header CRC is still checked.
+        let mut bad = rar5_around(|out| rar5_block_flags(6, 4, &[], &[], &[], out));
+        let a_end = 8 + {
+            let mut probe = Vec::new();
+            rar5_block(1, &[0], &[], &[], &mut probe);
+            rar5_file("a.txt", b"benign a", 0, &[], &mut probe);
+            probe.len()
+        };
+        bad[a_end] ^= 1;
+        assert_eq!(extract5(&bad, Limits::default()), Err(Error::Checksum("RAR5 header")));
+
+        // Skipped headers and their data count against the metadata budget and the header count.
+        let big = vec![b'z'; 4096];
+        let input = rar5_around(|out| rar5_block_flags(6, 0, &[], &[], &big, out));
+        let tight = Limits { max_metadata_size: 1024, ..Limits::default() };
+        assert!(matches!(extract5(&input, tight), Err(Error::Limit(_))));
+        let flood = rar5_around(|out| for _ in 0..64 { rar5_block_flags(6, 4, &[], &[], &[], out) });
+        let few = Limits { max_entries: 16, ..Limits::default() };
+        assert_eq!(extract5(&flood, few), Err(Error::Limit("RAR header count")));
     }
 
     #[test]
