@@ -530,11 +530,17 @@ class _RedirectTests:
         self.assertEqual(self.server.connections, 1, "nothing was connected to for intranet.test")
 
     def test_an_address_written_as_a_number_is_judged_by_the_address_it_connects_to(self):
-        # (2130706433, 0x7f000001, 127.1 and 0177.0.0.1 are names to the URL and 127.0.0.1 to the resolver: judged
-        # by the address the lookup gives, before anything is connected)
+        # (2130706433, 0x7f000001, 127.1 and 0177.0.0.1 are names to the URL and addresses to the resolver: judged
+        # by the address the lookup gives, before anything is connected. Resolvers differ on them: glibc's reads
+        # 0177.0.0.1 as octal, 127.0.0.1, and macOS's as decimal, 177.0.0.1, a public address that is connected to
+        # there, as it may be, and a test must not reach out to; so a form this system's resolver does not read as
+        # 127.0.0.1 is skipped here, never fetched)
         f = self.fetcher({"proxy.test": PUBLIC_PROXY})
         for host in ("2130706433", "0x7f000001", "127.1", "0177.0.0.1"):
             with self.subTest(host=host):
+                read = {a[4][0] for a in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+                if read != {"127.0.0.1"}:
+                    self.skipTest(f"this system's resolver reads {host} as {', '.join(sorted(read))}")
                 self.refused(f, f"/hop/{host}/blob", f"redirect to {host}, a loopback address (127.0.0.1), refused: "
                                                      f"the proxy is on a public address")
         self.assertEqual(set(self.server.hosts()), {"proxy.test"})
