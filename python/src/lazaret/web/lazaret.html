@@ -266,8 +266,14 @@ coding cookie can give, facts about Python), written by
 scripts/make_codec_tables.py from Python's own decoders; CPython made those
 codecs' mappings for the most part from the Unicode Consortium's mapping
 tables and the vendors' published ones (Microsoft's cp932, cp936, cp949 and
-cp950). All three are distributed under the Unicode License v3
-(LICENSE-UNICODE):
+cp950). The archive readers' table, fold_table.rs in
+crates/lazaret-archive/src/, holds data of the Unicode Character Database
+15.1 — the case foldings, decompositions and canonical combining classes
+the readers use to find names that a file system writes to one path,
+taken from Python 3.13's unicodedata, and the Default_Ignorable_Code_Point
+ranges of DerivedCoreProperties.txt, which the generator lists itself —
+written by crates/lazaret-archive/tests/fixtures/generate_fold_table.py.
+All four are distributed under the Unicode License v3 (LICENSE-UNICODE):
 
     Copyright © 1991-2026 Unicode, Inc.
 
