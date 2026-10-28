@@ -12,6 +12,7 @@ import collections
 import contextlib
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -377,6 +378,35 @@ def _deep_tree(root, depth, name="d"):
 
 @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
 @unittest.skipUnless(hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd, "folders made beneath a descriptor")
+def _remove_tree(root):
+    """Empties `root` however deep its folders go, with two descriptors open at a time and no path longer than a
+    name or two: each folder's subfolders are moved up into `root` before it is removed. (TemporaryDirectory's
+    shutil.rmtree keeps a descriptor open for each level, and these trees are deeper than the 256 open files a macOS
+    process gets by default: EMFILE; a path-based removal is past macOS's 1,024-byte PATH_MAX.)"""
+    top = os.open(root, os.O_RDONLY)
+    try:
+        moved, pending = 0, os.listdir(top)
+        while pending:
+            name = pending.pop()
+            if not stat.S_ISDIR(os.stat(name, dir_fd=top, follow_symlinks=False).st_mode):
+                os.unlink(name, dir_fd=top)
+                continue
+            fd = os.open(name, os.O_RDONLY, dir_fd=top)
+            try:
+                for child in os.listdir(fd):
+                    if stat.S_ISDIR(os.stat(child, dir_fd=fd, follow_symlinks=False).st_mode):
+                        moved += 1
+                        os.rename(child, f".up{moved}", src_dir_fd=fd, dst_dir_fd=top)
+                        pending.append(f".up{moved}")
+                    else:
+                        os.unlink(child, dir_fd=fd)
+            finally:
+                os.close(fd)
+            os.rmdir(name, dir_fd=top)
+    finally:
+        os.close(top)
+
+
 class DepthCapParityTests(unittest.TestCase):
     """LZ-03's review: the walk enters no folder deeper than MAX_WALK_DEPTH (512) below the root, core's walk and the
     npm package's alike (js/src/lib/collect.js): one nested deeper (a folder to walk, a __pycache__, a vendor folder
@@ -400,35 +430,41 @@ class DepthCapParityTests(unittest.TestCase):
                 limit = os.pathconf(root, "PC_PATH_MAX") if hasattr(os, "pathconf") else 4096
                 fits = need <= limit        # (the npm package reads by path: Linux's PATH_MAX is 4,096, macOS's 1,024)
                 _deep_tree(root, depth, name)
-                for deps in modes:
-                    with self.subTest(name=name, depth=depth, deps=deps, fits=fits):
-                        js, py = parity.both(root, deps=deps)
-                        if fits:
-                            self.assert_same(js, py, label=f"{depth} deep, deps={deps}")
-                            for key in ("incomplete", "incompleteReason"):
-                                self.assertEqual(js[1].get(key), py[1].get(key), key)
-                        else:
-                            self.assert_too_long(js[1], py[1])
-                        found = {(i["rule"], i["file"].replace("\\", "/")) for i in py[1]["issues"]}
-                        chain = "/".join([name] * depth)
-                        truncated = sorted(f for r, f in found if r == "SC-TRUNCATED")
-                        if depth < cap:
-                            self.assertNotIn("incomplete", py[1])
-                            self.assertEqual(truncated, [])
-                            self.assertIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
-                        elif depth == cap:
-                            self.assertEqual(truncated, [f"{chain}/__pycache__", f"{chain}/vendor"])
-                            self.assertEqual(py[1]["incompleteReason"],
-                                             f"2 folders nested deeper than {cap} folders were not read")
-                            self.assertIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
-                        else:
-                            deep = sorted([chain] + (["node_modules/dep/" + "/".join([name] * (depth - 2))]
-                                                     if deps else []))
-                            self.assertEqual(truncated, deep)
-                            self.assertTrue(py[1]["incomplete"])
-                            self.assertNotIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
-                        self.assertTrue(all("nested deeper than 512 folders" in i["msg"] for i in py[1]["issues"]
-                                            if i["rule"] == "SC-TRUNCATED"))
+                try:
+                    self.check_tree(root, name, depth, modes, fits, cap)
+                finally:
+                    _remove_tree(root)      # (before TemporaryDirectory's own removal, which would find it empty)
+
+    def check_tree(self, root, name, depth, modes, fits, cap):
+        for deps in modes:
+            with self.subTest(name=name, depth=depth, deps=deps, fits=fits):
+                js, py = parity.both(root, deps=deps)
+                if fits:
+                    self.assert_same(js, py, label=f"{depth} deep, deps={deps}")
+                    for key in ("incomplete", "incompleteReason"):
+                        self.assertEqual(js[1].get(key), py[1].get(key), key)
+                else:
+                    self.assert_too_long(js[1], py[1])
+                found = {(i["rule"], i["file"].replace("\\", "/")) for i in py[1]["issues"]}
+                chain = "/".join([name] * depth)
+                truncated = sorted(f for r, f in found if r == "SC-TRUNCATED")
+                if depth < cap:
+                    self.assertNotIn("incomplete", py[1])
+                    self.assertEqual(truncated, [])
+                    self.assertIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
+                elif depth == cap:
+                    self.assertEqual(truncated, [f"{chain}/__pycache__", f"{chain}/vendor"])
+                    self.assertEqual(py[1]["incompleteReason"],
+                                     f"2 folders nested deeper than {cap} folders were not read")
+                    self.assertIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
+                else:
+                    deep = sorted([chain] + (["node_modules/dep/" + "/".join([name] * (depth - 2))]
+                                             if deps else []))
+                    self.assertEqual(truncated, deep)
+                    self.assertTrue(py[1]["incomplete"])
+                    self.assertNotIn(("S-EVAL-PY", f"{chain}/leaf.py"), found)
+                self.assertTrue(all("nested deeper than 512 folders" in i["msg"] for i in py[1]["issues"]
+                                    if i["rule"] == "SC-TRUNCATED"))
 
     def assert_too_long(self, js, py):
         """The npm package's result, where its paths are too long to read: incomplete, saying so, each folder it could
