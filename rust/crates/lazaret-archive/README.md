@@ -89,6 +89,14 @@ byte slices. `detect` identifies known containers without extracting them.
 Default limits are 250,000 entries, 128 MiB per member, 500 MiB total output,
 4,096 bytes per name, and 1 MiB per metadata item. Structural sizes and offsets
 are checked before slicing or copying.
+A decoder produces no more than the entries it yields may hold. One compressed
+file (GZIP read as a file, Bzip2, XZ, LZMA-alone) decodes up to the member limit,
+or the total if that is lower.
+A 7-Zip folder decodes up to the sizes its members declare, each checked against
+the member limit and all of them against what is left of the total before
+anything is decoded. Only a TAR inside GZIP decodes up to the total: a stream
+named `TarGzip` with `extract_as`, or, when the format is detected, one whose
+first inflated block is a TAR header.
 Names are canonicalized without touching the host filesystem; absolute paths,
 parent traversal, drive/alternate-stream syntax, control characters, reserved
 Windows device names and ambiguous trailing dots/spaces are refused, in the name and
@@ -119,6 +127,10 @@ independently with `bsdtar`; they do not depend on the Rust parser for validatio
 coverage includes encoded headers, multiple files per folder, and state/history
 continuing across compressed chunks. The Bzip2/XZ/LZMA-alone fixtures contain a
 real protocol-5 pickle and are independently decoded and deserialized by Python.
+`tests/member_bound.rs` (from the external review's member-bound test) counts
+peak heap with its own allocator. It builds a solid 7-Zip folder and gzip streams
+as bytes, and compares with the `7z`, `gzip` and `gunzip` CLIs when they are
+installed (skipping those cases otherwise).
 
 Run the Rust tests from the `rust` workspace:
 

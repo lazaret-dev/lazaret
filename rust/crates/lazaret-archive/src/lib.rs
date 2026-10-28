@@ -207,6 +207,17 @@ impl Builder {
         usize::try_from(size).map_err(|_| Error::Limit("member does not fit this platform"))
     }
 
+    /// The most a solid block of members of these sizes may decode to (R1): what its members declare, each within the
+    /// member limit and all of them within what is left of the total. Checked before anything is decoded.
+    pub(crate) fn block_budget(&self, sizes: &[u64]) -> Result<u64> {
+        let mut sum = 0u64;
+        for &size in sizes {
+            self.check_member_size(size)?;
+            sum = sum.checked_add(size).filter(|&n| n <= self.remaining()).ok_or(Error::Limit("total extracted size"))?;
+        }
+        Ok(sum)
+    }
+
     /// Add one entry under its name as the format stores it (`\` kept: the formats that use it as a
     /// separator convert it before calling this).
     pub(crate) fn add(&mut self, raw_name: &str, kind: EntryKind, data: &[u8]) -> Result<()> {
@@ -417,11 +428,39 @@ fn inflate_error(error: inflate::Error) -> Error {
     }
 }
 
+/// The first TAR block of a gzip stream's output, or less if the stream is shorter or fails before it: enough to tell
+/// a TAR from one file before the rest is decoded.
+fn gzip_head(data: &[u8], max_output: u64) -> Vec<u8> {
+    let mut inflater = inflate::Inflater::new(inflate::Format::Gzip, inflate::Limits::new(max_output));
+    let mut head = vec![0u8; 512];
+    let (mut pos, mut got) = (0, 0);
+    while got < head.len() {
+        let Ok(progress) = inflater.inflate(&data[pos..], &mut head[got..]) else { break };
+        pos += progress.consumed;
+        got += progress.produced;
+        if progress.status != inflate::Status::NeedOutput || progress.consumed + progress.produced == 0 { break; }
+    }
+    head.truncate(got);
+    head
+}
+
 /// `want`: `Some(Gzip)` reads one file as gunzip does, `Some(TarGzip)` a TAR inside; `None` decides from
 /// the inflated bytes, and refuses bytes a TAR reader would find members in when they are not plainly TAR.
 fn extract_gzip(data: &[u8], limits: Limits, want: Option<Format>) -> Result<Archive> {
-    let raw = inflate::decode_all(inflate::Format::Gzip, data, inflate::Limits::new(limits.max_total_size))
-        .map_err(inflate_error)?;
+    // R1: one file decodes no further than the member limit; only a TAR inside may take the total. Undeclared, the
+    // stream is taken for a TAR when its first block is a TAR header. Any other stream is one file, unless it fits the
+    // member limit and its bytes then read as a TAR after all (an empty TAR of zeros), as before.
+    let tar_inside = match want {
+        Some(Format::TarGzip) => true,
+        Some(_) => false,
+        None => tar::looks_like(&gzip_head(data, limits.max_total_size)),
+    };
+    let one_file = !tar_inside && limits.max_member_size <= limits.max_total_size;
+    let cap = if one_file { limits.max_member_size } else { limits.max_total_size };
+    let raw = inflate::decode_all(inflate::Format::Gzip, data, inflate::Limits::new(cap)).map_err(|error| match error {
+        inflate::Error::OutputLimit { .. } if one_file => Error::Limit("member size"),
+        error => inflate_error(error),
+    })?;
     let tar = match want {
         Some(Format::TarGzip) => true,
         Some(_) => false,
@@ -536,5 +575,116 @@ mod tests {
         for bad in ["..\\x", "a\\..\\..\\x", "\\x", "a\\b\\"] {
             assert!(b.add(bad, EntryKind::File, b"").is_err(), "{bad}");
         }
+    }
+
+    /// One gzip member of `data` in stored DEFLATE blocks.
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255];
+        let chunks: Vec<&[u8]> = data.chunks(65_535).collect();
+        if chunks.is_empty() { out.extend_from_slice(&[1, 0, 0, 0xff, 0xff]); }
+        for (i, chunk) in chunks.iter().enumerate() {
+            out.push(u8::from(i + 1 == chunks.len()));
+            let len = chunk.len() as u16;
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&(!len).to_le_bytes());
+            out.extend_from_slice(chunk);
+        }
+        out.extend_from_slice(&inflate::crc32(0, data).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out
+    }
+
+    /// A TAR member as GNU tar writes it (ustar), padded to its blocks.
+    fn ustar(name: &str, data: &[u8]) -> Vec<u8> {
+        let octal = |n: usize, width: usize| format!("{:0w$o}\0", n, w = width - 1).into_bytes();
+        let mut h = vec![0u8; 512];
+        h[..name.len()].copy_from_slice(name.as_bytes());
+        h[100..108].copy_from_slice(&octal(0o644, 8));
+        h[108..116].copy_from_slice(&octal(1000, 8));
+        h[116..124].copy_from_slice(&octal(1000, 8));
+        h[124..136].copy_from_slice(&octal(data.len(), 12));
+        h[136..148].copy_from_slice(&octal(0, 12));
+        h[156] = b'0';
+        h[257..265].copy_from_slice(b"ustar\x0000");
+        h[148..156].fill(b' ');
+        let sum: usize = h.iter().map(|&b| usize::from(b)).sum();
+        h[148..156].copy_from_slice(&[format!("{sum:06o}").as_bytes(), b"\0 "].concat());
+        let mut out = [h, data.to_vec()].concat();
+        out.resize(out.len().div_ceil(512) * 512, 0);
+        out
+    }
+
+    const KIB: u64 = 1024;
+
+    #[test]
+    fn r1_a_solid_block_is_gated_on_its_members_before_decoding() {
+        let b = Builder::new(Limits::new(100, 250));
+        assert_eq!(b.block_budget(&[]), Ok(0));
+        assert_eq!(b.block_budget(&[100, 100]), Ok(200));
+        assert_eq!(b.block_budget(&[100, 101]), Err(Error::Limit("member size")));
+        assert_eq!(b.block_budget(&[u64::MAX, 1]), Err(Error::Limit("member size")));
+        assert_eq!(b.block_budget(&[100, 100, 100]), Err(Error::Limit("total extracted size")));
+        // what earlier entries took counts against the total
+        let mut b = Builder::new(Limits::new(100, 250));
+        b.add("a", EntryKind::File, &[0; 100]).unwrap();
+        assert_eq!(b.block_budget(&[100, 50]), Ok(150));
+        assert_eq!(b.block_budget(&[100, 51]), Err(Error::Limit("total extracted size")));
+        // a member limit over the total: the total binds
+        let b = Builder::new(Limits::new(1000, 250));
+        assert_eq!(b.block_budget(&[200, 51]), Err(Error::Limit("total extracted size")));
+    }
+
+    #[test]
+    fn r1_one_gzip_file_decodes_no_further_than_the_member_limit() {
+        let data = vec![b'x'; 64 * 1024];
+        let gz = gzip(&data);
+        for limits in [Limits::new(16 * KIB, 1024 * KIB), Limits::new(16 * KIB, 32 * KIB), Limits::new(32 * KIB, 32 * KIB)] {
+            assert_eq!(extract_with_limits(&gz, limits), Err(Error::Limit("member size")), "{limits:?}");
+            assert_eq!(extract_as(&gz, Format::Gzip, limits), Err(Error::Limit("member size")), "{limits:?}");
+        }
+        // a member limit over the total: the total binds, with the error it had
+        assert_eq!(extract_as(&gz, Format::Gzip, Limits::new(1024 * KIB, 32 * KIB)), Err(Error::Limit("gzip output")));
+        // at the member limit it is read, one byte under it is not
+        let got = extract_with_limits(&gz, Limits::new(64 * KIB, 64 * KIB)).unwrap();
+        assert_eq!((got.format, got.entries.len(), got.entries[0].data == data), (Format::Gzip, 1, true));
+        assert_eq!(extract_as(&gz, Format::Gzip, Limits::new(64 * KIB - 1, 1024 * KIB)), Err(Error::Limit("member size")));
+        // the head that decides is the first block, also across stored blocks and gzip members
+        assert_eq!(gzip_head(&gz, u64::MAX), vec![b'x'; 512]);
+        assert_eq!(gzip_head(&[gzip(b"ab"), gzip(&[b'c'; 600])].concat(), u64::MAX), [&b"ab"[..], &[b'c'; 510][..]].concat());
+        assert_eq!(gzip_head(&gzip(b"short"), u64::MAX), b"short");
+        assert_eq!(gzip_head(b"\x1f\x8bnot gzip", u64::MAX), b"");
+    }
+
+    #[test]
+    fn r1_a_tar_inside_gzip_keeps_the_total_limit() {
+        // three members of 24 KiB: each within a 32 KiB member limit, the TAR (over 72 KiB) not
+        let tar = [ustar("a.txt", &[b'a'; 24 * 1024]), ustar("b.txt", &[b'b'; 24 * 1024]), ustar("c.txt", &[b'c'; 24 * 1024]), vec![0; 1024]].concat();
+        let gz = gzip(&tar);
+        let limits = Limits::new(32 * KIB, 1024 * KIB);
+        for got in [extract_with_limits(&gz, limits), extract_as(&gz, Format::TarGzip, limits)] {
+            let got = got.unwrap();
+            assert_eq!((got.format, got.entries.len()), (Format::TarGzip, 3));
+            assert_eq!(got.entries[2].data, vec![b'c'; 24 * 1024]);
+        }
+        // as the one file gunzip writes, it is over the member limit; and the total still binds the TAR
+        assert_eq!(extract_as(&gz, Format::Gzip, limits), Err(Error::Limit("member size")));
+        assert_eq!(extract_with_limits(&gz, Limits::new(32 * KIB, 64 * KIB)), Err(Error::Limit("gzip output")));
+    }
+
+    #[test]
+    fn r1_gzip_that_does_not_start_with_a_tar_header_is_one_file() {
+        // all zeros: an empty TAR when it fits the member limit, as before; past it, one file over the limit
+        let zeros = gzip(&[0u8; 8 * 1024]);
+        let got = extract_with_limits(&zeros, Limits::new(8 * KIB, 1024 * KIB)).unwrap();
+        assert_eq!((got.format, got.entries.len()), (Format::TarGzip, 0));
+        assert_eq!(extract_with_limits(&zeros, Limits::new(4 * KIB, 1024 * KIB)), Err(Error::Limit("member size")));
+        // a TAR header after a first block that is not one: Ambiguous when it fits the member limit, as before
+        let late = gzip(&[vec![b'x'; 512], ustar("a.txt", b"inert\n"), vec![0; 1024]].concat());
+        assert!(matches!(extract_with_limits(&late, Limits::new(1024 * KIB, 1024 * KIB)), Err(Error::Ambiguous(_))));
+        assert_eq!(extract_with_limits(&late, Limits::new(KIB, 1024 * KIB)), Err(Error::Limit("member size")));
+        // a corrupt stream is still corrupt
+        let mut bad = gzip(&[b'x'; 4096]);
+        bad[10] = 0x07; // reserved block type
+        assert_eq!(extract_with_limits(&bad, Limits::new(KIB, 1024 * KIB)), Err(Error::Corrupt("gzip stream")));
     }
 }

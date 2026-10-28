@@ -584,8 +584,10 @@ pub(crate) fn extract(data: &[u8], limits: Limits) -> Result<crate::Archive> {
     let mut file_at = 0usize;
     for folder_at in 0..streams.folders.len() {
         let folder = &streams.folders[folder_at];
-        for &size in &folder.sub_sizes { out.check_member_size(size)?; }
-        let decoded = decode_folder(data, next_at, &streams, folder_at, out.remaining())?;
+        // R1: a solid folder decodes no further than its members may hold, each within the member limit and all
+        // within what is left of the total; a member over either is refused from the metadata, before decoding.
+        let budget = out.block_budget(&folder.sub_sizes)?;
+        let decoded = decode_folder(data, next_at, &streams, folder_at, budget)?;
         let mut data_at = 0usize;
         for (sub_at, &size) in folder.sub_sizes.iter().enumerate() {
             while files.get(file_at).is_some_and(|file| file.empty_stream) {
