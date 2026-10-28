@@ -2008,6 +2008,89 @@ aggregate):
   dashboard's folder test held `z.py` beside `Z.py`, which a Mac's folder cannot: that pair is now a folder of its own,
   compared where the disk holds both and skipped where it cannot.
 
+- **A model file is read for what loading it runs, not reported as an embedded archive (FP-MODEL-FILES, John's OK of
+  Oct 20; rule set 2.104.0).** scan-all's run of Oct 20 gave `github:ObsidianArch02/fireredasr2s-mlx`
+  WARN for one finding, SC-NESTED-ARCHIVE on `golden/golden.pt`: a PyTorch checkpoint is a zip by design, so every
+  repository or package that shipped one was WARN, while what loading it runs was never read — `torch.load` without
+  `weights_only=True`, a Lightning checkpoint, `joblib.load`, `pickle.load` and `numpy.load(allow_pickle=True)`
+  unpickle the file, and a pickle runs whatever its globals name and its REDUCE, BUILD, NEWOBJ, INST and OBJ opcodes
+  call (a known way to spread malware through model files). The engine now recognizes a model file by its bytes (a
+  zip whose first member is `<archive>/data.pkl`, or an `.npy`; PyTorch's legacy stream and tar; a pickle of protocol
+  2 to 5; zlib or gzip around a pickle; a zip of one pickle, pandas' `to_pickle('x.pkl.zip')`; text that reads to
+  its STOP as a protocol 0 pickle) or, for a protocol 0 or 1
+  pickle and bzip2/xz/lzma/lz4 around one, by its name (`.pkl`, `.pickle`, `.pck`, `.pcl`, `.joblib`), and reads its
+  pickles opcode by opcode, never unpickling them (every protocol; the memo, Python 2's names; each `.pkl` member of
+  a checkpoint, a second `data.pkl` too; joblib's arrays skipped as joblib skips them, and read as plain `pickle.load`
+  would read them when they start with an opcode; object arrays in `.npy` and `.npz` files; the bytes handed to
+  `torch.storage._load_from_bytes` or `pickle.loads`, as a file of their own). Each global is judged by its name and
+  its use: the ones a tensor checkpoint is rebuilt from (PyTorch's own weights-only unpickler's set), numpy's own
+  pickling functions and constructors of plain data are the format (`PICKLE_SAFE_GLOBALS`: what PyTorch itself trusts,
+  not an exemption), and so are pyarrow's pickling helpers (pandas 3's Arrow-backed arrays, a Hugging Face dataset's
+  table), pandas' Arrow extension types and dateutil's and pytz's zones; the data types of modules of code, named
+  exactly (`http.HTTPStatus`, `signal.Signals`, `socket.AddressFamily`, `os.stat_result`, `time.struct_time`,
+  `subprocess.CompletedProcess`: `PICKLE_DATA_GLOBALS`), are data; `getattr(<a global>, '<a name>')`, how pickle
+  writes a bound method (a datetime's zone, `zoneinfo.ZoneInfo._unpickle`), is read as that dotted global and judged
+  by its name; objects remade by NEWOBJ and BUILD, or by a reconstructor handed their class (sklearn's estimators,
+  omegaconf, Lightning's hyperparameters), are quiet; a global that runs code or touches the system (`os`, `posix`,
+  `nt`, `subprocess`, `eval`/`exec`/`compile`/`__import__`/`open`, `getattr` in any other use, `runpy`, `importlib`, `socket`,
+  `shutil`, `sys`, `webbrowser`, `ctypes`, nested `pickle`, `marshal` and `torch.load` loads and the like), in any use,
+  a callable put where the unpickler calls it (an object's `__setstate__`), BUILD on a class or function, a class made
+  with `type()` and a dotted name of code handed to a call are **SC-PICKLE-CODE** (new, CRITICAL); another installed
+  function called with text it is told to use (a command, code, a path, a URL, a module path, bytes), or an object the
+  file computes and calls, is **SC-PICKLE-GLOBAL** (new, MAJOR); a global of the scanned package's own modules
+  (`torch.save(model)` of its own class: importing it runs that module's code when the file is loaded, code the scan
+  reads) is SC-PICKLE-GLOBAL as INFO, listed and setting no verdict, and a call with text of it (an enum's member
+  lookup by a URL too, `Source('https://...')`) is MAJOR; a pickle the reader cannot read to its end (cut
+  short, garbled, past its bounds, compressed with bzip2, xz, lzma or lz4, a pickle or legacy file larger than the
+  source-size limit) is SC-TRUNCATED. A checkpoint (or an `.npz`) is read by range, whatever its size: its zip's end
+  records, central directory and pickle members, never its tensor storages, so one of hundreds of MB is judged as one of
+  a few KB is (a 200 MB checkpoint reads in a few KB: from the disk in a project scan and `--deps`, as the stream passes
+  in a registry archive); a `.pth` file too large to read whole, PyTorch's usual name for one, is read in chunks for
+  the lines Python runs of it (SC-PTH-EXEC as for any `.pth` file; a line longer than 1,000,000 bytes is SC-TRUNCATED),
+  so a 200 MB `model.pth` is judged by its pickle and its import lines, not INCOMPLETE. A model file that was read has no SC-NESTED-ARCHIVE unless its zip holds members its format
+  does not; other nested archives keep it as before. Every route: the registry (a wheel's checkpoint was not reported
+  at all), a project scan and `--deps`, Python and npm (the WebAssembly engine) alike. Measured on files the real libraries wrote
+  (numpy 2.5, joblib 1.6, scikit-learn 1.9, pandas 3.0, omegaconf 2.4: 83 files of 13 kinds of estimator dumped plain,
+  with zlib and gzip, protocols 0 to 5, `.npy`/`.npz` with and without object arrays, DataFrames and hyperparameters)
+  and on the data files those libraries ship (numpy's, scipy's and joblib's tests: Python 2 pickles, joblib 0.8 to 0.11
+  formats): quiet but for the 18 compressed with bzip2, xz or lzma (SC-TRUNCATED), 174 files read in under a second.
+  After the precision review of Oct 21, on 199 more files the real libraries wrote — the reviewer's 112 (pandas 3.0 with
+  pyarrow 26, zoneinfo, dateutil and pytz zones, the standard library's enums, hyperparameters at protocols 0 to 5),
+  75 of polars 2.0, scipy 1.18's sparse matrices, Pillow 13's images, xgboost 3.4's and lightgbm 4.7's scikit-learn
+  models, networkx 3.7's graphs, datasets 5.1's Dataset, DatasetDict and Features, transformers 5.20's
+  TrainingArguments (as `training_args.bin`) and a config, a Lightning checkpoint's AttributeDict, and the 12 test
+  fixtures — the 42 the first reader reported CRITICAL or MAJOR and the 2 zip-compressed pandas pickles it left as
+  archives are quiet; what is left is the 5 compressed with
+  bzip2, xz or lzma (SC-TRUNCATED) and 6 enums pickled from `__main__` called with a URL, a path or a dotted name
+  (MAJOR: their class is not in any scan). The external review of Oct 21 (H1–H7, M1–M4) closed where the reader
+  decided less than the loader reads: an `.npy` header read by `ast.literal_eval`'s and numpy's dtype grammar (an
+  object dtype however written is read, one it cannot place is SC-TRUNCATED); a zip's members the union of what every
+  common unpacker finds (`zip::entries`' `Listing`, its `ambiguous` reasons SC-TRUNCATED: with FP-NESTED-ARCHIVE's
+  review of the zip reader); every copy of a legacy tar member read; a nested load past the queue
+  SC-TRUNCATED; a checkpoint member the format's only by its content (any pickle among the others read, a program or
+  an archive among them reported, a TorchScript archive's code scanned as Python); BUILD state that gives a special
+  method a callable kept past the reader's bounds, an installed `__setstate__` dispatched, what a look cannot see
+  SC-TRUNCATED; a `.pth` read whole by the stream's byte-wise rule; byte ranges charged once (a 50,000-member `.npz`
+  by range is quiet); an extension code called SC-PICKLE-GLOBAL, MAJOR; `__torch__` trusted in TorchScript archives
+  only. The external re-review of Oct 27 (5 HIGH), in the same commit: a zip member's Unicode Path extra name
+  (Info-ZIP's) is a name of it too, read as an ordinary member when it is not the format's, and a disagreement
+  SC-TRUNCATED; numpy's `_reconstruct` (and `_mareconstruct`, torch's `_rebuild_wrapper_subclass`) makes data only of
+  the format's own array types, anything else possibly callable; the enum waiver dropped (a call with text MAJOR
+  whatever the source says); a member a Unix system marked executable keeps SC-NESTED-ARCHIVE (or SC-BINARY), named
+  with its mode, before any member the format owns is passed over; one budget for a zip's listing (at most 16 end
+  records a reader may take, each directory read once, its entries and bytes charged once): 2,000 end records over
+  one directory are SC-TRUNCATED in milliseconds, not an aborted process. Its second (4 HIGH), in the same
+  commit: every Unicode Path field of both headers names the member (more than one on an entry SC-TRUNCATED); the
+  safe constructors handed a class audited as one category (DESIGN.md lists them: `array._array_reconstructor`,
+  joblib's wrappers' `subclass`, torch's `Parameter` of its argument's type, pyarrow's extension types, torch.jit's
+  `build_*list`, numpy's object scalar), data only when what decides the class is the format's own; a member's Unix
+  mode judged whatever system made it; a symlink, directory, device, FIFO or socket never passed over as a storage
+  or record (SC-NESTED-ARCHIVE naming its type). Its third (pass, no bypass; one LOW), at stacking: a cap that
+  passes findings over says how many, as SC-TRUNCATED, as the nested loads past 64 do: the places the pickles run code
+  past 64, the findings of a checkpoint's members past 64 and the parts that could not be read past 16 (the 64 and
+  16 listed as before, so no verdict is weaker; the same on every route, native and WebAssembly). Owed:
+  John's `bench.py all` (the popular set: a release that ships a checkpoint or a pickle moves; joblib's wheel becomes
+  INCOMPLETE for its own `.pkl.bz2`/`.pkl.xz`/`.pkl.lzma` test files).
 - **A download's deadline covers the whole request and holds while a read waits (F-07, the external review of Oct 18; no
   rule-set change).** On Python's transport (urllib's, and the pool's with `--keepalive`; the native transport has its
   own total timeout) `lazaret guard`'s deadline for one download (GR-3: 15 minutes, `LAZARET_GUARD_DOWNLOAD_SECONDS`)

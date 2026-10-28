@@ -395,7 +395,59 @@ rust/
                              program (`binary_check`), SC-BINARY, SC-NESTED-ARCHIVE and
                              SC-OPAQUE-BLOB (`binary_classify`), a program under a source file's
                              name (`binary_disguised`), SC-PYC-* (`pyc_issues`), SC-PTH-EXEC
-                             (`pth_issues`)
+                             (`pth_issues`; a .pth file too large to read whole read in chunks
+                             for the lines site.py runs, `pth_stream` with the host keeping its
+                             state, and those lines checked at their lines, `pth_kept`; bounded by
+                             `PTH_MAX_LINE` a line and `PTH_MAX_KEPT` in all: FP-MODEL-FILES)
+    src/pickle/              model files read for what they would run (0.1.9, FP-MODEL-FILES), never
+                             unpickled: `mod.rs` recognizes one by its bytes (a zip whose first
+                             member is `<archive>/data.pkl`, an .npy or a pickle by its name,
+                             pandas' zip compression, PyTorch's legacy stream and
+                             tar, a PROTO opcode, zlib or gzip around a pickle, a protocol 0 GLOBAL
+                             that reads to its STOP; a pickle extension, `PICKLE_EXTS`, for the
+                             rest), reads its parts (`zip.rs`: the central directory, stored and
+                             deflated entries through lazaret-verify's `inflate`, pratique's, on
+                             `Bytes`, the whole file or the pieces of it a host read by range,
+                             what is missing noted as needed: `read_ranges` reads a zip model file
+                             of any size by its end records, directory and pickle members, never
+                             its storages, `model_file` with `pieces` and collect_file's
+                             `{"need": {"read": "ranges"}}`, byte ranges charged once; a zip's
+                             members the union of every common unpacker's views, `zip::entries`'
+                             `Listing` with its `ambiguous` reasons; the .npy
+                             header read by `ast.literal_eval`'s and numpy's dtype grammar,
+                             `npy.rs`; the legacy tar's storages and tensors, every copy; a
+                             member the format's only by its content, a pickle among the others
+                             read, a TorchScript archive's code scanned as Python), and judges
+                             each global by the pack's tables (`PICKLE_SAFE_GLOBALS`: PyTorch's
+                             weights-only set, numpy's pickling, pyarrow's, dateutil's and pytz's,
+                             plain data; `PICKLE_DATA_GLOBALS`, the data types of modules of code
+                             named exactly; `PICKLE_CODE_MODULES`,
+                             `PICKLE_CODE_GLOBALS`, `PICKLE_CODE_ATTRS`; Python 2's names,
+                             `PICKLE_MODULE_ALIASES` and `PICKLE_NAME_ALIASES`) and by its use:
+                             SC-PICKLE-CODE, SC-PICKLE-GLOBAL, SC-TRUNCATED (`model_sniff`,
+                             `model_file`); `own_imports`, a model file's globals of the scanned
+                             package's own modules (`model_own`, once the scan knows its files:
+                             SC-PICKLE-GLOBAL as INFO, setting no verdict), and the calls with text
+                             model_file holds (`calls`), reported MAJOR whatever the scan's
+                             source says of the class.
+                             `vm.rs` is the reader: every opcode of protocols 0 to 5 in one pass on
+                             values standing for what the unpickler would build (a call is its
+                             callee and arguments), the memo, marks as CPython's fences, the
+                             format's own helpers modelled (copyreg's reconstructors, torch's
+                             `_rebuild_from_type_v2`, numpy's random-state constructors and
+                             `_ufunc_reconstruct`, `getattr(<a global>, '<a name>')` read as that
+                             dotted global (a bound method; getattr in any other use is code),
+                             `torch.storage._load_from_bytes`, whose bytes are
+                             read as a file of their own), joblib's `NumpyArrayWrapper` followed by
+                             its array's bytes (read again as plain `pickle.load` would read them,
+                             a fork, when they start with an opcode); bounded: a step of the call's
+                             budget per opcode, `MAX_MEMO`, `MAX_STACK`, `MAX_KEPT` items kept,
+                             `MAX_FORKS` forks of `MAX_FORK_OPS` opcodes, `MAX_DISPATCH` helpers
+                             deep, `PICKLE_MAX_INFLATED` bytes decompressed, `PICKLE_MAX_ENTRIES` zip
+                             entries, `PICKLE_MAX_DIRECTORY` bytes of central directory, a reading by
+                             range `PICKLE_MAX_READS` reads of at most `range_cap` bytes in all;
+                             values dropped in one loop (`Drop` for `Seq` and `Made`), no
+                             cycle made (`keepable`, `CYCLE_LOOK`; the book's suspects let go of)
     src/deps.rs              --deps' decisions (BR-7 step 3 e, 0.1.9; core's dependency_checks and
                              project_hook_checks, and the npm package's deps.js, until then): the
                              follow of a dependency's and a project's own install hooks

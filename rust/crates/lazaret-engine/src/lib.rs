@@ -41,6 +41,7 @@ pub mod metrics;
 pub mod model;
 pub mod normalize;
 pub mod pack;
+pub mod pickle;
 pub mod project;
 pub mod pyflow;
 pub mod pyparse;

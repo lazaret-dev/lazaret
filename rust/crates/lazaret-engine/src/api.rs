@@ -86,8 +86,12 @@ pub const CALLS: &[&str] = &[
     "scan_manifest", "scan_gyp", "manifest_data", "manifest_check",
     // 0.1.9 (BR-7 step 3 c): the one redactor, for the findings the packages build (redact.rs)
     "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line", "pem_lines",
-    // BR-7 step 3 d: binaries, bytecode and .pth files (a file's bytes as latin-1 text)
+    // BR-7 step 3 d: binaries, bytecode and .pth files (a file's bytes as latin-1 text; one too large to read whole in
+    // chunks, pth_stream, its lines site.py runs checked by pth_kept)
     "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
+    // 0.1.9 (FP-MODEL-FILES): a model file's pickles read for what they would run (pickle/), and the globals of the
+    // package's own modules the scan's model files import
+    "model_sniff", "model_file", "model_own", "pth_stream", "pth_kept",
     // BR-7 step 3 e: --deps' decisions (deps.rs; the packages answer what the calls ask of the tree)
     "deps_hooks", "deps_script", "deps_targets", "deps_files", "dep_file_issues", "declared_names",
     "agent_issue",
@@ -189,6 +193,66 @@ fn read_arg(v: Option<&Value>, text: &[u32]) -> Result<crate::collect::Read, Cal
     }
 }
 
+/// [[offset, length]] as (offset, length) pairs.
+pub fn layout_arg(layout: &[Value]) -> Result<Vec<(u64, u64)>, CallError> {
+    layout.iter().map(|x| {
+        let a = x.as_arr().filter(|a| a.len() == 2);
+        let n = |k: usize| a.and_then(|a| a[k].as_i64()).filter(|&v| v >= 0).map(|v| v as u64);
+        match (n(0), n(1)) {
+            (Some(o), Some(l)) => Ok((o, l)),
+            _ => Err(CallError::BadArgs("a piece is [offset, length]".into())),
+        }
+    }).collect()
+}
+
+/// The pieces of a file a layout says `data` holds, one after another.
+fn pieces_of<'d>(layout: &[(u64, u64)], data: &'d [u8]) -> Result<Vec<(u64, &'d [u8])>, CallError> {
+    let mut at = 0u64;
+    let mut out = Vec::with_capacity(layout.len());
+    for &(off, len) in layout {
+        let end = at.checked_add(len).filter(|&e| e <= data.len() as u64)
+            .ok_or_else(|| CallError::BadArgs("the pieces' lengths run past the bytes given".into()))?;
+        out.push((off, &data[at as usize..end as usize]));
+        at = end;
+    }
+    Ok(out)
+}
+
+/// pth_stream's state from its last answer (null: the file's start).
+fn pth_state_arg(v: Option<&Value>) -> Result<crate::binary::PthStream, CallError> {
+    let Some(v @ Value::Obj(_)) = v else { return Ok(crate::binary::PthStream::default()) };
+    let b = |k: &str| matches!(v.get(k), Some(Value::Bool(true)));
+    let carry = match v.get("carry") {
+        Some(Value::Str(t)) => crate::binary::bytes_of(t).ok_or_else(|| CallError::BadArgs("a carry is latin-1 text".into()))?,
+        _ => Vec::new(),
+    };
+    Ok(crate::binary::PthStream { line: v.get("line").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64, cr: b("cr"),
+                                  carry, whole: b("whole"), keeping: b("keeping"), skipping: b("skipping"),
+                                  kept: v.get("kept").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64, full: b("full") })
+}
+
+/// [[line, latin-1 text]] as (line, bytes).
+pub fn pth_lines_arg(v: Option<&Value>) -> Result<Vec<(u64, Vec<u8>)>, CallError> {
+    v.and_then(|x| x.as_arr()).unwrap_or(&[]).iter().map(|x| {
+        let a = x.as_arr().filter(|a| a.len() == 2);
+        let n = a.and_then(|a| a[0].as_i64()).filter(|&n| n > 0);
+        let t = a.and_then(|a| a[1].as_str()).and_then(crate::binary::bytes_of);
+        match (n, t) {
+            (Some(n), Some(t)) => Ok((n as u64, t)),
+            _ => Err(CallError::BadArgs("a line is [line, latin-1 text]".into())),
+        }
+    }).collect()
+}
+
+fn pth_lines_value(lines: &[(u64, Vec<u8>)]) -> Value {
+    Value::Arr(lines.iter().map(|(n, b)| Value::Arr(vec![Value::Int(*n as i64), Value::Str(b.iter().map(|&c| c as u32).collect())])).collect())
+}
+
+/// [[offset, length]] of the ranges a reading needs.
+pub fn ranges_value(ranges: &[(u64, u64)]) -> Value {
+    Value::Arr(ranges.iter().map(|&(o, l)| Value::Arr(vec![Value::Int(o as i64), Value::Int(l as i64)])).collect())
+}
+
 /// The collection's calls (collect.rs).
 fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     use crate::collect;
@@ -231,9 +295,40 @@ fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Valu
             collect::dir(p, &d)
         }
         "collect_file" => {
-            // {rel, name, size, dep, cap, configCap, windows, neumaier, redact, answers: {head, data, sample}} -> {"need": {read,
-            // limit}} or {"issues": [[path, issue]], "file", "manifest", "config", "pth"}
+            // {rel, name, size, dep, cap, configCap, windows, neumaier, redact, ranges (the host reads a file by
+            // range), answers: {head, data, sample, ranges, rounds}} -> {"need": {read, limit}} (or {read: "ranges",
+            // ranges: [[offset, length]]}: a zip model file's, read by range) or {"issues": [[path, issue]], "file",
+            // "manifest", "config", "pth", "model"}. The ranges' answer is [[offset, length]] of every range read so
+            // far, their bytes the call's text one after another, and `rounds` how many times they were asked for; a
+            // .pth file too large to read whole ({read: "pth"}) is read in chunks through pth_stream, its answer
+            // {lines: [[line, latin-1 text]], cuts: [why]} or {error}.
+            let ranges = match answers.and_then(|x| x.get("ranges")) {
+                None | Some(Value::Null) => None,
+                Some(Value::Arr(layout)) => {
+                    let layout = layout_arg(layout)?;
+                    let data = crate::binary::bytes_of(text)
+                        .ok_or_else(|| CallError::BadArgs("a read's bytes come as latin-1 text".into()))?;
+                    pieces_of(&layout, &data)?;
+                    Some(Ok((layout, data)))
+                }
+                Some(o @ Value::Obj(_)) => Some(Err(o.get("error").and_then(|e| e.as_str()).map(|s| s.to_vec()).unwrap_or_default())),
+                _ => return Err(CallError::BadArgs("the ranges read are [[offset, length]] or {error}".into())),
+            };
+            let pth_lines = match answers.and_then(|x| x.get("pth")) {
+                None | Some(Value::Null) => None,
+                Some(o @ Value::Obj(_)) => match o.get("error") {
+                    Some(e) => Some(Err(e.as_str().map(|s| s.to_vec()).unwrap_or_default())),
+                    None => Some(Ok((pth_lines_arg(o.get("lines"))?,
+                                     o.get("cuts").and_then(|c| c.as_arr()).unwrap_or(&[]).iter()
+                                         .filter_map(|c| c.as_str().map(crate::pystr::to_string)).collect()))),
+                },
+                _ => return Err(CallError::BadArgs("a .pth file read in chunks is {lines, cuts} or {error}".into())),
+            };
             let f = collect::FileIn {
+                pth_lines,
+                ranged: flag("ranges"),
+                ranges,
+                rounds: answers.and_then(|x| x.get("rounds")).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64,
                 rel: arg_str(args, "rel")?,
                 name: arg_str(args, "name")?,
                 size: opt_int(args, "size").unwrap_or(0).max(0) as u64,
@@ -1066,6 +1161,92 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 // {path, has_source} -> core.pyc_issues
                 _ => Value::Arr(binary::pyc_issues(p, &path, &data, flag("has_source"))),
             }
+        }
+        "model_sniff" => {
+            // {path, windows} + a file's first bytes (HEADER_SAMPLE_BYTES of them) as latin-1 text -> whether it may be a
+            // model file (pickle::sniff): one to read whole with model_file
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let path = opt_str(args, "path").unwrap_or_default();
+            Value::Bool(crate::pickle::sniff(p, &path, &data, flag(args, "windows", false)))
+        }
+        "model_file" => {
+            // {path, size, limit, windows} + a file's bytes as latin-1 text (all of them, or its first ones when the
+            // file is larger, `size`, than the scan reads, `limit`) -> null (not a model file) or {"kind", "issues",
+            // "imports": [[module, name, how]], "opaque"}. With {pieces: [[offset, length]], last}, the text is those
+            // pieces of the file one after another (its first bytes among them): a zip model file read by range
+            // (pickle::read_ranges) -> null, the report, or {"need": [[offset, length]]} (the ranges to read before
+            // asking again; none with `last`, which makes what is still needed SC-TRUNCATED)
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let path = opt_str(args, "path").unwrap_or_default();
+            let size = opt_int(args, "size").unwrap_or(data.len() as i64).max(0) as u64;
+            let limit = opt_int(args, "limit").map(|l| l.max(0) as u64);
+            let windows = flag(args, "windows", false);
+            if let Some(layout) = args.get("pieces").and_then(|v| v.as_arr()) {
+                let layout = layout_arg(layout)?;
+                let src = crate::pickle::zip::Bytes::pieces(size, pieces_of(&layout, &data)?, crate::pickle::range_cap(p));
+                match crate::pickle::read_ranges(p, &path, &src, windows, flag(args, "last", false)) {
+                    crate::pickle::Ranged::Not => Value::Null,
+                    crate::pickle::Ranged::Report(r) => crate::pickle::report_value(&r),
+                    crate::pickle::Ranged::Need(n) => Value::obj(vec![("need", ranges_value(&n))]),
+                }
+            } else {
+                match crate::pickle::read_file(p, &path, &data, size, limit, windows) {
+                    None => Value::Null,
+                    Some(r) => crate::pickle::report_value(&r),
+                }
+            }
+        }
+        "model_own" => {
+            // {models: [[path, dep, [[module, name, how]], [[module, name, issue]]]], files: [[path, dep]]} ->
+            // [[path, issue]]: the model files' globals of the scanned package's own modules (INFO), and the calls
+            // with text they hold (MAJOR: pickle::own_imports). A third item of a file, a text, is not read.
+            let models: Vec<crate::pickle::ModelIn> = arr_arg(args, "models").iter().filter_map(|m| {
+                let a = m.as_arr()?;
+                Some((a.first()?.as_str()?.to_vec(), matches!(a.get(1), Some(Value::Bool(true))),
+                      crate::pickle::imports_of(a.get(2)), crate::pickle::calls_of(a.get(3))))
+            }).collect();
+            let files: Vec<(PyStr, bool, Option<Vec<u32>>)> = arr_arg(args, "files").iter().filter_map(|f| {
+                let a = f.as_arr()?;
+                Some((a.first()?.as_str()?.to_vec(), matches!(a.get(1), Some(Value::Bool(true))),
+                      a.get(2).and_then(|t| t.as_str()).map(|t| t.to_vec())))
+            }).collect();
+            Value::Arr(crate::pickle::own_imports(p, &models, &files).into_iter()
+                .map(|(path, issue)| Value::Arr(vec![Value::Str(path), issue])).collect())
+        }
+        "pth_stream" => {
+            // {state: null or the last answer's, end} + the next chunk of a .pth file too large to read whole, as
+            // latin-1 text -> {"state", "lines": [[line, its bytes from its import start as latin-1 text]], "cuts"}:
+            // the lines site.py runs (binary::pth_stream; FP-MODEL-FILES)
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let st = pth_state_arg(args.get("state"))?;
+            let (st, got) = crate::binary::pth_stream(p, &st, &data, flag(args, "end", false));
+            Value::obj(vec![
+                ("state", Value::obj(vec![
+                    ("line", Value::Int(st.line as i64)),
+                    ("cr", Value::Bool(st.cr)),
+                    ("carry", Value::Str(st.carry.iter().map(|&b| b as u32).collect())),
+                    ("whole", Value::Bool(st.whole)),
+                    ("keeping", Value::Bool(st.keeping)),
+                    ("skipping", Value::Bool(st.skipping)),
+                    ("kept", Value::Int(st.kept as i64)),
+                    ("full", Value::Bool(st.full)),
+                ])),
+                ("lines", pth_lines_value(&got.lines)),
+                ("cuts", Value::Arr(got.cuts.iter().map(|c| Value::str(c)).collect())),
+            ])
+        }
+        "pth_kept" => {
+            // {lines: [[line, latin-1 text]], redact, neumaier} -> core.pth_issues' issues for the lines pth_stream
+            // kept, at their lines
+            let lines = pth_lines_arg(args.get("lines"))?;
+            let f = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            Value::Arr(crate::binary::pth_kept_issues(p, &lines, f("redact", true), f("neumaier", false)))
         }
         "pth_issues" => {
             // {redact, neumaier} + a .pth file's text -> core.pth_issues' issues

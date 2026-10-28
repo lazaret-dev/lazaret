@@ -1716,6 +1716,59 @@ def classify_binary(path, data, size, context):
     return None if got is None else engine._issues(path, [got])[0]
 
 
+def model_sniff(path, data):
+    """FP-MODEL-FILES: whether a file whose first bytes are `data` (the first 512 are read) may be a model file, one
+    to hand model_file whole. The engine's (pickle::sniff)."""
+    return _native.call("model_sniff", {"path": path, "windows": _WINDOWS_PATHS}, _bytes_text(bytes(data or b"")[:512]))
+
+
+def model_file(path, data, size=None, limit=None, pieces=None, last=True):
+    """FP-MODEL-FILES: a model file (a PyTorch checkpoint, a pickle, joblib's, numpy's .npy/.npz) read for what its
+    pickles would run, never unpickled -> None when it is not one, else {"kind", "issues" (SC-PICKLE-CODE,
+    SC-PICKLE-GLOBAL, SC-TRUNCATED), "imports" ([[module, name, how]]: the globals of no known kind, for
+    model_own_issues), "opaque" (its archive holds more than its format: SC-NESTED-ARCHIVE stays)}. `data`: the file
+    whole, or its first bytes when it is larger (`size`) than the scan reads (`limit`). Or, for a zip model file read
+    by range whatever its size, `pieces` ([(offset, bytes)], its first bytes among them) of a file of `size` bytes:
+    {"need": [[offset, length]]} until it has the ranges it reads (its end records, its central directory, its pickle
+    members), unless `last` (what it still needs is SC-TRUNCATED). The engine's (pickle/)."""
+    if pieces is not None:
+        pieces = [(off, bytes(b)) for off, b in pieces]
+        args = {"path": path, "size": size, "windows": _WINDOWS_PATHS, "pieces": [[off, len(b)] for off, b in pieces],
+                "last": bool(last)}
+        got = _native.call("model_file", args, _bytes_text(b"".join(b for _, b in pieces)))
+        if got is not None and "need" in got:
+            return {"need": got["need"]}
+    else:
+        data = bytes(data or b"")
+        args = {"path": path, "size": len(data) if size is None else size, "windows": _WINDOWS_PATHS}
+        if limit is not None:
+            args["limit"] = limit
+        got = _native.call("model_file", args, _bytes_text(data))
+    if got is None:
+        return None
+    return {"kind": got["kind"], "issues": engine._issues(path, got["issues"]), "imports": got["imports"],
+            "opaque": got["opaque"], "calls": got.get("calls", [])}
+
+
+def model_own_issues(models, files):
+    """FP-MODEL-FILES, once the scan knows its files: SC-PICKLE-GLOBAL as INFO for each global of the scanned package's
+    own modules a model file imports (importing one runs that module's code, which the scan reads, when the file is
+    loaded), and SC-PICKLE-GLOBAL, MAJOR, for each call with text a model file holds (whatever the scan's source says
+    of the class: which file a module name is when the file is loaded is the loading program's import path, the
+    external re-review of Oct 27). `models`: [[path, dep, imports, calls]] (model_file's, collect_file's); `files`:
+    the scan's files, [[path, dep]] (its Python files are its modules, a dependency's its package's). The engine's
+    (pickle::own_imports)."""
+    if not models:
+        return []
+    got = _native.call("model_own", {"models": models, "files": files})
+    return [engine._issues(p, [row])[0] for p, row in got]
+
+
+def model_own_files(models, files):
+    """model_own_issues' files from the scan's [{path, content, dep}]: [[path, dep]]."""
+    return [[f["path"], bool(f.get("dep", False))] for f in files]
+
+
 #: The leading bytes disguised_binary reads: an oversized source file's prefix
 #: is read this far (the header test reads the first 512).
 DISGUISE_SAMPLE_BYTES = 2048
@@ -3896,6 +3949,43 @@ def pth_issues(path, text):
     return engine._issues(path, _native.call("pth_issues", {"redact": bool(REDACT_SECRETS), "neumaier": False}, text))
 
 
+#: A .pth file too large to read whole is read this many bytes at a time (pth_stream).
+PTH_CHUNK = 1 << 20
+
+
+def pth_stream(state, chunk, end):
+    """The next chunk of a .pth file too large to read whole (FP-MODEL-FILES, John's decision of Oct 21: a 200 MB
+    `model.pth` checkpoint is judged by the lines site.py runs, streamed): `state` None at its start, else the last
+    answer's; `end` with its last (an empty chunk at its end will do) -> {"state", "lines": [[line, its bytes from
+    its first import start, latin-1]], "cuts": [why a line could not be kept: SC-TRUNCATED]}. Byte-wise, whatever the
+    decoding: a line starting "import " or "import\t", or a part of one str.splitlines() splits off, as pth_issues
+    reads them; at most PTH_MAX_LINE bytes a line and PTH_MAX_KEPT in all. The engine's (binary::pth_stream)."""
+    return _native.call("pth_stream", {"state": state, "end": bool(end)}, _bytes_text(bytes(chunk)))
+
+
+def pth_stream_file(read):
+    """{"lines", "cuts"} of a .pth file read to its end through `read()` (its next bytes, b"" at its end),
+    PTH_CHUNK at a time (pth_stream)."""
+    state, lines, cuts = None, [], []
+    while True:
+        chunk = read()
+        got = pth_stream(state, chunk, not chunk)
+        state = got["state"]
+        lines += got["lines"]
+        cuts += got["cuts"]
+        if not chunk:
+            return {"lines": lines, "cuts": cuts}
+
+
+def pth_kept_issues(path, lines):
+    """pth_issues for the lines pth_stream kept ([[line, latin-1 text]]), at their lines. The engine's
+    (binary::pth_kept_issues)."""
+    if not lines:
+        return []
+    return engine._issues(path, _native.call("pth_kept", {"lines": lines, "redact": bool(REDACT_SECRETS),
+                                                          "neumaier": False}))
+
+
 def pyc_issues(path, header, has_source):
     """SC-PYC-UNCHECKED / SC-PYC-ORPHAN for one .pyc in a __pycache__ dir.
     `header` is at least the first 8 bytes; `has_source` whether the
@@ -4098,22 +4188,92 @@ def link_target_text(target):
     return target
 
 
+def _open_regular(path, expect=None):
+    """A descriptor of the REGULAR file `path` (O_NOFOLLOW | O_NONBLOCK; the caller closes it), as _read_prefix opens
+    one: `path` a path, or (a _Root, the file's names), opened from the root's descriptor and held to `expect` as
+    _Root.open holds it (LZ-03). Raises OSError (incl. _NotRegularFile, _PathChanged)."""
+    fd = path[0].open(path[1], expect) if isinstance(path, tuple) else os.open(path, _OPEN_FLAGS)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            raise _NotRegularFile(f"{_special_kind(st.st_mode)}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _read_ranges(path, ranges, expect=None):
+    """[(offset, bytes)] of the REGULAR file `path` for [[offset, length]] (fewer bytes where it is shorter), read
+    as _read_prefix reads (no symlink followed, no FIFO blocked on; a _Root's file from its descriptor, held to
+    `expect`: _open_regular). Raises OSError (incl. _NotRegularFile, _PathChanged)."""
+    fd = _open_regular(path, expect)
+    try:
+        out = []
+        for off, length in ranges:
+            os.lseek(fd, off, os.SEEK_SET)           # (lseek and read: os.pread is not Windows')
+            chunks, remaining = [], length
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            out.append((off, b"".join(chunks)))
+        return out
+    finally:
+        os.close(fd)
+
+
+def _stream_pth(path, expect=None):
+    """pth_stream_file for the REGULAR file `path`, read as _read_prefix reads one (_open_regular). Raises OSError
+    (incl. _NotRegularFile, _PathChanged)."""
+    fd = _open_regular(path, expect)
+    try:
+        return pth_stream_file(lambda: os.read(fd, PTH_CHUNK))
+    finally:
+        os.close(fd)
+
+
 def _collect_file(path, rel, st, in_dep, col):
     """Classify and read one regular file (the engine's decisions: collect.rs, collect_file, asked again with what
-    it needs read). `path`: (a _Root, the file's names), read from the root's descriptor (LZ-03) and held to `st`, the
-    walk's lstat of it: _PathChanged (the file is a link, another kind of file, another file or gone now, or a folder
-    on its way is a link or no folder) is the caller's to record, and nothing of it is kept."""
+    it needs read; a zip model file's ranges, read by range: FP-MODEL-FILES). `path`: (a _Root, the file's names), read
+    from the root's descriptor (LZ-03) and held to `st`, the walk's lstat of it: _PathChanged (the file is a link,
+    another kind of file, another file or gone now, or a folder on its way is a link or no folder) is the caller's to
+    record, and nothing of it is kept."""
     disp = _fs_display(rel)
     args = {"rel": disp, "name": _fs_display(os.path.basename(rel)), "size": st.st_size, "dep": _dep_arg(in_dep),
             "cap": SOURCE_SIZE_CAP, "configCap": configsecrets.CONFIG_SCAN_CAP, "windows": _WINDOWS_PATHS,
-            "neumaier": False, "redact": bool(REDACT_SECRETS)}
-    answers, text = {}, ""
+            "neumaier": False, "redact": bool(REDACT_SECRETS), "ranges": True}
+    answers, text, pieces = {}, "", []
     while True:
         got = _native.call("collect_file", dict(args, answers=answers), text)
         need = got.get("need")
         if need is None:
             break
         what = need["read"]
+        if what == "pth":                        # (a .pth file too large to read whole: in chunks, pth_stream)
+            try:
+                answers[what] = _stream_pth(path, st)
+            except _PathChanged:
+                raise
+            except OSError as exc:
+                answers[what] = {"error": str(exc) if isinstance(exc, _NotRegularFile)
+                                 else exc.strerror or type(exc).__name__}
+            continue
+        if what == "ranges":                     # (every range read so far, their bytes as the text)
+            try:
+                pieces.extend(_read_ranges(path, need["ranges"], st))
+            except _PathChanged:
+                raise
+            except OSError as exc:
+                answers[what] = {"error": str(exc) if isinstance(exc, _NotRegularFile)
+                                 else exc.strerror or type(exc).__name__}
+                continue
+            answers[what] = [[off, len(b)] for off, b in pieces]
+            answers["rounds"] = answers.get("rounds", 0) + 1
+            text = _bytes_text(b"".join(b for _, b in pieces))
+            continue
         try:
             data = _bytes_text(path[0].read(path[1], need["limit"], expect=st) if isinstance(path, tuple)
                                else _read_prefix(path, need["limit"]))
@@ -4146,6 +4306,8 @@ def _collect_file(path, rel, st, in_dep, col):
         col["configs"].append(got["config"])
     if got.get("pth"):
         col["pth"].append(disp)
+    if "model" in got:                           # (FP-MODEL-FILES: a model file read; its imports and calls, model_own_issues')
+        col["models"].append([disp, bool(in_dep), got["model"]["imports"], got["model"].get("calls", [])])
 
 
 def _collect(root, excludes=(), include_deps=False):
@@ -4168,7 +4330,7 @@ def _collect(root, excludes=(), include_deps=False):
     and not read; with a path for `root`, those are SC-TRUNCATED findings in
     `issues` (scan_project, which gives a _Root, reports them itself)."""
     excludes = sorted(_fs_display(x) for x in set(excludes or ()))
-    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": []}
+    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": [], "models": []}
     issues = col["issues"]
     try:
         tree, own = _as_root(root)
@@ -5186,12 +5348,14 @@ def _scan_project(tree, root, exclude, include_deps, taint_config, redact_secret
                             _dedupe(get_taint_config_warnings() + flow_warnings))
         col = _collect(tree, exclude, include_deps=include_deps)
         files, manifests, configs = col["files"], col["manifests"], col["configs"]
-        if not files and not manifests and not configs and not col["pth"] and not col["issues"] and not tree.changed \
-                and not tree.too_deep and not allow_empty:
+        if not files and not manifests and not configs and not col["pth"] and not col["issues"] and not col["models"] \
+                and not tree.changed and not tree.too_deep and not allow_empty:
             raise ScanTargetError(
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
         issues = list(extra_issues) + list(col["issues"])
+        # (FP-MODEL-FILES) the globals of the project's own modules, or a dependency's, its model files import
+        issues.extend(model_own_issues(col["models"], model_own_files(col["models"], files)))
         # findings numbered by their file's scan lines and built outside the engine's scan of it, which redacted
         # its own with the file's redaction (mk_issue's): the flows' and the dependency checks' (redact_file_issues)
         numbered = []

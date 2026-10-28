@@ -1,6 +1,7 @@
-"""Binaries, bytecode and .pth files, held to their recorded outputs (_snapshots.py): the engine's reading of a
-file's bytes (rust/crates/lazaret-engine/src/binary.rs: the `binary_check`, `binary_classify`, `binary_disguised`,
-`pyc_issues` and `pth_issues` calls) on seeded corpora.
+"""Binaries, bytecode, .pth files and model files, held to their recorded outputs (_snapshots.py): the engine's
+reading of a file's bytes (rust/crates/lazaret-engine/src/binary.rs: the `binary_check`, `binary_classify`,
+`binary_disguised`, `pyc_issues` and `pth_issues` calls; src/pickle/: `model_sniff` and `model_file`, FP-MODEL-FILES)
+on seeded corpora.
 
 Until BR-7's step 3 d (0.1.9) both packages did it themselves (core.looks_binary, classify_binary, disguised_binary,
 pyc_issues and pth_issues; js/src/lib/binary.js and pth.js). The engine took them over; these sets were built for the
@@ -11,7 +12,10 @@ media, documents, a tar header at its offset, a transport stream's sync bytes), 
 and random bytes, at every size around the limits, under paths of every extension (upper case, leading dots, a
 Windows separator) in each context; bytecode headers checked and unchecked, with a source and without; and .pth
 files of import lines, paths, comments and the line breaks str.splitlines() adds, some running or decoding a payload
-(inert: the payloads print a word), with CRLF and a byte-order mark, redacted and not.
+(inert: the payloads print a word), with CRLF and a byte-order mark, redacted and not; model files written opcode by
+opcode in the containers the libraries write (a checkpoint's zip, an .npy and an .npz, joblib's arrays, zlib and gzip
+of stored blocks, PyTorch's legacy stream, a compression the reader cannot undo), cut, a byte changed or an opcode put
+in (inert: os.system and the like named, never called).
 
 All content is inert data: no sample is a program, and nothing is executed.
 """
@@ -121,8 +125,149 @@ def pth_calls(seed=20261021, count=2500):
     return out
 
 
+# ---- model files (FP-MODEL-FILES): pickles written opcode by opcode, in the containers the libraries write, and
+# mutated (cut, a byte changed, an opcode put in), so that the reader's answers on what it cannot finish are held too
+
+def _su(t):
+    t = t.encode()
+    return b"\x8c" + bytes([len(t)]) + t
+
+
+def _g(m, n):
+    return b"c" + m.encode() + b"\n" + n.encode() + b"\n"
+
+
+_STATE = (b"\x80\x02" + _g("collections", "OrderedDict") + b")Rq\x00" + _su("w") + _g("torch._utils", "_rebuild_tensor_v2")
+          + b"((" + _su("storage") + _g("torch", "FloatStorage") + _su("0") + _su("cpu") + b"K\x04tQK\x00K\x02K\x02\x86"
+          + b"K\x02K\x01\x86\x89" + _g("collections", "OrderedDict") + b")RtRs.")
+_PICKLES = [
+    _STATE,
+    b"\x80\x02" + _g("os", "system") + _su("id") + b"\x85R.",
+    b"\x80\x04" + _su("os") + b"\x94" + _su("system") + b"\x94h\x00h\x01\x93" + _su("id") + b"\x85R.",
+    b"(S'id'\nios\nsystem\n.",
+    b"\x80\x02(" + _g("subprocess", "Popen") + _su("sh") + b"o.",
+    b"\x80\x02" + _g("argparse", "Namespace") + b")\x81}" + _su("__setstate__") + _g("os", "system") + b"sb" + _su("id") + b"b.",
+    b"\x80\x02" + _g("numpy.core", "_ufunc_reconstruct") + _su("os") + _su("system") + b"\x86R" + _su("id") + b"\x85R.",
+    b"\x80\x02" + _g("somepkg", "factory") + b")RK\x01\x85R.",
+    b"\x80\x02" + _g("builtins", "type") + _su("X") + b")}\x87R.",
+    b"\x80\x02" + _g("somelib.util", "run") + _su("rm -rf /tmp/x") + b"\x85R.",
+    b"\x80\x02" + _g("sklearn.tree._tree", "Tree") + b"K\x04" + _g("numpy", "ndarray") + b"K\x01\x87R.",
+    b"\x80\x02" + _g("pandas.core.indexes.base", "_new_Index") + _g("pandas", "Index") + b"}" + _su("name")
+    + _su("my col") + b"s\x86R.",
+    b"\x80\x02" + _g("sklearn.linear_model._logistic", "LogisticRegression") + b")\x81}" + _su("C") + b"K\x01sb.",
+    b"(dp0\nS'lr'\np1\nF0.1\ns.",
+    b"ccopy_reg\n_reconstructor\np0\n(cargparse\nNamespace\np1\nc__builtin__\nobject\np2\nNtp3\nRp4\n(dp5\nsb.",
+    b"\x80\x02" + _g("torch.storage", "_load_from_bytes") + b"B\x10\x00\x00\x00\x80\x02" + _g("os", "system")[:12] + b".\x85R.",
+]
+
+
+def _wrapper(n, aligned, descr="f8", flags=0):
+    w = (_g("joblib.numpy_pickle", "NumpyArrayWrapper") + b")\x81}(" + _su("shape") + b"K" + bytes([n]) + b"\x85"
+         + _su("dtype") + _g("numpy", "dtype") + _su(descr) + b"\x89\x88\x87R(K\x03" + _su("<")
+         + b"NNNJ\xff\xff\xff\xffJ\xff\xff\xff\xffK" + bytes([flags]) + b"tb")
+    if aligned:
+        w += _su("numpy_array_alignment_bytes") + b"K\x10"
+    return w + b"ub"
+
+
+def _joblib(rnd):
+    n = rnd.randint(0, 6)
+    head = b"\x80\x04}" + _su("a") + _wrapper(n, rnd.random() < 0.7)
+    pad = rnd.randint(1, 16)
+    body = bytes([pad]) + b"\xff" * pad if b"alignment" in head else b""
+    body += bytes(rnd.randrange(256) for _ in range(8 * n)) if rnd.random() < 0.5 else bytes(8 * n)
+    return head + body + b"s."
+
+
+def _zip(entries):
+    import struct
+    import zlib
+    out, cd = b"", b""
+    for name, body in entries:
+        n = name.encode()
+        crc = zlib.crc32(body) & 0xFFFFFFFF
+        cd += (b"PK\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00" + struct.pack("<III", crc, len(body), len(body))
+               + struct.pack("<H", len(n)) + bytes(12) + struct.pack("<I", len(out)) + n)
+        out += (b"PK\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00" + struct.pack("<III", crc, len(body), len(body))
+                + struct.pack("<HH", len(n), 0) + n + body)
+    return out + cd + b"PK\x05\x06" + bytes(4) + struct.pack("<HHII", len(entries), len(entries), len(cd), len(out)) + bytes(2)
+
+
+def _stored(data, gz):
+    import struct
+    import zlib
+    blocks = b"".join(bytes([1 if k + 65535 >= len(data) else 0]) + struct.pack("<HH", len(c), len(c) ^ 0xFFFF) + c
+                      for k in range(0, max(len(data), 1), 65535) for c in [data[k:k + 65535]])
+    if gz:
+        return (b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff" + blocks
+                + struct.pack("<II", zlib.crc32(data) & 0xFFFFFFFF, len(data)))
+    return b"\x78\x01" + blocks + struct.pack(">I", zlib.adler32(data) & 0xFFFFFFFF)
+
+
+def _npy(descr, after):
+    import struct
+    h = "{'descr': %s, 'fortran_order': False, 'shape': (3,), }" % descr
+    h += " " * (63 - (10 + len(h)) % 64) + "\n"
+    return b"\x93NUMPY\x01\x00" + struct.pack("<H", len(h)) + h.encode() + after
+
+
+_MAGIC = b"\x80\x02\x8a\x0a\x6c\xfc\x9c\x46\xf9\x20\x6a\xa8\x50\x19\x2e"
+
+
+def _model(rnd):
+    """A model file: a pickle in one of its containers, and a name."""
+    pkl = rnd.choice(_PICKLES) if rnd.random() < 0.8 else _joblib(rnd)
+    kind = rnd.randrange(8)
+    if kind == 0:
+        return pkl, rnd.choice(["m.pkl", "m.joblib", "m.bin", "m", "data.txt", "m.pt"])
+    if kind == 1:
+        return _zip([("archive/data.pkl", pkl), ("archive/version", b"3\n"), ("archive/data/0", bytes(16))]
+                    + ([("x/data.pkl", rnd.choice(_PICKLES))] if rnd.random() < 0.2 else [])
+                    + ([("archive/extra.exe", b"MZ")] if rnd.random() < 0.2 else [])), rnd.choice(["w.pt", "w.bin", "w"])
+    if kind == 2:
+        return _npy(rnd.choice(["'|O'", "'<f8'", "[('a', '<i4'), ('b', '|O')]", "'<U3'"]), pkl), "a.npy"
+    if kind == 3:
+        return _zip([("w.npy", _npy("'<f8'", bytes(24))), ("o.npy", _npy("'|O'", pkl))]), "x.npz"
+    if kind == 4:
+        return _stored(pkl, rnd.random() < 0.5), rnd.choice(["m.joblib", "m.pkl.gz", "m.gz", "m"])
+    if kind == 5:
+        return _MAGIC + b"\x80\x02M\xe9\x03." + b"\x80\x02}." + pkl + b"\x80\x02]." + bytes(8), "old.pth"
+    if kind == 6:
+        return rnd.choice([b"BZh91AY&SY", b"\xfd7zXZ\x00", b"\x5d\x00\x00\x80", b"\x04\x22\x4d\x18"]) + bytes(20), "m.pkl.xz"
+    ops = b"(.012FIJKLMNPQRSTUVXabcd}eghijl]oopqrst)uGBC" + bytes(range(0x80, 0x99))
+    return b"\x80\x04" + bytes(rnd.choice(ops) for _ in range(rnd.randint(1, 60))) + b".", "soup.pkl"
+
+
+def _mutate(rnd, data):
+    r = rnd.random()
+    if r < 0.6 or not data:
+        return data
+    if r < 0.75:
+        return data[:rnd.randrange(len(data))]
+    if r < 0.9:
+        k = rnd.randrange(len(data))
+        return data[:k] + bytes([rnd.randrange(256)]) + data[k + 1:]
+    k = rnd.randrange(len(data))
+    return data[:k] + bytes([rnd.choice(b"(.0RbcQ\x81\x93\x94h")]) + data[k:]
+
+
+def model_calls(seed=20261020, count=1500):
+    rnd = random.Random(seed)
+    out = []
+    for _ in range(count):
+        data, name = _model(rnd)
+        data = _mutate(rnd, data)
+        out.append(("model_sniff", {"path": name, "windows": False}, text(data[:512])))
+        if rnd.random() < 0.1:
+            out.append(("model_file", {"path": name, "size": 50_000_000, "limit": 16_000_000, "windows": False},
+                        text(data[:8192])))
+        else:
+            out.append(("model_file", {"path": name, "size": len(data), "windows": False}, text(data)))
+    return out
+
+
 def snapshot_sets():
-    return {"binary_bytes": byte_calls, "binary_pth": pth_calls}
+    return {"binary_bytes": byte_calls, "binary_pth": pth_calls, "binary_models": model_calls}
 
 
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
@@ -147,6 +292,16 @@ class BinarySnapshotTests(unittest.TestCase):
             self.assertGreater(rules.count(rule), 90, rule)
         self.assertGreater(sum(1 for a in by[("binary_disguised", None)] if a is not None), 300)
         self.assertGreater(sum(len(a) for a in by[("pyc_issues", None)]), 350)
+
+    def test_model_files(self):
+        got = self.answers("binary_models")
+        files = [a for a in got[1::2] if a is not None]
+        # (with the calls with text a file holds for model_own: SC-PICKLE-GLOBAL, MAJOR)
+        rules = [i[0] for a in files for i in a["issues"] + [c[2] for c in a.get("calls", [])]]
+        self.assertGreater(len(files), 1000)
+        for rule in ("SC-PICKLE-CODE", "SC-PICKLE-GLOBAL", "SC-TRUNCATED"):
+            self.assertGreater(rules.count(rule), 50, rule)
+        self.assertGreater(sum(1 for a in files if not a["issues"]), 200)
 
     def test_pth_files(self):
         got = self.answers("binary_pth")

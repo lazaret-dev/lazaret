@@ -20,7 +20,8 @@ import { Pool, threadsFor, mapTasks } from "./pool.js";
 export function collectProject(root, { deps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
   const col = collectFiles(root, { includeDeps: deps, exclude, maxFileBytes });
   goVendorData(root, col, { exclude, maxFileBytes });         // (F-06: a vendor tree's .go files that are data)
-  if (!col.files.length && !col.manifests.length && !col.configs.length && !col.pth.length && !col.binaryIssues.length) {
+  if (!col.files.length && !col.manifests.length && !col.configs.length && !col.pth.length && !col.binaryIssues.length
+      && !(col.models ?? []).length) {
     throw new ScanTargetError(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL `
       + "sources, package manifests or other files to check");
   }

@@ -8,6 +8,7 @@ import { scanFile, scanConfigFile, treeReader } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 import { taintHelpers } from "./lib/native.js";
+import { modelOwnIssues } from "./lib/collect.js";
 
 /** What scanFile reads of a collected file (`helpers`: projectHelpers' Map). */
 export const scanTask = (f, helpers = null) => {
@@ -55,6 +56,7 @@ export function collectionIssues(col, { extraIssues = [], scanAll = scanEach, ch
   const add = (list) => { for (const i of list) issues.push(i); };   // never push(...big)
   add(extraIssues);
   add(binaryIssues);
+  add(modelOwnIssues(col.models ?? [], files));                     // (FP-MODEL-FILES: a model file's own imports)
   for (const found of scanAll(files, projectHelpers(files))) add(found);
   const read = treeReader(files, configs);                            // what an editor's or agent's settings run
   let depRead = null;                                                 // what a dependency's agent skill runs

@@ -84,11 +84,32 @@ export function readBounded(path, limit) {
   }
 }
 
-/** A regular file met by the walk, as collectEntry reads it (lib/collect.js). */
+/** Read `length` bytes from `offset` of a REGULAR file (fewer at its end), as readBounded reads one. */
+export function readRange(path, offset, length) {
+  const fd = openSync(path, C.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new NotRegularFile(specialKind(st));
+    const out = Buffer.allocUnsafe(length);
+    let total = 0;
+    while (total < length) {
+      const n = readSync(fd, out, total, Math.min(1 << 20, length - total), offset + total);
+      if (n === 0) break;
+      total += n;
+    }
+    return out.subarray(0, total);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** A regular file met by the walk, as collectEntry reads it (lib/collect.js): by its first bytes, or by range (a zip
+ * model file's directory and pickles, FP-MODEL-FILES). */
 function fileEntry(full, rel, name, size, dep) {
   return {
     rel, name, size, dep,
     read: (limit) => readBounded(full, limit),
+    range: (offset, length) => readRange(full, offset, length),
     head: (limit) => {                // no bytes when it can't be read
       try {
         return readBounded(full, limit);
@@ -225,8 +246,8 @@ function treeStats(dirBuf, depth = 1) {
  * Throws ScanTargetError when the root itself cannot be listed.
  */
 export function collectFiles(root, { includeDeps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
-  const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [], tooDeep: [],
-    tooLong: [], maxFileBytes };
+  const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [], models: [],
+    tooDeep: [], tooLong: [], maxFileBytes };
   const rootBuf = Buffer.from(resolve(root));
   for (const step of walkSteps(DISK, rootBuf, { includeDeps, exclude })) {
     if (step.rootError) throw new ScanTargetError(`cannot read directory ${fsNameToString(rootBuf)}: ${strerror(step.rootError)}`);

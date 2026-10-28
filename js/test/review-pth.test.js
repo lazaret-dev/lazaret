@@ -80,12 +80,14 @@ test("site-packages .pth files are checked with --deps", () => {
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test("the size cap applies to .pth files", () => {
+// FP-MODEL-FILES (John's decision of Oct 21): a .pth file past the size cap is read in chunks for the lines site.py
+// runs, each checked at its line: every .pth is checked, whatever its size, and it is not INCOMPLETE.
+test("a .pth file past the size cap is read in chunks", () => {
   const d = tree({ "big.pth": EVIL + "#".repeat(2_000_001) });
   try {
     const r = scan(d, ["--max-source-bytes", "2000000"]);
-    assert.deepEqual(pth(r.issues), []);
-    assert.deepEqual(r.issues.filter((i) => i.rule === "SC-TRUNCATED").map((i) => i.file), ["big.pth"]);
+    assert.deepEqual(pth(r.issues), [["big.pth", 1, "CRITICAL"]]);
+    assert.deepEqual(r.issues.filter((i) => i.rule === "SC-TRUNCATED"), []);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

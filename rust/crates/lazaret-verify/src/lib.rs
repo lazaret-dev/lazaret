@@ -8,8 +8,8 @@
 //! crate and never on the network part (`scripts/check_rust_deps.py` checks both).
 #![forbid(unsafe_code)]
 
-pub use pratique::{asn1, ber, cms, crypto, json, note, pem, revocation, sigstore, sumdb, tlog, trust_root, util,
-                   verify_error, x509};
+pub use pratique::{asn1, ber, cms, crypto, inflate, json, note, pem, revocation, sigstore, sumdb, tlog, trust_root,
+                   util, verify_error, x509};
 
 /// The Go checksum database's answer for one `module@version`, checked as the go command checks it (NET-1): the tree
 /// head's signature by the database's key, the head against one saved from before (if given), and the record's place

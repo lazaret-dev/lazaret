@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.103.0",
+ "rule_set": "2.104.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -949,11 +949,883 @@
   "PACKAGE_CODE_CHARS": {
    "value": 300000000
   },
+  "PICKLE_CODE_ATTRS": {
+   "set": [
+    "__base__",
+    "__bases__",
+    "__builtin__",
+    "__builtins__",
+    "__call__",
+    "__class__",
+    "__closure__",
+    "__code__",
+    "__delattr__",
+    "__dict__",
+    "__func__",
+    "__get__",
+    "__getattr__",
+    "__getattribute__",
+    "__globals__",
+    "__import__",
+    "__init__",
+    "__loader__",
+    "__mro__",
+    "__new__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__self__",
+    "__setattr__",
+    "__spec__",
+    "__subclasses__",
+    "__wrapped__",
+    "builtins",
+    "check_output",
+    "ctypes",
+    "eval",
+    "exec",
+    "execfile",
+    "getoutput",
+    "importlib",
+    "marshal",
+    "nt",
+    "os",
+    "pickle",
+    "popen",
+    "posix",
+    "pty",
+    "runpy",
+    "shutil",
+    "socket",
+    "subprocess",
+    "sys",
+    "system",
+    "webbrowser"
+   ]
+  },
+  "PICKLE_CODE_GLOBALS": {
+   "set": [
+    "_io.FileIO",
+    "_io.open",
+    "_io.open_code",
+    "_operator.attrgetter",
+    "_operator.call",
+    "_operator.methodcaller",
+    "builtins.__build_class__",
+    "builtins.__import__",
+    "builtins.apply",
+    "builtins.breakpoint",
+    "builtins.compile",
+    "builtins.delattr",
+    "builtins.eval",
+    "builtins.exec",
+    "builtins.execfile",
+    "builtins.exit",
+    "builtins.file",
+    "builtins.filter",
+    "builtins.getattr",
+    "builtins.globals",
+    "builtins.help",
+    "builtins.input",
+    "builtins.iter",
+    "builtins.locals",
+    "builtins.map",
+    "builtins.max",
+    "builtins.min",
+    "builtins.next",
+    "builtins.open",
+    "builtins.quit",
+    "builtins.reload",
+    "builtins.setattr",
+    "builtins.sorted",
+    "builtins.vars",
+    "codecs.open",
+    "codecs.register",
+    "copyreg.add_extension",
+    "copyreg.pickle",
+    "copyreg.remove_extension",
+    "functools.reduce",
+    "io.FileIO",
+    "io.open",
+    "io.open_code",
+    "joblib.dump",
+    "joblib.load",
+    "joblib.numpy_pickle.dump",
+    "joblib.numpy_pickle.load",
+    "logging.FileHandler",
+    "numpy.fromfile",
+    "numpy.lib.npyio.load",
+    "numpy.load",
+    "numpy.loads",
+    "numpy.save",
+    "numpy.savetxt",
+    "operator.attrgetter",
+    "operator.call",
+    "operator.methodcaller",
+    "pandas.read_pickle",
+    "torch.jit.load",
+    "torch.load",
+    "torch.serialization._legacy_load",
+    "torch.serialization._load",
+    "torch.serialization.load",
+    "types.CodeType",
+    "types.FunctionType",
+    "types.LambdaType",
+    "types.MethodType",
+    "types.ModuleType",
+    "types.new_class",
+    "uuid._get_command_stdout",
+    "weakref.finalize"
+   ]
+  },
+  "PICKLE_CODE_MODULES": {
+   "set": [
+    "_ctypes",
+    "_pickle",
+    "_posixsubprocess",
+    "_signal",
+    "_socket",
+    "_thread",
+    "aiohttp",
+    "asyncio",
+    "atexit",
+    "bdb",
+    "cProfile",
+    "cffi",
+    "cloudpickle",
+    "code",
+    "codeop",
+    "commands",
+    "compileall",
+    "concurrent",
+    "ctypes",
+    "dbm",
+    "dill",
+    "distutils",
+    "docker",
+    "doctest",
+    "ensurepip",
+    "fabric",
+    "fileinput",
+    "ftplib",
+    "git",
+    "glob",
+    "http.client",
+    "http.cookiejar",
+    "http.server",
+    "httpx",
+    "hydra",
+    "idlelib",
+    "imaplib",
+    "imp",
+    "importlib",
+    "invoke",
+    "itertools",
+    "jsonpickle",
+    "logging.config",
+    "logging.handlers",
+    "marshal",
+    "multiprocessing",
+    "nntplib",
+    "nt",
+    "ntpath",
+    "numpy.distutils",
+    "numpy.f2py",
+    "numpy.testing",
+    "os",
+    "pandas.io.pickle",
+    "paramiko",
+    "pdb",
+    "pexpect",
+    "pickle",
+    "pip",
+    "pipes",
+    "pkgutil",
+    "platform",
+    "plumbum",
+    "popen2",
+    "poplib",
+    "posix",
+    "posixpath",
+    "profile",
+    "pty",
+    "py_compile",
+    "pydoc",
+    "requests",
+    "resource",
+    "ruamel",
+    "runpy",
+    "sched",
+    "select",
+    "selectors",
+    "setuptools",
+    "sh",
+    "shelve",
+    "shutil",
+    "signal",
+    "site",
+    "smtplib",
+    "socket",
+    "socketserver",
+    "sqlite3",
+    "ssl",
+    "subprocess",
+    "sys",
+    "telnetlib",
+    "tempfile",
+    "threading",
+    "timeit",
+    "torch._dynamo",
+    "torch._inductor",
+    "torch.distributed",
+    "torch.hub",
+    "torch.jit.unsupported_tensor_ops",
+    "torch.package",
+    "torch.utils.collect_env",
+    "torch.utils.cpp_extension",
+    "torch.utils.data.datapipes.utils.decoder",
+    "trace",
+    "transformers.dynamic_module_utils",
+    "unittest.mock",
+    "urllib.request",
+    "urllib2",
+    "urllib3",
+    "venv",
+    "webbrowser",
+    "xmlrpc",
+    "yaml",
+    "zipimport"
+   ]
+  },
+  "PICKLE_DATA_GLOBALS": {
+   "set": [
+    "http.HTTPMethod",
+    "http.HTTPStatus",
+    "nt.stat_result",
+    "nt.terminal_size",
+    "nt.times_result",
+    "os.stat_result",
+    "os.statvfs_result",
+    "os.terminal_size",
+    "os.times_result",
+    "platform.uname_result",
+    "posix.stat_result",
+    "posix.statvfs_result",
+    "posix.terminal_size",
+    "posix.times_result",
+    "resource.struct_rusage",
+    "signal.Handlers",
+    "signal.Sigmasks",
+    "signal.Signals",
+    "socket.AddressFamily",
+    "socket.AddressInfo",
+    "socket.MsgFlag",
+    "socket.SocketKind",
+    "ssl.AlertDescription",
+    "ssl.Options",
+    "ssl.Purpose",
+    "ssl.SSLErrorNumber",
+    "ssl.TLSVersion",
+    "ssl.VerifyFlags",
+    "ssl.VerifyMode",
+    "ssl._ASN1Object",
+    "subprocess.CalledProcessError",
+    "subprocess.CompletedProcess",
+    "subprocess.SubprocessError",
+    "subprocess.TimeoutExpired",
+    "time.struct_time"
+   ]
+  },
+  "PICKLE_EXTS": {
+   "set": [
+    ".joblib",
+    ".pck",
+    ".pcl",
+    ".pickle",
+    ".pkl"
+   ]
+  },
+  "PICKLE_MAX_DIRECTORY": {
+   "value": 16000000
+  },
+  "PICKLE_MAX_ENTRIES": {
+   "value": 100000
+  },
+  "PICKLE_MAX_FINDINGS": {
+   "value": 20
+  },
+  "PICKLE_MAX_INFLATED": {
+   "value": 64000000
+  },
+  "PICKLE_MAX_PICKLES": {
+   "value": 64
+  },
+  "PICKLE_MAX_READS": {
+   "value": 8
+  },
+  "PICKLE_MODULE_ALIASES": {
+   "map": {
+    "BaseHTTPServer": {
+     "value": "http.server"
+    },
+    "CGIHTTPServer": {
+     "value": "http.server"
+    },
+    "ConfigParser": {
+     "value": "configparser"
+    },
+    "Cookie": {
+     "value": "http.cookies"
+    },
+    "DocXMLRPCServer": {
+     "value": "xmlrpc.server"
+    },
+    "HTMLParser": {
+     "value": "html.parser"
+    },
+    "Queue": {
+     "value": "queue"
+    },
+    "SimpleHTTPServer": {
+     "value": "http.server"
+    },
+    "SimpleXMLRPCServer": {
+     "value": "xmlrpc.server"
+    },
+    "SocketServer": {
+     "value": "socketserver"
+    },
+    "StringIO": {
+     "value": "io"
+    },
+    "Tkinter": {
+     "value": "tkinter"
+    },
+    "UserDict": {
+     "value": "collections"
+    },
+    "UserList": {
+     "value": "collections"
+    },
+    "UserString": {
+     "value": "collections"
+    },
+    "__builtin__": {
+     "value": "builtins"
+    },
+    "_abcoll": {
+     "value": "collections.abc"
+    },
+    "_elementtree": {
+     "value": "xml.etree.ElementTree"
+    },
+    "_winreg": {
+     "value": "winreg"
+    },
+    "anydbm": {
+     "value": "dbm"
+    },
+    "cPickle": {
+     "value": "pickle"
+    },
+    "cStringIO": {
+     "value": "io"
+    },
+    "commands": {
+     "value": "subprocess"
+    },
+    "cookielib": {
+     "value": "http.cookiejar"
+    },
+    "copy_reg": {
+     "value": "copyreg"
+    },
+    "dbhash": {
+     "value": "dbm.bsd"
+    },
+    "dumbdbm": {
+     "value": "dbm.dumb"
+    },
+    "dummy_thread": {
+     "value": "_dummy_thread"
+    },
+    "exceptions": {
+     "value": "builtins"
+    },
+    "gdbm": {
+     "value": "dbm.gnu"
+    },
+    "htmlentitydefs": {
+     "value": "html.entities"
+    },
+    "httplib": {
+     "value": "http.client"
+    },
+    "markupbase": {
+     "value": "_markupbase"
+    },
+    "repr": {
+     "value": "reprlib"
+    },
+    "robotparser": {
+     "value": "urllib.robotparser"
+    },
+    "test.test_support": {
+     "value": "test.support"
+    },
+    "thread": {
+     "value": "_thread"
+    },
+    "torch.tensor": {
+     "value": "torch._tensor"
+    },
+    "urllib2": {
+     "value": "urllib.request"
+    },
+    "urlparse": {
+     "value": "urllib.parse"
+    },
+    "whichdb": {
+     "value": "dbm"
+    },
+    "xmlrpclib": {
+     "value": "xmlrpc.client"
+    }
+   }
+  },
+  "PICKLE_NAME_ALIASES": {
+   "map": {
+    "UserDict.IterableUserDict": {
+     "value": "collections.UserDict"
+    },
+    "__builtin__.basestring": {
+     "value": "builtins.str"
+    },
+    "__builtin__.intern": {
+     "value": "sys.intern"
+    },
+    "__builtin__.long": {
+     "value": "builtins.int"
+    },
+    "__builtin__.raw_input": {
+     "value": "builtins.input"
+    },
+    "__builtin__.reduce": {
+     "value": "functools.reduce"
+    },
+    "__builtin__.unichr": {
+     "value": "builtins.chr"
+    },
+    "__builtin__.unicode": {
+     "value": "builtins.str"
+    },
+    "__builtin__.xrange": {
+     "value": "builtins.range"
+    },
+    "_socket.fromfd": {
+     "value": "socket.fromfd"
+    },
+    "itertools.ifilter": {
+     "value": "builtins.filter"
+    },
+    "itertools.imap": {
+     "value": "builtins.map"
+    },
+    "itertools.izip": {
+     "value": "builtins.zip"
+    },
+    "multiprocessing.forking.Popen": {
+     "value": "multiprocessing.popen_fork.Popen"
+    },
+    "multiprocessing.process.Process": {
+     "value": "multiprocessing.context.Process"
+    },
+    "urllib.quote": {
+     "value": "urllib.parse.quote"
+    },
+    "urllib.unquote": {
+     "value": "urllib.parse.unquote"
+    },
+    "urllib.urlcleanup": {
+     "value": "urllib.request.urlcleanup"
+    },
+    "urllib.urlencode": {
+     "value": "urllib.parse.urlencode"
+    },
+    "urllib.urlopen": {
+     "value": "urllib.request.urlopen"
+    },
+    "urllib.urlretrieve": {
+     "value": "urllib.request.urlretrieve"
+    }
+   }
+  },
+  "PICKLE_SAFE_GLOBALS": {
+   "set": [
+    "_codecs.encode",
+    "_operator.getitem",
+    "argparse.Namespace",
+    "array._array_reconstructor",
+    "array.array",
+    "builtins.Ellipsis",
+    "builtins.NotImplemented",
+    "builtins.bool",
+    "builtins.bytearray",
+    "builtins.bytes",
+    "builtins.chr",
+    "builtins.complex",
+    "builtins.dict",
+    "builtins.float",
+    "builtins.frozenset",
+    "builtins.int",
+    "builtins.list",
+    "builtins.object",
+    "builtins.range",
+    "builtins.set",
+    "builtins.slice",
+    "builtins.str",
+    "builtins.tuple",
+    "builtins.type",
+    "codecs.encode",
+    "collections.ChainMap",
+    "collections.Counter",
+    "collections.OrderedDict",
+    "collections.UserDict",
+    "collections.UserList",
+    "collections.UserString",
+    "collections.defaultdict",
+    "collections.deque",
+    "copyreg.__newobj__",
+    "copyreg.__newobj_ex__",
+    "copyreg._reconstructor",
+    "datetime.date",
+    "datetime.datetime",
+    "datetime.time",
+    "datetime.timedelta",
+    "datetime.timezone",
+    "dateutil.tz.tz.tzfile",
+    "dateutil.tz.tz.tzlocal",
+    "dateutil.tz.tz.tzoffset",
+    "dateutil.tz.tz.tzrange",
+    "dateutil.tz.tz.tzstr",
+    "dateutil.tz.tz.tzutc",
+    "dateutil.tz.win.tzwin",
+    "dateutil.tz.win.tzwinlocal",
+    "decimal.Decimal",
+    "fractions.Fraction",
+    "functools.partial",
+    "joblib.numpy_pickle.NumpyArrayWrapper",
+    "joblib.numpy_pickle_compat.NDArrayWrapper",
+    "joblib.numpy_pickle_compat.ZNDArrayWrapper",
+    "logging.getLogger",
+    "numpy._core._DType_reconstruct",
+    "numpy._core._internal._reconstruct",
+    "numpy._core._ufunc_reconstruct",
+    "numpy._core.multiarray._reconstruct",
+    "numpy._core.multiarray.scalar",
+    "numpy._core.numeric._frombuffer",
+    "numpy.core._DType_reconstruct",
+    "numpy.core._internal._reconstruct",
+    "numpy.core._ufunc_reconstruct",
+    "numpy.core.multiarray._reconstruct",
+    "numpy.core.multiarray.scalar",
+    "numpy.core.numeric._frombuffer",
+    "numpy.dtype",
+    "numpy.ma.core.MaskedArray",
+    "numpy.ma.core._mareconstruct",
+    "numpy.ndarray",
+    "numpy.random._pickle.__bit_generator_ctor",
+    "numpy.random._pickle.__generator_ctor",
+    "numpy.random._pickle.__randomstate_ctor",
+    "numpy.random.bit_generator.__pyx_unpickle_SeedSequence",
+    "operator.getitem",
+    "pandas.core.arrays.arrow.extension_types.ArrowIntervalType.__arrow_ext_deserialize__",
+    "pandas.core.arrays.arrow.extension_types.ArrowPeriodType.__arrow_ext_deserialize__",
+    "pathlib.Path",
+    "pathlib.PosixPath",
+    "pathlib.PurePath",
+    "pathlib.PurePosixPath",
+    "pathlib.PureWindowsPath",
+    "pathlib.WindowsPath",
+    "pathlib._local.Path",
+    "pathlib._local.PosixPath",
+    "pathlib._local.PurePath",
+    "pathlib._local.PurePosixPath",
+    "pathlib._local.PureWindowsPath",
+    "pathlib._local.WindowsPath",
+    "pyarrow.lib.DictionaryScalar._reconstruct",
+    "pyarrow.lib.KeyValueMetadata",
+    "pyarrow.lib._reconstruct_record_batch",
+    "pyarrow.lib._reconstruct_table",
+    "pyarrow.lib._restore_array",
+    "pyarrow.lib.binary",
+    "pyarrow.lib.bool8",
+    "pyarrow.lib.chunked_array",
+    "pyarrow.lib.decimal128",
+    "pyarrow.lib.decimal256",
+    "pyarrow.lib.decimal32",
+    "pyarrow.lib.decimal64",
+    "pyarrow.lib.dictionary",
+    "pyarrow.lib.field",
+    "pyarrow.lib.fixed_shape_tensor",
+    "pyarrow.lib.json_",
+    "pyarrow.lib.large_list",
+    "pyarrow.lib.large_list_view",
+    "pyarrow.lib.list_",
+    "pyarrow.lib.list_view",
+    "pyarrow.lib.map_",
+    "pyarrow.lib.opaque",
+    "pyarrow.lib.py_buffer",
+    "pyarrow.lib.run_end_encoded",
+    "pyarrow.lib.scalar",
+    "pyarrow.lib.schema",
+    "pyarrow.lib.struct",
+    "pyarrow.lib.timestamp",
+    "pyarrow.lib.type_for_alias",
+    "pyarrow.lib.union",
+    "pyarrow.lib.uuid",
+    "pytz.FixedOffset",
+    "pytz._UTC",
+    "pytz._p",
+    "re._compile",
+    "sklearn.externals.joblib.numpy_pickle.NumpyArrayWrapper",
+    "torch.BFloat16Storage",
+    "torch.BFloat16Tensor",
+    "torch.BoolStorage",
+    "torch.BoolTensor",
+    "torch.ByteStorage",
+    "torch.ByteTensor",
+    "torch.CharStorage",
+    "torch.CharTensor",
+    "torch.ComplexDoubleStorage",
+    "torch.ComplexFloatStorage",
+    "torch.DoubleStorage",
+    "torch.DoubleTensor",
+    "torch.FloatStorage",
+    "torch.FloatTensor",
+    "torch.HalfStorage",
+    "torch.HalfTensor",
+    "torch.IntStorage",
+    "torch.IntTensor",
+    "torch.LongStorage",
+    "torch.LongTensor",
+    "torch.QInt32Storage",
+    "torch.QInt8Storage",
+    "torch.QUInt2x4Storage",
+    "torch.QUInt4x2Storage",
+    "torch.QUInt8Storage",
+    "torch.ShortStorage",
+    "torch.ShortTensor",
+    "torch.Size",
+    "torch.Tensor",
+    "torch.TypedStorage",
+    "torch.UntypedStorage",
+    "torch._mkldnn",
+    "torch._tensor._rebuild_from_type",
+    "torch._tensor._rebuild_from_type_v2",
+    "torch._utils._rebuild_device_tensor_from_cpu_tensor",
+    "torch._utils._rebuild_device_tensor_from_numpy",
+    "torch._utils._rebuild_meta_tensor_no_storage",
+    "torch._utils._rebuild_nested_tensor",
+    "torch._utils._rebuild_parameter",
+    "torch._utils._rebuild_parameter_with_state",
+    "torch._utils._rebuild_qtensor",
+    "torch._utils._rebuild_sparse_tensor",
+    "torch._utils._rebuild_tensor",
+    "torch._utils._rebuild_tensor_v2",
+    "torch._utils._rebuild_tensor_v3",
+    "torch._utils._rebuild_wrapper_subclass",
+    "torch.bfloat16",
+    "torch.bits16",
+    "torch.bits1x8",
+    "torch.bits2x4",
+    "torch.bits4x2",
+    "torch.bits8",
+    "torch.bool",
+    "torch.cdouble",
+    "torch.cfloat",
+    "torch.chalf",
+    "torch.channels_last",
+    "torch.channels_last_3d",
+    "torch.complex128",
+    "torch.complex32",
+    "torch.complex64",
+    "torch.contiguous_format",
+    "torch.cuda.BFloat16Storage",
+    "torch.cuda.BFloat16Tensor",
+    "torch.cuda.BoolStorage",
+    "torch.cuda.BoolTensor",
+    "torch.cuda.ByteStorage",
+    "torch.cuda.ByteTensor",
+    "torch.cuda.CharStorage",
+    "torch.cuda.CharTensor",
+    "torch.cuda.ComplexDoubleStorage",
+    "torch.cuda.ComplexFloatStorage",
+    "torch.cuda.DoubleStorage",
+    "torch.cuda.DoubleTensor",
+    "torch.cuda.FloatStorage",
+    "torch.cuda.FloatTensor",
+    "torch.cuda.HalfStorage",
+    "torch.cuda.HalfTensor",
+    "torch.cuda.IntStorage",
+    "torch.cuda.IntTensor",
+    "torch.cuda.LongStorage",
+    "torch.cuda.LongTensor",
+    "torch.cuda.QInt32Storage",
+    "torch.cuda.QInt8Storage",
+    "torch.cuda.QUInt2x4Storage",
+    "torch.cuda.QUInt4x2Storage",
+    "torch.cuda.QUInt8Storage",
+    "torch.cuda.ShortStorage",
+    "torch.cuda.ShortTensor",
+    "torch.cuda.UntypedStorage",
+    "torch.device",
+    "torch.double",
+    "torch.float",
+    "torch.float16",
+    "torch.float32",
+    "torch.float4_e2m1fn_x2",
+    "torch.float64",
+    "torch.float8_e4m3fn",
+    "torch.float8_e4m3fnuz",
+    "torch.float8_e5m2",
+    "torch.float8_e5m2fnuz",
+    "torch.float8_e8m0fnu",
+    "torch.half",
+    "torch.int",
+    "torch.int1",
+    "torch.int16",
+    "torch.int2",
+    "torch.int3",
+    "torch.int32",
+    "torch.int4",
+    "torch.int5",
+    "torch.int6",
+    "torch.int64",
+    "torch.int7",
+    "torch.int8",
+    "torch.jagged",
+    "torch.jit._pickle.build_boollist",
+    "torch.jit._pickle.build_doublelist",
+    "torch.jit._pickle.build_intlist",
+    "torch.jit._pickle.build_tensor_from_id",
+    "torch.jit._pickle.build_tensorlist",
+    "torch.jit._pickle.restore_type_tag",
+    "torch.long",
+    "torch.nn.parameter.Buffer",
+    "torch.nn.parameter.Parameter",
+    "torch.per_channel_affine",
+    "torch.per_channel_affine_float_qparams",
+    "torch.per_channel_symmetric",
+    "torch.per_tensor_affine",
+    "torch.per_tensor_symmetric",
+    "torch.preserve_format",
+    "torch.qint32",
+    "torch.qint8",
+    "torch.quint2x4",
+    "torch.quint4x2",
+    "torch.quint8",
+    "torch.serialization._get_layout",
+    "torch.short",
+    "torch.sparse_bsc",
+    "torch.sparse_bsr",
+    "torch.sparse_coo",
+    "torch.sparse_csc",
+    "torch.sparse_csr",
+    "torch.storage.TypedStorage",
+    "torch.storage.UntypedStorage",
+    "torch.storage._load_from_bytes",
+    "torch.strided",
+    "torch.uint1",
+    "torch.uint16",
+    "torch.uint2",
+    "torch.uint3",
+    "torch.uint32",
+    "torch.uint4",
+    "torch.uint5",
+    "torch.uint6",
+    "torch.uint64",
+    "torch.uint7",
+    "torch.uint8",
+    "types.SimpleNamespace",
+    "uuid.SafeUUID",
+    "uuid.UUID",
+    "zoneinfo.ZoneInfo",
+    "zoneinfo.ZoneInfo._unpickle"
+   ]
+  },
+  "PICKLE_SAFE_PREFIXES": {
+   "list": [
+    {
+     "value": "__torch__."
+    }
+   ]
+  },
+  "PICKLE_STORAGE_SIZES": {
+   "map": {
+    "BFloat16Storage": {
+     "value": 2
+    },
+    "BoolStorage": {
+     "value": 1
+    },
+    "ByteStorage": {
+     "value": 1
+    },
+    "CharStorage": {
+     "value": 1
+    },
+    "ComplexDoubleStorage": {
+     "value": 16
+    },
+    "ComplexFloatStorage": {
+     "value": 8
+    },
+    "DoubleStorage": {
+     "value": 8
+    },
+    "FloatStorage": {
+     "value": 4
+    },
+    "HalfStorage": {
+     "value": 2
+    },
+    "IntStorage": {
+     "value": 4
+    },
+    "LongStorage": {
+     "value": 8
+    },
+    "QInt32Storage": {
+     "value": 4
+    },
+    "QInt8Storage": {
+     "value": 1
+    },
+    "QUInt2x4Storage": {
+     "value": 1
+    },
+    "QUInt4x2Storage": {
+     "value": 1
+    },
+    "QUInt8Storage": {
+     "value": 1
+    },
+    "ShortStorage": {
+     "value": 2
+    }
+   }
+  },
   "PREVIEW_MAX": {
    "value": 60
   },
   "PTH_EXT": {
    "value": ".pth"
+  },
+  "PTH_MAX_KEPT": {
+   "value": 16000000
+  },
+  "PTH_MAX_LINE": {
+   "value": 1000000
   },
   "PYCACHE_DIR": {
    "value": "__pycache__"
@@ -15001,6 +15873,90 @@
   },
   "_PE_DESC": {
    "value": "Windows PE executable/DLL"
+  },
+  "_PICKLE_CODE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not load the file. Ship weights in a format that holds only data (safetensors), or load with torch.load(weights_only=True), and find out why this file runs code."
+    },
+    "id": {
+     "value": "SC-PICKLE-CODE"
+    },
+    "msg": {
+     "value": "Loading this model file runs code: {detail}."
+    },
+    "name": {
+     "value": "Model file runs code when loaded"
+    },
+    "ref": {
+     "value": "CWE-502 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Loading a model file unpickles it (torch.load without weights_only=True, a Lightning checkpoint, joblib.load, pickle.load, numpy.load with allow_pickle=True), and a pickle runs whatever its globals name and its REDUCE, BUILD, NEWOBJ, INST and OBJ opcodes call. This one imports or calls code that runs commands, evaluates or compiles code, imports modules, reaches files, sockets or the interpreter, or loads another pickle; or it puts a callable where the unpickler calls it (an object's __setstate__, a class's special method)."
+    }
+   }
+  },
+  "_PICKLE_GLOBAL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Find out what the call does before loading the file; prefer a format that holds only data (safetensors), or torch.load(weights_only=True)."
+    },
+    "id": {
+     "value": "SC-PICKLE-GLOBAL"
+    },
+    "msg": {
+     "value": "Loading this model file calls code outside its format: {detail}."
+    },
+    "name": {
+     "value": "Model file calls code outside its format"
+    },
+    "ref": {
+     "value": "CWE-502 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Loading a model file unpickles it (torch.load without weights_only=True, a Lightning checkpoint, joblib.load, pickle.load, numpy.load with allow_pickle=True), and a pickle runs whatever its globals name and its REDUCE, BUILD, NEWOBJ, INST and OBJ opcodes call. A tensor checkpoint is rebuilt from PyTorch's own functions and plain data, and pickled objects are remade by their classes; this file calls an installed function with text it is told to use (a command, code, a path, a URL, a module path, bytes), or calls an object the file builds as it loads: what that does depends on the code it reaches."
+    }
+   }
+  },
+  "_PICKLE_OWN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Nothing to do unless the module does more than define its classes when it is imported; a format that holds only data (safetensors) imports nothing."
+    },
+    "id": {
+     "value": "SC-PICKLE-GLOBAL"
+    },
+    "msg": {
+     "value": "Loading this model file imports this package's own module: {detail}."
+    },
+    "name": {
+     "value": "Model file imports this package's own module"
+    },
+    "ref": {
+     "value": "CWE-502 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Loading a model file unpickles it (torch.load without weights_only=True, a Lightning checkpoint, joblib.load, pickle.load, numpy.load with allow_pickle=True), and unpickling imports the module each global names. This file names a module of the package itself (torch.save(model) of the package's own class does): that module's code runs when the file is loaded, and it is the package's code the scan reads, so this is listed and sets no verdict. A call of such a function with text it is told to use is SC-PICKLE-GLOBAL, MAJOR, as another function's is: the text decides what the code does."
+    }
+   }
   },
   "_PIPE_SCAN_RE": {
    "flags": "",

@@ -351,7 +351,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.103.0"
+ENGINE_VERSION = "2.104.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1661,6 +1661,204 @@ def _folder_link(base, entry):
     return None, None
 
 
+#: FP-MODEL-FILES: what one read of an oversized zip model member keeps for the engine (_ZipModelKeep): its first
+#: bytes; each entry whose name ends in "pkl" (its local header and data, up to _MODEL_KEEP bytes in all) or ".npy" (its
+#: header and data when no larger than _MODEL_NPY_WHOLE, else its first _MODEL_NPY_KEEP bytes: what the engine reads of
+#: an .npy that is not an object array); every other entry's local header (up to _MODEL_HEADERS bytes); and its last
+#: bytes, its end records and a central directory up to the engine's PICKLE_MAX_DIRECTORY (16,000,000 bytes).
+_MODEL_HEAD = 1 << 16
+_MODEL_TAIL = 16_000_000 + 65_557 + 76
+_MODEL_KEEP = 64_000_000
+_MODEL_NPY_KEEP = 1 << 17
+_MODEL_NPY_WHOLE = 4 << 20
+#: ... and the local headers of the other members, at most this many bytes of them
+_MODEL_HEADERS = 16_000_000
+
+
+class _ZipModelKeep:
+    """FP-MODEL-FILES: one forward read of an oversized member whose first bytes are a zip model file's (a checkpoint,
+    an .npz, in a wheel, an sdist, an npm tarball or a folder), keeping the pieces of it the engine reads by range
+    (model_file's `pieces`): its end records and central directory among its last bytes, its pickle and .npy members
+    by their local headers, followed from its first. A member of a tar or zip archive is a stream read once, so the
+    engine reads these pieces as its last read: what it needs that this did not keep (a directory that names other
+    bytes, local headers it could not follow) is SC-TRUNCATED, never quiet. Bounded: what it keeps is at most
+    _MODEL_HEAD + _MODEL_KEEP + the .npy prefixes + _MODEL_HEADERS + _MODEL_TAIL bytes."""
+
+    def __init__(self):
+        self.size = 0
+        self.head = bytearray()
+        self.tail, self.tail_len = [], 0
+        self.kept, self.kept_len = [], 0
+        self.headers_len = 0
+        self.walking = True             # following the local headers (stopped at the first that is not one)
+        self.hdr_at, self.hdr, self.need = 0, bytearray(), 30
+        self.keep, self.skip, self.piece = 0, 0, None
+
+    def feed(self, chunk):
+        n = len(chunk)
+        if len(self.head) < _MODEL_HEAD:
+            self.head += chunk[:_MODEL_HEAD - len(self.head)]
+        self.tail.append(bytes(chunk))
+        self.tail_len += n
+        drop = 0
+        while drop < len(self.tail) and self.tail_len - len(self.tail[drop]) >= _MODEL_TAIL:
+            self.tail_len -= len(self.tail[drop])
+            drop += 1
+        if drop:
+            del self.tail[:drop]
+        i = 0
+        while self.walking and i < n:
+            if self.keep:
+                take = chunk[i:i + self.keep]
+                self.piece += take
+                self.keep -= len(take)
+                self.kept_len += len(take)
+                i += len(take)
+            elif self.skip:
+                take = min(self.skip, n - i)
+                self.skip -= take
+                i += take
+            else:
+                if not self.hdr:
+                    self.hdr_at = self.size + i
+                take = chunk[i:i + self.need - len(self.hdr)]
+                self.hdr += take
+                i += len(take)
+                if len(self.hdr) == self.need:
+                    self._header()
+        self.size += n
+
+    def _header(self):
+        h = self.hdr
+        if h[:4] != b"PK\x03\x04":
+            self.walking = False
+            return
+        flags, _method, csize, size, nlen, xlen = struct.unpack_from("<6xHH8xLLHH", h)
+        if self.need == 30 and nlen + xlen:
+            self.need = 30 + nlen + xlen      # (its name and extra field next)
+            return
+        if csize == 0xFFFFFFFF or size == 0xFFFFFFFF:
+            # zip64: the local extra field holds the sizes that did not fit, the size first
+            sizes = [v for tp, data in _zip_extra_fields(bytes(h[30 + nlen:])) if tp == 1
+                     for v in struct.unpack_from(f"<{len(data) // 8}Q", data)][:2]
+            if size == 0xFFFFFFFF:
+                size = sizes.pop(0) if sizes else None
+            if csize == 0xFFFFFFFF:
+                csize = sizes.pop(0) if sizes else None
+            if csize is None or size is None:
+                self.walking = False
+                return
+        if flags & 8:
+            self.walking = False              # (its sizes follow its data: the walk cannot pass it)
+            return
+        low = bytes(h[30:30 + nlen]).lower()
+        want = 0
+        if low.endswith(b"pkl"):
+            want = csize if self.kept_len + len(h) + csize <= _MODEL_KEEP else 0
+        elif low.endswith(b".npy"):
+            whole = csize <= _MODEL_NPY_WHOLE and self.kept_len + len(h) + csize <= _MODEL_KEEP
+            want = csize if whole else min(csize, _MODEL_NPY_KEEP)
+        if want:
+            self.piece = bytearray(h)
+            self.kept.append((self.hdr_at, self.piece))
+            self.kept_len += len(h)
+        elif self.headers_len + len(h) <= _MODEL_HEADERS:
+            # (every member's local header: the engine holds each to its directory entry, and walks them as a
+            # streaming unpacker does: the external review's H2, FP-NESTED-ARCHIVE's review of Oct 21)
+            self.kept.append((self.hdr_at, bytes(h)))
+            self.headers_len += len(h)
+        self.keep, self.skip = want, csize - want
+        self.hdr, self.need = bytearray(), 30
+
+    def pieces(self):
+        """(the member's size, [(offset, bytes)]) for model_file: of its last bytes, those the engine reads (its last
+        65,557, where it looks for the end record, and the central directory that record names), all of them when
+        the record cannot be read here."""
+        tail = b"".join(self.tail)
+        start = self.size - len(tail)
+        cut = _zip_tail_start(tail, start)
+        return self.size, ([(0, bytes(self.head))] + [(off, bytes(b)) for off, b in self.kept]
+                           + [(start + cut, tail[cut:])])
+
+
+def _zip_tail_start(tail, start):
+    """Where in `tail` (a zip's last bytes, from byte `start` of it) the bytes the engine reads of them begin: the end
+    record's window (the last 65,557 bytes) and the central directory the record (or its zip64 record) names, a KiB
+    before it; 0 when that cannot be told."""
+    pos = tail.rfind(b"PK\x05\x06", max(0, len(tail) - 65_557), max(0, len(tail) - 18))
+    if pos < 0:
+        return 0
+    cd_size = struct.unpack_from("<L", tail, pos + 12)[0]
+    end = pos
+    if cd_size == 0xFFFFFFFF or struct.unpack_from("<L", tail, pos + 16)[0] == 0xFFFFFFFF \
+            or struct.unpack_from("<H", tail, pos + 10)[0] == 0xFFFF:
+        loc = pos - 20
+        if loc < 0 or tail[loc:loc + 4] != b"PK\x06\x07":
+            return 0
+        z = struct.unpack_from("<Q", tail, loc + 8)[0] - start
+        if not 0 <= z <= len(tail) - 56 or tail[z:z + 4] != b"PK\x06\x06":
+            return 0
+        cd_size, end = struct.unpack_from("<Q", tail, z + 40)[0], z
+    return max(0, min(len(tail) - 65_557, end - cd_size - 1024))
+
+
+def _oversized_member(rel, first, more):
+    """FP-MODEL-FILES: an oversized member (`first`: its first MAX_MEMBER + 1 bytes; `more(n)`: the next bytes, b"" at
+    its end) read on, once, as its stream passes, when its first bytes are a zip model file's (a checkpoint, an
+    .npz: the pieces _ZipModelKeep keeps) or it is a .pth file (the lines site.py runs, read in chunks: the engine's
+    pth_stream, John's decision of Oct 21) -> (pieces or None, {"lines", "cuts"} or None); (None, None) when it is
+    neither, and nothing more is read."""
+    keep = _ZipModelKeep() if first[:4] == b"PK\x03\x04" and lazaret.model_sniff(rel, first[:512]) else None
+    pth = os.path.splitext(posixpath.basename(rel))[1].lower() == ".pth"
+    if keep is None and not pth:
+        return None, None
+    state, lines, cuts = None, [], []
+
+    def feed(chunk):
+        nonlocal state
+        if keep is not None:
+            keep.feed(chunk)
+        if pth:
+            for k in range(0, len(chunk), lazaret.PTH_CHUNK):
+                got = lazaret.pth_stream(state, chunk[k:k + lazaret.PTH_CHUNK], False)
+                state = got["state"]
+                lines.extend(got["lines"])
+                cuts.extend(got["cuts"])
+    feed(first)
+    while True:
+        chunk = more(_OUTPUT_CHUNK)
+        if not chunk:
+            break
+        feed(chunk)
+    if pth:
+        got = lazaret.pth_stream(state, b"", True)
+        lines.extend(got["lines"])
+        cuts.extend(got["cuts"])
+    return (keep.pieces() if keep is not None else None), ({"lines": lines, "cuts": cuts} if pth else None)
+
+
+def _folder_oversized_member(rel, path, first, budget):
+    """_oversized_member for an oversized file of a folder (`first`: its first bytes), the rest read as _read_regular
+    reads one, charged to `budget`; (None, None) when what is there is no longer a regular file. OSError when it
+    cannot be read; ArchiveLimit past the budget."""
+    if not (first[:4] == b"PK\x03\x04" or os.path.splitext(rel)[1].lower() == ".pth"):
+        return None, None
+    fd = os.open(path, _FOLDER_OPEN_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, None
+        os.lseek(fd, len(first), os.SEEK_SET)
+
+        def more(n):
+            budget.check()
+            chunk = os.read(fd, n)
+            budget.charge(len(chunk))
+            return chunk
+        return _oversized_member(rel, first, more)
+    finally:
+        os.close(fd)
+
+
 def _walk_folder(base, budget):
     count, last = 0, "(folder)"
     try:
@@ -1727,7 +1925,16 @@ def _walk_folder(base, budget):
         if raw is None:
             continue                              # (it was swapped for something else than a file)
         if len(raw) > MAX_MEMBER:
-            yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+            big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
+            # (FP-MODEL-FILES: a zip model file of any size, read for its pickles; a .pth file for its import lines)
+            try:
+                big.model, big.pth = _folder_oversized_member(rel, path, raw, budget)
+            except ArchiveLimit as lim:
+                yield Member(rel, 0, b"", lim.reason, lim.detail)
+                return
+            except OSError:
+                big.model = big.pth = None        # (unread: SC-TRUNCATED, as before)
+            yield big
             continue
         yield Member(rel, len(raw), raw, None)
 
@@ -1790,7 +1997,11 @@ def _iter_tar(data, container, artifact, budget, anomalies):
             f = tf.extractfile(m)
             raw = f.read(MAX_MEMBER + 1) if f is not None else b""
             if len(raw) > MAX_MEMBER:
-                yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                # (FP-MODEL-FILES: a zip model file of any size, read for its pickles as the stream passes; a .pth
+                # file for its import lines)
+                big.model, big.pth = _oversized_member(rel, raw, f.read)
+                yield big
                 continue
             yield Member(rel, len(raw), raw, None)
     except ArchiveLimit as lim:
@@ -1896,7 +2107,11 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, co
                 continue
             f = tf.extractfile(m)
             raw = f.read(MAX_MEMBER + 1) if f is not None else b""
-            for link_rel in plan.pop(rel):
+            links_to = plan.pop(rel)
+            # (the target read on once for all its links: as a .pth file when one of them is named so)
+            name = next((n for n in links_to if n.lower().endswith(".pth")), links_to[0])
+            read_as = _oversized_member(name, raw, f.read) if len(raw) > MAX_MEMBER else (None, None)
+            for link_rel in links_to:
                 count += 1
                 if count > MAX_FILES:
                     yield Member(link_rel, 0, b"", "files")
@@ -1904,7 +2119,9 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, co
                 _note_member(seen, link_rel, anomalies)
                 last = link_rel
                 if len(raw) > MAX_MEMBER:
-                    yield Member(link_rel, SAMPLE, raw[:SAMPLE], "member")
+                    big = Member(link_rel, SAMPLE, raw[:SAMPLE], "member")
+                    big.model, big.pth = read_as
+                    yield big
                 else:
                     yield Member(link_rel, len(raw), raw, None)
             if not plan:
@@ -2145,18 +2362,31 @@ def _iter_zip(data, artifact, budget, anomalies):
     seen, count, last = {}, 0, "(archive)"
 
     def read(info, rel, limit):
+        """(the entry's first `limit` bytes, and for one larger than MAX_MEMBER whose first bytes are a zip model
+        file's, its pieces and a .pth file's lines: _oversized_member, FP-MODEL-FILES)."""
         dictionary = _lzma_dict_size(data, info)
         if dictionary is not None and dictionary > MAX_LZMA_DICT:
             raise ValueError(f"an LZMA dictionary of {dictionary:,} bytes, over the {MAX_LZMA_DICT:,}-byte limit")
         # zipfile 3.12.3+ warns of entries that overlap: _zip_overlaps names
         # them, so the warning is no line on stderr or, under -W error, an
         # exception out of the reader (F-2)
+        model = None
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with zf.open(info) as fh:
                 raw = fh.read(limit)
-        budget.charge(len(raw))
-        return raw
+                budget.charge(len(raw))
+                if len(raw) > MAX_MEMBER:
+                    def more(n):
+                        budget.check()
+                        chunk = fh.read(n)
+                        budget.charge(len(chunk))
+                        return chunk
+                    try:
+                        model = _oversized_member(rel, raw, more)
+                    except _ZIP_READ_ERRORS:
+                        model = None          # (the rest unreadable: unread, SC-TRUNCATED, as before)
+        return raw, model
 
     for name in _zip_overlaps(data, infos):
         anomalies.append(("overlap", name, "its bytes overlap another entry's"))
@@ -2213,7 +2443,7 @@ def _iter_zip(data, artifact, budget, anomalies):
                     _note_member(seen, rel, anomalies)
                 last = rels[0]
                 try:
-                    raw = read(info, last, MAX_MEMBER + 1)     # bounded, real bytes
+                    raw, model = read(info, last, MAX_MEMBER + 1)     # bounded, real bytes
                 except _ZIP_READ_ERRORS as exc:
                     why = str(exc) if str(exc).startswith("an LZMA dictionary") else type(exc).__name__
                     for rel in rels:
@@ -2221,7 +2451,9 @@ def _iter_zip(data, artifact, budget, anomalies):
                     continue
                 for rel in rels:
                     if len(raw) > MAX_MEMBER:
-                        yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                        big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                        big.model, big.pth = model or (None, None)
+                        yield big
                     else:
                         yield Member(rel, len(raw), raw, None)
             for view_names, view_placed in pip_views:
@@ -3005,6 +3237,7 @@ class _ArtifactScan:
         self.dropped = set()       # text members not kept (budget)
         self.shell = {}            # rel -> text of shell scripts
         self.binary = set()        # classified as binary
+        self.models = []           # FP-MODEL-FILES: [rel, False, imports] of the model files (_model, _model_own)
         self.oversize = set()
         self.native = set()        # members whose first bytes are a program's (ELF, Mach-O, PE, WebAssembly, DEX)
         self.compiled = set()      # RA-13: members that are compiled code (_compiled_code: the result's compiledCode)
@@ -3113,6 +3346,48 @@ class _ArtifactScan:
                 self.truncate(i["file"], i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "code")
             elif keep_encoding or i["rule"] != "Q-ENCODING":
                 self.issues.append(i)
+
+    def _model(self, rel, raw, size, whole, ranged=None):
+        """FP-MODEL-FILES: a member read as a model file (its pickles, for what they would run): its findings
+        (SC-TRUNCATED as a part not fully read: its pickle is code) and imports kept; None when it is not one.
+        `ranged`: an oversized zip model member's (size, pieces), kept as it was read (_oversized_member)."""
+        if ranged is not None:
+            full, pieces = ranged
+            got = lazaret.model_file(rel, None, full, pieces=pieces, last=True)
+        elif not lazaret.model_sniff(rel, raw):
+            return None
+        else:
+            got = lazaret.model_file(rel, raw, size, None if whole else MAX_MEMBER)
+        if got is None:
+            return None
+        for i in got["issues"]:
+            if i["rule"] == "SC-TRUNCATED":
+                self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "code")
+            else:
+                self.issues.append(i)
+        if got["imports"]:
+            self.models.append([rel, False, got["imports"], got.get("calls", [])])
+        return got
+
+    def _pth_streamed(self, rel, got):
+        """FP-MODEL-FILES: a .pth member too large to read whole, read in chunks as its stream passed (_oversized_member):
+        SC-PTH-EXEC for each line site.py runs (pth_kept_issues: as pth_issues reads a line, at its line), and
+        SC-TRUNCATED for a line it could not keep. Its other lines are paths to site.py, and are not scanned as Python
+        source as a .pth file read whole is."""
+        try:
+            self.issues.extend(lazaret.pth_kept_issues(rel, got["lines"]))
+        except _engine.NativeError as exc:
+            self._unanswered(rel, exc)
+        if got["cuts"]:
+            more = f" (and {len(got['cuts']) - 1} more)" if len(got["cuts"]) > 1 else ""
+            self.truncate(rel, got["cuts"][0] + more, "code")
+
+    def _model_own(self):
+        """FP-MODEL-FILES: the globals of the release's own modules its model files import (importing one runs
+        that module's code, which the scan reads, when the file is loaded): SC-PICKLE-GLOBAL as INFO; and the calls
+        with text its model files hold: SC-PICKLE-GLOBAL, MAJOR. The engine's (pickle::own_imports)."""
+        files = [[rel, False] for rel in sorted(self.members) if rel.endswith(".py")]
+        self.issues.extend(lazaret.model_own_issues(self.models, files))
 
     def classify(self, rel, raw, size):
         bi = lazaret.classify_binary(rel, raw, size, self.artifact)
@@ -3316,16 +3591,24 @@ class _ArtifactScan:
                 self.compiled.add(rel)
             if agent_doc:
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
+            elif ext == ".pth" and getattr(m, "pth", None) is not None:
+                # (FP-MODEL-FILES, John's decision of Oct 21: a .pth file too large to read whole, read as its stream
+                # passed for the lines site.py runs; a checkpoint's pickles below)
+                self._pth_streamed(rel, m.pth)
             elif wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
                 # Verdict integrity (audit C2/G16): a cut-short scan is a
                 # signal, not a clean verdict — whatever the first bytes look like.
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
             # still classifiable by magic/entropy from the decompressed prefix
             disguised = lazaret.disguised_binary(rel, raw) if lazaret.dep_source_lang(ext) else None
+            # (a model file larger than the limit: a zip read by range, the pieces of it kept as it was read; another
+            # SC-TRUNCATED, its pickle not read)
+            model = (None if disguised or (wants_text and ext != ".pth") or agent_doc or lazaret.dep_source_lang(ext)
+                     else self._model(rel, raw, size, False, getattr(m, "model", None)))
             if disguised:
                 self.binaries += 1
                 self.issues.append(disguised)
-            else:
+            elif model is None or model["opaque"]:
                 self.classify(rel, raw, size)
             return
         if rel in self.action_meta_paths:
@@ -3394,10 +3677,15 @@ class _ArtifactScan:
             # Cargo.toml is
             self._keep_code(rel, raw)
             return
+        # FP-MODEL-FILES: a model file's pickles, for what they would run (a checkpoint named .pth too)
+        model = None
+        if lazaret.dep_source_lang(ext) is None and not agent_doc:
+            model = self._model(rel, raw, size, True)
         if ext == ".pth":
+            # the lines site.py runs, read byte-wise as a .pth member read in chunks is (one rule for every route)
             text = raw.decode("utf-8-sig", "replace")
             try:
-                self.issues.extend(pth_issues(rel, text))
+                self._pth_streamed(rel, lazaret.pth_stream_file(iter([raw, b""]).__next__))
             except _engine.NativeError as exc:
                 self._unanswered(rel, exc)
             self.scan_source(rel, text, "py")
@@ -3430,7 +3718,8 @@ class _ArtifactScan:
                 self.native.add(rel)
             if _compiled_code(rel, raw, native):
                 self.compiled.add(rel)
-            self.classify(rel, raw, size)
+            if model is None or model["opaque"]:
+                self.classify(rel, raw, size)
             return
         # An AI agent's skill or instruction file (RA-3): read in the second pass for what it tells the agent to do
         # (_agent_docs); a #! line does not make it a script. It is kept as other text is too (package.json may name
@@ -5163,6 +5452,8 @@ class _ArtifactScan:
             self._phase("the agent-hijack check", self._agent_hijack)
             if self.agent_docs:
                 self._phase("the agent skill and instruction files", self._agent_docs)
+            if self.models:
+                self._phase("the model files' imports", self._model_own)
             self._phase("the package's names", self._lookalike_names)
             self._phase("the dependencies nothing uses", self._unused_dependencies)
             self._phase("the devDependencies the code loads", self._dev_only_loads,

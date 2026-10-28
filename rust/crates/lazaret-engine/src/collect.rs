@@ -376,6 +376,15 @@ pub struct FileIn {
     pub data: Read,
     /// an oversized file's first DISGUISE_SAMPLE_BYTES bytes (none when they could not be read)
     pub sample: Option<Vec<u8>>,
+    /// the package reads a file by range (FP-MODEL-FILES: a zip model file, its directory and its pickles)
+    pub ranged: bool,
+    /// the ranges it read so far ((offset, length), their bytes one after another), or why it could not
+    pub ranges: Option<Result<(Vec<(u64, u64)>, Vec<u8>), PyStr>>,
+    /// how many times ranges were asked for
+    pub rounds: u64,
+    /// a .pth file too large to read whole, read in chunks (binary::pth_stream): the lines site.py runs and why one
+    /// could not be kept, or why it could not be read
+    pub pth_lines: Option<Result<(Vec<(u64, Vec<u8>)>, Vec<String>), PyStr>>,
 }
 
 /// The languages a dependency tree's files are read in (DEP_LANGS: a package's Go and Rust are its readers').
@@ -504,6 +513,9 @@ struct Done {
     manifest: Option<Value>,
     config: Option<Value>,
     pth: bool,
+    /// a model file read: {imports: its globals of no known kind, calls: its calls with text} (FP-MODEL-FILES:
+    /// model_own's, after the collection)
+    model: Option<Value>,
 }
 
 impl Done {
@@ -520,6 +532,9 @@ impl Done {
         }
         if self.pth {
             out.push(("pth", Value::Bool(true)));
+        }
+        if let Some(m) = self.model {
+            out.push(("model", m));
         }
         Value::obj(out)
     }
@@ -566,6 +581,11 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
         let agent = crate::agentdoc::is_agent_doc(rel).is_some();
         lang = if agent { None } else { script_source_lang(p, head) };
         if lang.is_none() {
+            // FP-MODEL-FILES: a model file (a pickle, a PyTorch checkpoint, joblib's, numpy's) is read whole, for what
+            // its pickles would run
+            if !agent && crate::pickle::sniff(p, &f.name, head, f.windows) {
+                return model(p, f, head, Done::default());
+            }
             if let Some(bi) = classify(head) {
                 done.issues.push(at(rel, bi));
             } else if (agent || (!f.dep.any() && is_config_file(p, &f.name)))
@@ -590,6 +610,36 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
         }
     }
     let cap = f.cap;
+    if f.size > cap && pth && f.ranged {
+        // FP-MODEL-FILES (John, Oct 21): a .pth file too large to read whole (PyTorch's checkpoints are named so) is
+        // read in chunks for the lines site.py runs, each checked as pth_issues checks a line (what it could not
+        // keep: SC-TRUNCATED), and a checkpoint's pickles by range, as any zip model file's
+        match &f.pth_lines {
+            None => return need("pth", f.size),
+            Some(Err(why)) => {
+                done.issues.push(at(rel, unreadable_issue(p, rel, why)));
+                return done.value();
+            }
+            Some(Ok((lines, cuts))) => {
+                done.pth = true;
+                match own(|| crate::binary::pth_kept_issues(p, lines, f.redact, f.neumaier)) {
+                    Some(found) => done.issues.extend(found.into_iter().map(|i| at(rel, i))),
+                    None => done.issues.push(at(rel, exhausted(p))),
+                }
+                if let Some(c) = cuts.first() {
+                    let more = if cuts.len() > 1 { format!(" (and {} more)", cuts.len() - 1) } else { String::new() };
+                    done.issues.push(at(rel, crate::manifest::gyp::truncated_issue(p, &format!("{c}{more}"))));
+                }
+            }
+        }
+        match &f.head {
+            None => return need("head", header),
+            Some(Ok(h)) if crate::pickle::zip::first_local_name(h).is_some() && crate::pickle::sniff(p, &f.name, h, f.windows) => {
+                return model(p, f, h, done);
+            }
+            _ => return done.value(),
+        }
+    }
     if f.size > cap {
         done.issues.push(at(rel, crate::manifest::gyp::truncated_issue(
             p, &format!("{} bytes exceeds the {}-byte file limit", commas(f.size), commas(cap)))));
@@ -630,9 +680,19 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
     }
     if pth {
         done.pth = true;
-        let text = crate::decode::utf::utf8_sig(data);
-        match own(|| crate::binary::pth_issues(p, &text, f.redact, f.neumaier)) {
-            Some(found) => done.issues.extend(found.into_iter().map(|i| at(rel, i))),
+        // (a checkpoint named .pth: its pickles too)
+        if crate::pickle::sniff(p, &f.name, &data[..data.len().min(header as usize)], f.windows) {
+            model_into(p, f, data, data.len() as u64, &mut done, None);
+        }
+        // (the lines site.py runs, read byte-wise as a .pth file read in chunks is: one rule for every route)
+        match own(|| crate::binary::pth_bytes_issues(p, data, f.redact, f.neumaier)) {
+            Some((found, cuts)) => {
+                done.issues.extend(found.into_iter().map(|i| at(rel, i)));
+                if let Some(c) = cuts.first() {
+                    let more = if cuts.len() > 1 { format!(" (and {} more)", cuts.len() - 1) } else { String::new() };
+                    done.issues.push(at(rel, crate::manifest::gyp::truncated_issue(p, &format!("{c}{more}"))));
+                }
+            }
             None => done.issues.push(at(rel, exhausted(p))),
         }
         return done.value();
@@ -678,6 +738,88 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
     }
     done.file = Some(Value::obj(entry));
     done.value()
+}
+
+/// FP-MODEL-FILES: a model file (pickle/), read for what its pickles would run: a zip (a checkpoint, an .npz) by
+/// range whatever its size, when the package reads files by range ({"need": {read: "ranges"}}: its end records, its
+/// central directory and the members the reader reads, never the tensor storages); another whole up to the size
+/// limit, and one larger SC-TRUNCATED by its first bytes, as the registry reads one. A file the reader finds is not
+/// one, and an archive that holds more than its format's members, get what classify says of their first bytes, as
+/// before.
+fn model(p: &Pack, f: &FileIn, head: &[u8], mut done: Done) -> Value {
+    let rel = &f.rel;
+    let cap = f.cap;
+    if f.ranged && crate::pickle::zip::first_local_name(head).is_some() {
+        let (layout, bytes): (&[(u64, u64)], &[u8]) = match &f.ranges {
+            Some(Err(why)) => { done.issues.push(at(rel, unreadable_issue(p, rel, why))); return done.value(); }
+            Some(Ok((l, b))) => (l, b),
+            None => (&[], &[]),
+        };
+        let mut given = vec![(0u64, head)];
+        let mut k = 0usize;
+        for &(off, len) in layout {
+            let end = k.saturating_add(len as usize).min(bytes.len());
+            given.push((off, &bytes[k..end]));
+            k = end;
+        }
+        let src = crate::pickle::zip::Bytes::pieces(f.size, given, crate::pickle::range_cap(p));
+        let last = f.rounds >= p.int("PICKLE_MAX_READS").max(0) as u64;
+        let got = match own(|| crate::pickle::read_ranges(p, rel, &src, f.windows, last)) {
+            None => None,
+            Some(crate::pickle::Ranged::Need(n)) => {
+                return Value::obj(vec![("need", Value::obj(vec![("read", Value::str("ranges")),
+                                                                 ("ranges", crate::api::ranges_value(&n))]))]);
+            }
+            Some(crate::pickle::Ranged::Not) => Some(None),
+            Some(crate::pickle::Ranged::Report(r)) => Some(Some(r)),
+        };
+        model_report(p, f, got, &mut done, Some(head));
+        return done.value();
+    }
+    if f.size > cap {
+        model_into(p, f, head, f.size, &mut done, Some(head));
+        return done.value();
+    }
+    let data = match &f.data {
+        None => return need("data", cap + 1),
+        Some(Err(why)) => { done.issues.push(at(rel, unreadable_issue(p, rel, why))); return done.value(); }
+        Some(Ok(d)) => d,
+    };
+    // (a file that grew past the limit while it was read: its first bytes)
+    let slice = &data[..data.len().min(cap as usize)];
+    model_into(p, f, slice, data.len() as u64, &mut done, Some(head));
+    done.value()
+}
+
+/// A model file's findings and imports added to `done`; with `head`, what classify says of the file's first bytes
+/// when it is not a model file after all, or holds more than one.
+fn model_into(p: &Pack, f: &FileIn, data: &[u8], size: u64, done: &mut Done, head: Option<&[u8]>) {
+    let got = own(|| crate::pickle::read_file(p, &f.rel, data, size, Some(f.cap), f.windows));
+    model_report(p, f, got, done, head);
+}
+
+/// A model file's reading (None: it spent its work budget; Some(None): not a model file) added to `done`.
+fn model_report(p: &Pack, f: &FileIn, got: Option<Option<crate::pickle::Report>>, done: &mut Done, head: Option<&[u8]>) {
+    let rel = &f.rel;
+    let classify = |h: &[u8]| crate::binary::classify(p, rel, &h[..h.len().min(8192)], f.size, "repo", f.windows, f.neumaier);
+    match got {
+        None => done.issues.push(at(rel, exhausted(p))),
+        Some(None) => {
+            if let Some(bi) = head.and_then(classify) {
+                done.issues.push(at(rel, bi));
+            }
+        }
+        Some(Some(r)) => {
+            done.issues.extend(r.issues.into_iter().map(|i| at(rel, i)));
+            if r.opaque {
+                if let Some(bi) = head.and_then(classify) {
+                    done.issues.push(at(rel, bi));
+                }
+            }
+            done.model = Some(Value::obj(vec![("imports", crate::pickle::imports_value(&r.imports)),
+                                              ("calls", crate::pickle::calls_value(&r.calls))]));
+        }
+    }
 }
 
 /// core._collect_config: a config or data file read for its credentials, or Q-SKIPPED-CONFIG over the limit.
@@ -823,7 +965,7 @@ mod tests {
             let f = FileIn { rel: pystr::u(rel), name: pystr::u(rel.rsplit('/').next().unwrap()), size: data.len() as u64,
                              dep: Dep::Vendor(s("go"), s("vendor")), cap: 1 << 20, config_cap: 1 << 20, windows: false,
                              neumaier: false, redact: true, head: Some(Ok(data.to_vec())), data: Some(Ok(data.to_vec())),
-                             sample: None };
+                             sample: None, ranged: false, ranges: None, rounds: 0, pth_lines: None };
             let got = file(&p, &f);
             let entry = got.get("file").cloned().expect("a file");
             let field = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(pystr::to_string);
