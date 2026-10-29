@@ -6,7 +6,6 @@ import base64
 import os
 import shutil
 import ssl
-import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -14,7 +13,7 @@ from unittest import mock
 from lazaret import pg
 from lazaret.pg._dsn import default_root_cert, resolve
 from lazaret.pg.connection import Connection
-from tests import _support
+from tests import _pki, _support
 from tests.pg.test_hostile_server import FakeServer, auth, recv_exact
 from tests.pg.test_hostile_server import connect as fake_connect
 from tests.pg.test_scram import CA_PEM   # an unrelated test CA (public certificate only)
@@ -137,19 +136,15 @@ class UnverifiedTlsPolicyTests(unittest.TestCase):
         self.assertIn(b"p", srv.received)
 
 
-@unittest.skipUnless(shutil.which("openssl"), "needs the openssl command to make a throwaway certificate")
 class TlsTerminatingMitmTests(unittest.TestCase):
-    """Real TLS with a self-signed certificate made for the test (repro r3)."""
+    """Real TLS with a certificate made for the test under a root no client trusts (repro r3; tests/_pki.py)."""
 
     @classmethod
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp()
-        key, crt = os.path.join(cls.dir, "mitm.key"), os.path.join(cls.dir, "mitm.crt")
-        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key,
-                        "-out", crt, "-days", "1", "-subj", "/CN=mitm.invalid"],
-                       check=True, capture_output=True, timeout=40)
+        pki = _pki.Pki(cls.dir, dns=("mitm.invalid",), ips=(), server_name="mitm.invalid")
         cls.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        cls.ctx.load_cert_chain(crt, key)
+        cls.ctx.load_cert_chain(pki.cert, pki.key)
 
     @classmethod
     def tearDownClass(cls):

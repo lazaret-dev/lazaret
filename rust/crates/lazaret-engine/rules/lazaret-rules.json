@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.24.0",
+ "rule_set": "2.100.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -26,6 +26,106 @@
   "B64_BLOB_RE": {
    "flags": "",
    "re": "[\\\"'][A-Za-z0-9+/]{200,}={0,2}[\\\"']"
+  },
+  "BENIGN_MAGIC": {
+   "list": [
+    {
+     "value": "\u0089PNG"
+    },
+    {
+     "value": "\u00ff\u00d8\u00ff"
+    },
+    {
+     "value": "GIF8"
+    },
+    {
+     "value": "RIFF"
+    },
+    {
+     "value": "OggS"
+    },
+    {
+     "value": "BM"
+    },
+    {
+     "value": "\u0000\u0000\u0001\u0000"
+    },
+    {
+     "value": "wOFF"
+    },
+    {
+     "value": "wOF2"
+    },
+    {
+     "value": "ID3"
+    },
+    {
+     "value": "%PDF"
+    },
+    {
+     "value": "II*\u0000"
+    },
+    {
+     "value": "MM\u0000*"
+    },
+    {
+     "value": "\u001aE\u00df\u00a3"
+    },
+    {
+     "value": "ftyp"
+    },
+    {
+     "value": "\u00ffO\u00ffQ"
+    },
+    {
+     "value": "\u0000\u0000\u0000\fjP  "
+    },
+    {
+     "value": "8BPS"
+    },
+    {
+     "value": "icns"
+    },
+    {
+     "value": "DDS "
+    },
+    {
+     "value": "OTTO"
+    },
+    {
+     "value": "ttcf"
+    },
+    {
+     "value": "%!PS"
+    },
+    {
+     "value": "\u00c5\u00d0\u00d3\u00c6"
+    },
+    {
+     "value": "gimp xcf"
+    },
+    {
+     "value": "\u0001\u00da"
+    },
+    {
+     "value": "Y\u00a6j\u0095"
+    },
+    {
+     "value": "SIMPLE  ="
+    },
+    {
+     "value": "qoif"
+    },
+    {
+     "value": "#?RADIANCE"
+    },
+    {
+     "value": "fLaC"
+    },
+    {
+     "value": "\u0000\u0000\u0002\u0000"
+    }
+   ]
   },
   "CAP_PER_RULE": {
    "value": 200
@@ -116,6 +216,48 @@
     ".wasm"
    ]
   },
+  "CONFIG_EXTS": {
+   "set": [
+    ".bash",
+    ".cfg",
+    ".conf",
+    ".env",
+    ".ini",
+    ".json",
+    ".json5",
+    ".jsonc",
+    ".key",
+    ".pem",
+    ".properties",
+    ".sh",
+    ".tfvars",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".zsh"
+   ]
+  },
+  "CONFIG_NAMES": {
+   "set": [
+    ".dockercfg",
+    ".env",
+    ".envrc",
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "_netrc",
+    "containerfile",
+    "dockerfile",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa"
+   ]
+  },
+  "CONFIG_SCAN_CAP": {
+   "value": 2000000
+  },
   "CONFIG_SECRET_RULE": {
    "map": {
     "fix": {
@@ -143,6 +285,15 @@
      "value": "Config files are committed, copied into images and shared: a credential in one leaks with every copy, and rotating it means finding them all."
     }
    }
+  },
+  "CONFIG_SKIP_NAMES": {
+   "set": [
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "packages.lock.json",
+    "pnpm-lock.yaml",
+    "pylock.toml"
+   ]
   },
   "CONTAINER_DOCUMENT_EXTS": {
    "set": [
@@ -284,6 +435,9 @@
     }
    }
   },
+  "DISGUISE_SAMPLE_BYTES": {
+   "value": 2048
+  },
   "ELLIPSIS": {
    "value": "\u2026"
   },
@@ -303,6 +457,93 @@
   },
   "EXCERPT_WIDTH": {
    "value": 100
+  },
+  "EXEC_MAGIC": {
+   "list": [
+    {
+     "list": [
+      {
+       "value": "\u007fELF"
+      },
+      {
+       "value": "ELF binary (Linux/Unix executable or shared object)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00fe\u00ed\u00fa\u00ce"
+      },
+      {
+       "value": "Mach-O binary (macOS)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00fe\u00ed\u00fa\u00cf"
+      },
+      {
+       "value": "Mach-O 64-bit binary (macOS)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00ce\u00fa\u00ed\u00fe"
+      },
+      {
+       "value": "Mach-O binary (macOS)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00cf\u00fa\u00ed\u00fe"
+      },
+      {
+       "value": "Mach-O 64-bit binary (macOS)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00ca\u00fe\u00ba\u00be"
+      },
+      {
+       "value": "Mach-O universal binary or Java .class"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u0000asm"
+      },
+      {
+       "value": "WebAssembly module"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "dex\n"
+      },
+      {
+       "value": "Android DEX bytecode"
+      }
+     ]
+    }
+   ]
+  },
+  "EXHAUSTED": {
+   "value": "reading it spent the engine's work budget (a pattern that backtracks without end on this text)"
   },
   "EXIT_GATE": {
    "value": 1
@@ -327,6 +568,9 @@
     ".cts": {
      "value": "js"
     },
+    ".go": {
+     "value": "go"
+    },
     ".js": {
      "value": "js"
     },
@@ -344,6 +588,9 @@
     },
     ".pyw": {
      "value": "py"
+    },
+    ".rs": {
+     "value": "rs"
     },
     ".sql": {
      "value": "sql"
@@ -390,6 +637,22 @@
   },
   "GYP_MAX_HOOK_FINDINGS": {
    "value": 100
+  },
+  "HARDENING_RULES": {
+   "set": [
+    "SC-AGENT-CONFIG",
+    "SC-GITLAB-IMAGE",
+    "SC-GITLAB-INCLUDE",
+    "SC-GITLAB-MR-TEXT",
+    "SC-GITLAB-PIPE-SHELL",
+    "SC-GITLAB-TOKEN-INSTALL",
+    "SC-WORKFLOW-CACHE",
+    "SC-WORKFLOW-OIDC-INSTALL",
+    "SC-WORKFLOW-PERMISSIONS",
+    "SC-WORKFLOW-PIPE-SHELL",
+    "SC-WORKFLOW-PR-CHECKOUT",
+    "SC-WORKFLOW-UNPINNED"
+   ]
   },
   "HEADER_SAMPLE_BYTES": {
    "value": 512
@@ -467,6 +730,83 @@
     }
    ]
   },
+  "NESTED_ARCHIVE_MAGIC": {
+   "list": [
+    {
+     "list": [
+      {
+       "value": "PK\u0003\u0004"
+      },
+      {
+       "value": "zip"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u001f\u008b"
+      },
+      {
+       "value": "gzip"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "BZh"
+      },
+      {
+       "value": "bzip2"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00fd7zXZ\u0000"
+      },
+      {
+       "value": "xz"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "7z\u00bc\u00af'\u001c"
+      },
+      {
+       "value": "7-zip"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "Rar!"
+      },
+      {
+       "value": "rar"
+      }
+     ]
+    }
+   ]
+  },
+  "NPM_DEP_FIELDS": {
+   "list": [
+    {
+     "value": "dependencies"
+    },
+    {
+     "value": "optionalDependencies"
+    },
+    {
+     "value": "peerDependencies"
+    }
+   ]
+  },
   "NPM_INSTALL_SCRIPTS": {
    "list": [
     {
@@ -499,6 +839,22 @@
     },
     {
      "value": "postprepare"
+    }
+   ]
+  },
+  "NPM_LOCAL_DEP_FIELDS": {
+   "list": [
+    {
+     "value": "dependencies"
+    },
+    {
+     "value": "optionalDependencies"
+    },
+    {
+     "value": "peerDependencies"
+    },
+    {
+     "value": "devDependencies"
     }
    ]
   },
@@ -589,6 +945,9 @@
      "value": "migrations"
     }
    ]
+  },
+  "PACKAGE_CODE_CHARS": {
+   "value": 300000000
   },
   "PREVIEW_MAX": {
    "value": 60
@@ -1113,6 +1472,12 @@
         },
         {
          "value": "js"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -1127,7 +1492,7 @@
       },
       "re": {
        "flags": "i",
-       "re": "(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+       "re": "(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*(?::=|[:=]|:\\s*&(?:'static\\s+)?(?:str|\\[u8\\])\\s*=|[ \\t]+string\\s*=)\\s*(?:b|rb|r#*|br#*)?[\\\"'][^\\\"']{4,}[\\\"']"
       },
       "ref": {
        "value": "CWE-798 \u00b7 OWASP A07"
@@ -1136,8 +1501,8 @@
        "value": "BLOCKER"
       },
       "skip": {
-       "flags": "i",
-       "re": "(environ|process\\.env|getenv|config\\[|\\bimport\\b|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bmocked\\b|\\bxxxx+\\b|\\{\\{)"
+       "flags": "",
+       "re": "([Ee]nviron|ENVIRON|process\\.env|[Gg]et[Ee]nv|GETENV|config\\[|\\bimport\\b|\\bIMPORT\\b|(?<![A-Za-z0-9])(?:placeholder|example|dummy|sample|mock|mocked|redacted|fake|canary|made[_\\-]?up|PLACEHOLDER|EXAMPLE|DUMMY|SAMPLE|MOCK|MOCKED|REDACTED|FAKE|CANARY|MADE[_\\-]?UP|[xX]{4,}|xxxx+)(?![a-z])|(?<![A-Z0-9])(?:Placeholder|Example|Dummy|Sample|Mock|Mocked|Redacted|Fake|Canary|Made[_\\-]?[Uu]p)(?![a-z])|\\{\\{)"
       },
       "type": {
        "value": "VULN"
@@ -1360,7 +1725,7 @@
       },
       "re": {
        "flags": "",
-       "re": "(random\\.(random|randint|choice|randrange|getrandbits)|Math\\.random)\\s*\\("
+       "re": "(random\\.(random|randint|randrange|choice|choices|sample|shuffle|uniform|triangular|getrandbits|randbytes|gauss|normalvariate|lognormvariate|betavariate|expovariate|gammavariate|paretovariate|vonmisesvariate|weibullvariate|binomialvariate)|Math\\.random)\\s*\\("
       },
       "ref": {
        "value": "CWE-338"
@@ -1376,6 +1741,52 @@
       },
       "why": {
        "value": "random/Math.random are predictable; generated tokens can be guessed."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use the secrets module (secrets.token_urlsafe, secrets.choice) or random.SystemRandom where the value must not be guessed; random is fine for simulations, sampling and tests."
+      },
+      "id": {
+       "value": "S-WEAKRAND"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "The random module's generator in use."
+      },
+      "name": {
+       "value": "Pseudo-random generator"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?<![\\w.])random\\.(?:random|randint|randrange|choice|choices|sample|shuffle|uniform|triangular|getrandbits|randbytes|gauss|normalvariate|lognormvariate|betavariate|expovariate|gammavariate|paretovariate|vonmisesvariate|weibullvariate|binomialvariate)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-330"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "flags": "i",
+       "re": "(token|secret|password|otp|nonce|session|key|reset|csrf)"
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "random is a Mersenne Twister: what it gives next can be worked out from what it gave, so a value an attacker must not guess (a token, a password, a session or reset key) made with it can be guessed."
       }
      }
     },
@@ -1902,6 +2313,12 @@
         },
         {
          "value": "sql"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -2040,6 +2457,12 @@
         },
         {
          "value": "js"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -2054,7 +2477,7 @@
       },
       "re": {
        "flags": "",
-       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
        "token": [
         "AKIA[0-9A-Z]{16}",
         "gh[pousr]_[A-Za-z0-9]{36}",
@@ -2063,6 +2486,10 @@
         "sk_live_[A-Za-z0-9]{16,}",
         "AIza[0-9A-Za-z_\\-]{35}",
         "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+        "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+        "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+        "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
         "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
        ]
       },
@@ -2101,6 +2528,12 @@
         },
         {
          "value": "sql"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -2182,7 +2615,7 @@
     {
      "map": {
       "fix": {
-       "value": "Parse untrusted XML with a hardened parser such as defusedxml or lazaret.safexml."
+       "value": "Leave them off (xml.sax and xml.dom's default since Python 3.7.1; resolve_entities=False with lxml), or parse untrusted XML with defusedxml or lazaret.safexml."
       },
       "id": {
        "value": "S-XML"
@@ -2195,32 +2628,32 @@
        ]
       },
       "msg": {
-       "value": "Stdlib XML parsers are unsafe for untrusted input."
+       "value": "XML parser set to resolve external entities."
       },
       "name": {
-       "value": "XML parsing without a hardened parser"
+       "value": "XML external entities enabled"
       },
       "need": {
        "value": null
       },
       "re": {
        "flags": "",
-       "re": "(?:^|\\s)(?:import\\s+xml\\.(?:etree|dom|sax)|from\\s+xml\\.(?:etree|dom|sax))"
+       "re": "setFeature\\s*\\(\\s*(?:[\\w.]*\\.)?feature_external_(?:ges|pes)\\s*,\\s*(?:True|1)\\s*\\)|setFeature\\s*\\(\\s*[rRuU]?[\\\"']http://xml\\.org/sax/features/external-(?:general|parameter)-entities[\\\"']\\s*,\\s*(?:True|1)\\s*\\)|\\bresolve_entities\\s*=\\s*True\\b"
       },
       "ref": {
        "value": "CWE-611"
       },
       "sev": {
-       "value": "MINOR"
+       "value": "MAJOR"
       },
       "skip": {
        "value": null
       },
       "type": {
-       "value": "HOTSPOT"
+       "value": "VULN"
       },
       "why": {
-       "value": "xml.etree/dom/sax are vulnerable to entity-expansion and (historically) XXE attacks."
+       "value": "With external entities on, a document can make the parser read local files or fetch URLs (XXE) and put what they hold in what it parses."
       }
      }
     },
@@ -2838,7 +3271,7 @@
       },
       "re": {
        "flags": "",
-       "re": "\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
+       "re": "\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
       },
       "ref": {
        "value": "CWE-506 \u00b7 Supply chain"
@@ -3443,8 +3876,8 @@
    ]
   },
   "SECRET_SKIP_RE": {
-   "flags": "i",
-   "re": "environ|process\\.env|getenv|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bredacted\\b|\\bxxxx+\\b"
+   "flags": "",
+   "re": "[Ee]nviron|ENVIRON|process\\.env|[Gg]et[Ee]nv|GETENV|(?<![A-Za-z0-9])(?:placeholder|example|dummy|sample|mock|mocked|redacted|fake|canary|made[_\\-]?up|PLACEHOLDER|EXAMPLE|DUMMY|SAMPLE|MOCK|MOCKED|REDACTED|FAKE|CANARY|MADE[_\\-]?UP|[xX]{4,}|xxxx+)(?![a-z])|(?<![A-Z0-9])(?:Placeholder|Example|Dummy|Sample|Mock|Mocked|Redacted|Fake|Canary|Made[_\\-]?[Uu]p)(?![a-z])|(?:[Pp]ublic|PUBLIC)[_\\- ]?(?:[Kk]ey|KEY)|[Pp]ub[Kk]ey|PUBKEY|[Pp]ub_[Kk]ey|PUB_KEY"
   },
   "SEV_COLOR": {
    "map": {
@@ -4028,6 +4461,136 @@
          "value": "Escape the value (or render it through an autoescaping template) before it is returned."
         }
        ]
+      },
+      {
+       "list": [
+        {
+         "value": "TRUST"
+        },
+        {
+         "flags": "",
+         "re": "\\bsession(?=\\s*\\[[^\\n]*\\]\\s*=(?!=))"
+        },
+        {
+         "value": "trust boundary violation"
+        },
+        {
+         "value": "MINOR"
+        },
+        {
+         "value": "CWE-501"
+        },
+        {
+         "value": "Validate the value (and the key) before the session holds it: what the session holds is trusted later."
+        },
+        {
+         "value": "rest"
+        }
+       ]
+      },
+      {
+       "list": [
+        {
+         "value": "TRUST"
+        },
+        {
+         "flags": "",
+         "re": "\\bsession\\s*\\.\\s*(?:update|setdefault|__setitem__)\\s*\\("
+        },
+        {
+         "value": "trust boundary violation"
+        },
+        {
+         "value": "MINOR"
+        },
+        {
+         "value": "CWE-501"
+        },
+        {
+         "value": "Validate the value (and the key) before the session holds it: what the session holds is trusted later."
+        },
+        {
+         "value": "extent"
+        }
+       ]
+      },
+      {
+       "list": [
+        {
+         "value": "LDAP"
+        },
+        {
+         "flags": "",
+         "re": "(?<![\\w.])(?!re\\.|regex\\.)(?:[A-Za-z_]\\w*\\.)+(?:search|search_s|search_st|search_ext|search_ext_s|paged_search)\\s*\\("
+        },
+        {
+         "value": "LDAP injection"
+        },
+        {
+         "value": "MAJOR"
+        },
+        {
+         "value": "CWE-90"
+        },
+        {
+         "value": "Escape the values put into a filter or a DN (ldap3.utils.conv.escape_filter_chars, ldap.filter.filter_format)."
+        },
+        {
+         "value": "extent"
+        }
+       ]
+      },
+      {
+       "list": [
+        {
+         "value": "XPATH"
+        },
+        {
+         "flags": "",
+         "re": "\\.\\s*xpath\\s*\\(|(?<![\\w])XPath\\s*\\("
+        },
+        {
+         "value": "XPath injection"
+        },
+        {
+         "value": "MAJOR"
+        },
+        {
+         "value": "CWE-643"
+        },
+        {
+         "value": "Pass the value as an XPath variable (tree.xpath(\"//u[@id=$id]\", id=value)), never into the expression."
+        },
+        {
+         "value": "first"
+        }
+       ]
+      },
+      {
+       "list": [
+        {
+         "value": "XPATH"
+        },
+        {
+         "flags": "",
+         "re": "\\belementpath\\s*\\.\\s*(?:select|iter_select|Selector)\\s*\\("
+        },
+        {
+         "value": "XPath injection"
+        },
+        {
+         "value": "MAJOR"
+        },
+        {
+         "value": "CWE-643"
+        },
+        {
+         "value": "Pass the value as an XPath variable (tree.xpath(\"//u[@id=$id]\", id=value)), never into the expression."
+        },
+        {
+         "value": "positional"
+        }
+       ]
       }
      ]
     }
@@ -4044,6 +4607,28 @@
      "re": "request\\.(args|form|values|json|data|cookies|headers|files|get_json|get_data|query_string|stream|full_path|GET|POST|COOKIES|META|FILES|body|query_params|path_params)|\\b(?:websocket|ws)\\.receive_(?:text|json|bytes)\\s*\\(|input\\s*\\(|sys\\.argv|b64decode\\s*\\(|zlib\\.decompress\\s*\\("
     }
    }
+  },
+  "TEST_DIR_NAMES": {
+   "set": [
+    "__fixtures__",
+    "__tests__",
+    "fixtures",
+    "spec",
+    "specs",
+    "test",
+    "test cases",
+    "test-data",
+    "test-fixtures",
+    "test_data",
+    "testdata",
+    "testing",
+    "tests",
+    "unittests"
+   ]
+  },
+  "TEST_FILE_RE": {
+   "flags": "i",
+   "re": "(?:^test_.*\\.py|.*_test\\.(?:py|go|rs)|^tests\\.rs|.*\\.(?:test|spec)\\.[cm]?[jt]sx?)$"
   },
   "TEXT_RULES": {
    "list": [
@@ -4229,6 +4814,19 @@
     }
    ]
   },
+  "TRUNCATION_RULES": {
+   "list": [
+    {
+     "value": "SC-TRUNCATED"
+    },
+    {
+     "value": "SC-MANIFEST-UNPARSEABLE"
+    },
+    {
+     "value": "SC-UNREAD-CODE"
+    }
+   ]
+  },
   "TYPE_LABEL": {
    "map": {
     "BUG": {
@@ -4253,6 +4851,31 @@
     {
      "value": "X-"
     }
+   ]
+  },
+  "USE_RISK_CHARS": {
+   "value": 24000000
+  },
+  "USE_RISK_MAX_CHARS": {
+   "value": 8000000
+  },
+  "USE_RISK_SKIP_DIRS": {
+   "set": [
+    "__mocks__",
+    "_next",
+    "bench",
+    "benchmark",
+    "benchmarks",
+    "demo",
+    "demos",
+    "doc",
+    "docs",
+    "example",
+    "examples",
+    "public",
+    "sample",
+    "samples",
+    "static"
    ]
   },
   "VALID_CATEGORIES": {
@@ -4283,6 +4906,164 @@
     }
    ]
   },
+  "VENDOR_CODE": {
+   "map": {
+    "cargo": {
+     "value": ".rs"
+    },
+    "go": {
+     "value": ".go"
+    }
+   }
+  },
+  "_AGENTDOC_ARCHIVE_RE": {
+   "flags": "i",
+   "re": "https?://[^\\s'\"`]+\\.(?:zip|tar\\.gz|tgz|7z|rar)\\b|https?://[^\\s'\"`]*github\\.com/[^\\s'\"`]+/releases/"
+  },
+  "_AGENTDOC_BIDI_RE": {
+   "flags": "",
+   "re": "[\u202a-\u202e\u2066-\u2069]"
+  },
+  "_AGENTDOC_CD_RE": {
+   "flags": "m",
+   "re": "(?:^|[;&|(`]|\\b(?:then|do)\\b)[ \\t]*(?:cd|pushd|Set-Location)[ \\t]+[\"']?([^\\s;&|\"'()`]+)"
+  },
+  "_AGENTDOC_EXFIL_RE": {
+   "flags": "i",
+   "re": "\\b(?:send|upload|post|exfiltrate|transmit|e-?mail|forward|leak|share)\\b(?:[^\\n.!?]|\\.(?=[\\w/~-])){0,60}(?:\\b(?:conversation|chat history|chat log|history|context|transcript|messages|environment variables?|secrets?|credentials?|tokens?|api[ _-]?keys?|id_rsa|id_ed25519|id_ecdsa)\\b|(?<![\\w.])\\.(?:env|npmrc|netrc|pypirc|git-credentials)\\b|~/\\.(?:ssh|aws|gnupg)\\b|\\.ssh/)"
+  },
+  "_AGENTDOC_INLINE_RE": {
+   "flags": "",
+   "re": "`([^`\\n]+)`"
+  },
+  "_AGENTDOC_LOCAL_SCRIPT_RE": {
+   "flags": "m",
+   "re": "(?:^|[;&|(`]|\\b(?:then|do|sudo|exec|time)\\b)[ \\t]*(?:[A-Za-z_]\\w*=\\S*[ \\t]+)*(?:(?:env[ \\t]+)?(?:bash|sh|zsh|ksh|dash|fish|source|\\.|python[23]?(?:\\.\\d+)?|py|node|nodejs|deno(?:[ \\t]+run)?|bun(?:[ \\t]+run)?|tsx|ts-node|npx(?:[ \\t]+(?:-y|--yes))?[ \\t]+(?:tsx|ts-node)|uv[ \\t]+run|poetry[ \\t]+run|pipenv[ \\t]+run|pwsh|powershell(?:\\.exe)?|ruby|perl|php)(?:[ \\t]+--?[A-Za-z][\\w=-]*(?:[ \\t]+[A-Za-z]\\w*(?![\\w./\\\\-]))?)*[ \\t]+[\"']?(?:\\.[/\\\\])?((?:[\\w.-]+[/\\\\])*[\\w-][\\w.-]*\\.(?:sh|bash|py|js|mjs|cjs|ts|mts|cts|ps1|rb|pl))|[\"']?\\.[/\\\\]((?:[\\w.-]+[/\\\\])*[\\w-][\\w.-]*\\.(?:sh|bash|py|js|mjs|cjs|ts|mts|cts|ps1|rb|pl))|[\"']?((?:[\\w.-]+[/\\\\])*[\\w-][\\w.-]*\\.(?:sh|bash|ps1)))(?![\\w.-])"
+  },
+  "_AGENTDOC_NEGATION_RE": {
+   "flags": "i",
+   "re": "(?:\\b(?:not|never|nor|cannot|(?:do|does|did|must|should|would|will|can|could|wo|ca|need|may|might)n['\u2019]?t)|\\bno\\s+need),?\\s+(?:(?:ever|accidentally|automatically|directly|intentionally|knowingly|publicly|silently|yourself|just|also|even),?\\s+)?(?:to\\s+)?$"
+  },
+  "_AGENTDOC_OWN_FIX": {
+   "value": "This is the project's own file, so it does not fail the gate (a dependency's would). Check that each command it gives your agent is one you mean it to run, from a source you trust."
+  },
+  "_AGENTDOC_OWN_MSG": {
+   "value": "The {kind} file {said} (the project's own: listed, not counted)."
+  },
+  "_AGENTDOC_PASSWORD_RE": {
+   "flags": "i",
+   "re": "\\b(?:password|passcode|passphrase|pass|pwd|pw)\\b\\s*(?:is\\s+|[:=]\\s*)\\S|\\b(?:with|using|use)\\s+(?:the\\s+)?(?:password|passcode|passphrase|pass|pw)\\s+[\"'`]?[^\\s\"'`.,;]|\\bunzip\\b[^\\n]*\\s-P\\b|\\b7z\\b[^\\n]*\\s-p\\S|--password\\b"
+  },
+  "_AGENTDOC_PASTE_RE": {
+   "flags": "i",
+   "re": "\\b(?:pastebin\\.com|paste\\.ee|glot\\.io|ghostbin\\.com|hastebin\\.com|dpaste\\.(?:com|org)|termbin\\.com|0x0\\.st|transfer\\.sh|controlc\\.com|rentry\\.(?:co|org)|ix\\.io|sprunge\\.us|clbin\\.com)\\b"
+  },
+  "_AGENTDOC_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not let the agent use this skill or repository, and report it to wherever it came from. A skill should run only code you can read in the repository, from named sources."
+    },
+    "id": {
+     "value": "SC-AGENT-SKILL"
+    },
+    "msg": {
+     "value": "The {kind} file {said}."
+    },
+    "name": {
+     "value": "Hostile instructions in an agent skill or rules file"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An AI agent reads this file as instructions and does what it says \u2014 runs its commands, fetches and runs what it points to, or sends data out. A dependency that ships one (the clawdhub campaign's SKILL.md) turns the agent into its installer, past a scanner that only reads code. These are the shapes no legitimate skill needs: a command that downloads and runs code, a password-protected archive, a paste host or raw IP as an install source, instructions hidden from a human reader, or an order to send the conversation, the environment or credentials out. A dependency's file counts (CRITICAL for a hostile shape, MAJOR for a weaker indicator); the project's own is listed as INFO, since its instructions are its developers' own."
+    }
+   }
+  },
+  "_AGENTDOC_URL_RE": {
+   "flags": "i",
+   "re": "\\bhttps?://[^\\s'\"`)>\\]]+"
+  },
+  "_AGENTDOC_ZERO_WIDTH_RE": {
+   "flags": "",
+   "re": "[\u200b\u200c\u200d\u2060\ufeff]{3,}"
+  },
+  "_AGENT_APPROVE_RE": {
+   "flags": "",
+   "re": "[\"']?\\b(?:permissionDecision|behavior)[\"']?\\s*[:=]\\s*[\"']allow[\"']|[\"']?\\bdecision[\"']?\\s*[:=]\\s*[\"']approve[\"']"
+  },
+  "_AGENT_APPROVE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Make the hook ask, deny or rewrite a call instead of approving it, or approve only the calls it checks."
+    },
+    "id": {
+     "value": "SC-AGENT-CONFIG"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r} \u2014 {said}."
+    },
+    "name": {
+     "value": "Agent settings widen what it may do"
+    },
+    "ref": {
+     "value": "CWE-269 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A hook that answers the agent's permission check itself (a PreToolUse hook's permissionDecision \"allow\" or the older decision \"approve\", a PermissionRequest hook's behavior \"allow\") lets the agent run what it would have asked about. Committed to a repository, it does so for everyone who opens it with the agent, and a prompt injected into what the agent reads then runs unchecked."
+    }
+   }
+  },
+  "_AGENT_BASE_URL_ENVS": {
+   "set": [
+    "ANTHROPIC_AWS_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL"
+   ]
+  },
+  "_AGENT_BASE_URL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Remove the variable from the project's settings unless it is your organization's gateway, and set a gateway in your own settings instead."
+    },
+    "id": {
+     "value": "SC-AGENT-ENDPOINT"
+    },
+    "msg": {
+     "value": "These {tool} settings send the model's requests, and the credentials with them, to {url!r} ({name}){said}."
+    },
+    "name": {
+     "value": "Agent settings send data to a server"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Claude Code sends each request to the model, and the credential that pays for it, to the base URL its settings give: a project's settings that point it at another host hand that host the conversation, the code the agent reads and the key. An organization's own LLM gateway is set this way; a repository you cloned has no reason to set it."
+    }
+   }
+  },
   "_AGENT_BIN_CMD_RE": {
    "flags": "",
    "re": "(?<![\\w./-])(?:claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q)(?![\\w./-])"
@@ -4297,6 +5078,118 @@
   "_AGENT_BIN_SRC": {
    "value": "(?<=[\"'])(?:claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q)(?=[\"'\\s])"
   },
+  "_AGENT_CONFIG_LISTED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you know the marketplace and the plugins it brings."
+    },
+    "id": {
+     "value": "SC-AGENT-CONFIG"
+    },
+    "msg": {
+     "value": "{said}."
+    },
+    "name": {
+     "value": "Agent settings widen what it may do"
+    },
+    "ref": {
+     "value": "CWE-269 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A plugin marketplace or a plugin that a project's settings add brings code the agent runs: the plugins' hooks, MCP servers and commands. Listed for inventory."
+    }
+   }
+  },
+  "_AGENT_CONFIG_RISK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Remove the setting from the project's files, and grant what you need in your own settings, a command at a time."
+    },
+    "id": {
+     "value": "SC-AGENT-CONFIG"
+    },
+    "msg": {
+     "value": "{said}."
+    },
+    "name": {
+     "value": "Agent settings widen what it may do"
+    },
+    "ref": {
+     "value": "CWE-269 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A project's settings can let the AI agent act without asking: start with its permission prompts off, run any command or reach any host, start every MCP server the project lists. Committed to a repository, they apply to everyone who opens it with the agent, and a prompt injected into what the agent reads then runs unchecked. Recent Claude Code versions ignore bypassPermissions in a project's files and hold its allow rules until the folder is trusted; older versions and other agents may not."
+    }
+   }
+  },
+  "_AGENT_ENDPOINT_LISTED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you added it and that you know who runs the server."
+    },
+    "id": {
+     "value": "SC-AGENT-ENDPOINT"
+    },
+    "msg": {
+     "value": "{what} {url!r}."
+    },
+    "name": {
+     "value": "Agent settings send data to a server"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An AI agent sends what it works on to the servers its settings name: a remote MCP server gets each tool call the agent makes to it, an HTTP hook gets each event's input (the command about to run, the file being written, the prompt). Committed to a repository, the entry sends the agent of everyone who opens it there; a pull request that adds one is how a server is planted. Listed for inventory."
+    }
+   }
+  },
+  "_AGENT_ENDPOINT_RISK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Remove the entry unless you set it up, and give the agent an https address of a server you know."
+    },
+    "id": {
+     "value": "SC-AGENT-ENDPOINT"
+    },
+    "msg": {
+     "value": "{what} {url!r}: {said}."
+    },
+    "name": {
+     "value": "Agent settings send data to a server"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An AI agent sends what it works on to the servers its settings name: a remote MCP server gets each tool call the agent makes to it, an HTTP hook gets each event's input (the command about to run, the file being written, the prompt). Committed to a repository, the entry sends the agent of everyone who opens it there; a pull request that adds one is how a server is planted. A tunnel or a capture service hides who receives the data, a raw IP address names no one, and plain http lets anyone on the way read and change it."
+    }
+   }
+  },
   "_AGENT_FLAG_RE": {
    "flags": "",
    "re": "--(?:dangerously-skip-permissions|yolo|trust-all-tools|dangerously-bypass-approvals-and-sandbox|full-auto|yes-always|allow-all-tools)(?![\\w-])|--(?:approval-mode|permission-mode)[=\\s]+(?:yolo|bypassPermissions)"
@@ -4310,8 +5203,24 @@
   "_AGENT_NAMES": {
    "value": "claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q"
   },
+  "_AGENT_PERMISSION_KEY_RE": {
+   "flags": "",
+   "re": "\\b(?:permissions|defaultMode|bypassPermissions|hasTrustDialogAccepted|enableAllProjectMcpServers|enabledMcpjsonServers|additionalDirectories|skipDangerousModePermissionPrompt|autoApprove|alwaysAllow)\\b"
+  },
+  "_AGENT_PROVIDER_HOST_RE": {
+   "flags": "",
+   "re": "(?:^|\\.)(?:anthropic\\.com|claude\\.ai|api\\.aws|amazonaws\\.com|googleapis\\.com|azure\\.com)$"
+  },
   "_AGENT_SETTINGS_REASON": {
    "value": "writes an AI agent's or editor's auto-run settings"
+  },
+  "_AGENT_TUNNEL_HOST_RE": {
+   "flags": "",
+   "re": "(?:^|\\.)(?:ngrok(?:-free)?\\.(?:app|io|dev)|ngrok\\.com|trycloudflare\\.com|loca\\.lt|localtunnel\\.me|serveo\\.net|serveousercontent\\.com|localhost\\.run|lhr\\.life|lhr\\.rocks|bore\\.pub|pinggy\\.(?:io|link|online)|tunnelmole\\.net|devtunnels\\.ms|zrok\\.io|playit\\.gg|telebit\\.io|pagekite\\.me|webhook\\.site|requestbin\\.(?:com|net|io)|requestb\\.in|pipedream\\.net|interact\\.sh|oast\\.(?:pro|live|site|online|fun|me)|oastify\\.com|burpcollaborator\\.net|beeceptor\\.com|requestcatcher\\.com|hookbin\\.com|postb\\.in|ptsv[23]\\.com|webhook\\.cool|mockbin\\.(?:org|io)|transfer\\.sh|pastebin\\.com)$"
+  },
+  "_AGENT_WIDE_ALLOW_RE": {
+   "flags": "",
+   "re": "\\*|(?:Bash|PowerShell)(?:\\(\\s*\\*?\\s*\\))?|(?:Bash|PowerShell)\\(\\s*(?:sudo\\s+)?(?:curl|wget|nc|ncat|netcat|socat|ssh|scp|sftp|rsync|ftp|telnet|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\\s*:?\\s*\\*\\s*\\)|WebFetch(?:\\(\\s*(?:domain:\\s*)?\\*\\s*\\))?"
   },
   "_ALLOW_GUARD_RE": {
    "map": {
@@ -4401,6 +5310,10 @@
    "flags": "",
    "re": "[A-Za-z0-9_$]+"
   },
+  "_ASSIGN_NAME_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)\\s*(?P<op>\\*\\*|<<|>>>|>>|&&|\\|\\||\\?\\?|[-+*/%&|^])?=(?![=>])\\s*"
+  },
   "_AUG_ASSIGN_RE": {
    "map": {
     "js": {
@@ -4413,8 +5326,215 @@
     }
    }
   },
+  "_AUTORUN_DIR_VARS_RE": {
+   "flags": "",
+   "re": "\\$\\{workspace(?:Folder(?::[^}\\n]{0,200})?|Root)\\}|\\$\\{(?:(?:CLAUDE|GEMINI)_PROJECT_DIR|CLAUDE_PLUGIN_ROOT)\\}|\\$(?:(?:CLAUDE|GEMINI)_PROJECT_DIR|CLAUDE_PLUGIN_ROOT)\\b|%(?:(?:CLAUDE|GEMINI)_PROJECT_DIR|CLAUDE_PLUGIN_ROOT)%"
+  },
+  "_AUTORUN_HOSTILE_FILE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not open the folder in the editor or start the agent in it. Remove the entry and what it runs, find the commit that added them, and rotate the credentials this machine holds if it already ran."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r}, which runs {target}; that file {said}."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. This one runs code that looks hostile."
+    }
+   }
+  },
+  "_AUTORUN_HOSTILE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not open the folder in the editor or start the agent in it. Remove the entry and what it runs, find the commit that added them, and rotate the credentials this machine holds if it already ran."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r} \u2014 a command that {said}."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. This one runs code that looks hostile."
+    }
+   }
+  },
+  "_AUTORUN_LISTED_COMMAND_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you added it, and what it runs."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r}."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. Listed for inventory."
+    }
+   }
+  },
+  "_AUTORUN_LISTED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you added it."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. Listed for inventory."
+    }
+   }
+  },
+  "_AUTORUN_MAX_DEPTH": {
+   "value": 256
+  },
+  "_AUTORUN_MAX_TASKS": {
+   "value": 100
+  },
+  "_AUTORUN_OUTSIDE_RE": {
+   "flags": "",
+   "re": "~|\\$\\{?(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TMPDIR|TEMP|TMP|XDG_[A-Z_]+)\\b\\}?|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|TEMP|TMP)%|/|[A-Za-z]:[\\\\/]"
+  },
+  "_AUTORUN_OUTSIDE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you put that file there and what it does; keep what the settings run in the repository."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r}, which runs {target}, a hidden file outside the repository."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. This command runs a hidden file in the home folder, a temporary folder or another place outside the repository: what runs is not in the repository, the scan cannot read it, and a payload left there earlier runs each time."
+    }
+   }
+  },
+  "_AUTORUN_TOOL_DIRS": {
+   "set": [
+    ".asdf",
+    ".bun",
+    ".cargo",
+    ".deno",
+    ".dotnet",
+    ".local",
+    ".npm-global",
+    ".nvm",
+    ".pyenv",
+    ".rbenv",
+    ".rustup",
+    ".sdkman",
+    ".volta",
+    ".wallaby",
+    ".yarn"
+   ]
+  },
+  "_AUTORUN_UNREADABLE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Fix the file so it can be read, and check every command it names."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "These {tool} settings could not be read as JSON (line {line}: {reason}), but they name commands for {tool} to run: read them by hand."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
+    }
+   }
+  },
   "_AUTORUN_WHY": {
    "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
+  },
+  "_B64_PERIOD_MAX": {
+   "value": 64
+  },
+  "_B64_PLAIN_MAX": {
+   "value": 16384
   },
   "_B64_RULE": {
    "map": {
@@ -4451,6 +5571,190 @@
   "_BIDI_CONTROLS": {
    "value": "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
   },
+  "_BINARY_WHERE": {
+   "map": {
+    "npm": {
+     "value": "an npm package"
+    },
+    "repo": {
+     "value": "the source tree"
+    },
+    "sdist": {
+     "value": "a source distribution"
+    }
+   }
+  },
+  "_BINARY_WHERE_ELSE": {
+   "value": "the package"
+  },
+  "_BIN_DISGUISED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Treat the package or tree that ships it as compromised: find what loads or runs the file, and remove it."
+    },
+    "id": {
+     "value": "SC-BINARY"
+    },
+    "msg": {
+     "value": "{base} is not source code but a program: {desc}."
+    },
+    "name": {
+     "value": "Binary artifact in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A source file is read, reviewed and diffed as text; a program under a source file's name hides from that review and from every rule that reads code. No build ships one: compiled code goes in files named for what they are (.so, .pyd, .node, .exe)."
+    }
+   }
+  },
+  "_BIN_NESTED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Extract and inspect the archive's contents."
+    },
+    "id": {
+     "value": "SC-NESTED-ARCHIVE"
+    },
+    "msg": {
+     "value": "Embedded {kind} archive inside the package."
+    },
+    "name": {
+     "value": "Nested archive in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Nested archives can conceal second-stage payloads from source review (a known supply-chain evasion technique)."
+    }
+   }
+  },
+  "_BIN_OPAQUE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Identify what this file is and why it ships; reject unexplained binary blobs."
+    },
+    "id": {
+     "value": "SC-OPAQUE-BLOB"
+    },
+    "msg": {
+     "value": "Opaque high-entropy file ({size} bytes, entropy {entropy}/8)."
+    },
+    "name": {
+     "value": "High-entropy binary blob"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Encrypted or packed data shipped in a package can be a second-stage payload that is decoded and executed at runtime."
+    }
+   }
+  },
+  "_BIN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Confirm the binary's provenance; build from source instead of trusting a prebuilt blob."
+    },
+    "id": {
+     "value": "SC-BINARY"
+    },
+    "msg": {
+     "value": "Executable/compiled binary in {where}: {desc}."
+    },
+    "name": {
+     "value": "Binary artifact in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Prebuilt binaries can't be reviewed as source, and smuggled binaries are a known compromise vector. Many legitimate packages ship some (Windows launcher stubs, test fixtures), so on its own this is a capability to review, not evidence of malice."
+    }
+   }
+  },
+  "_BIN_TAR_RULE": {
+   "map": {
+    "fix": {
+     "value": "Extract and inspect the archive's contents."
+    },
+    "id": {
+     "value": "SC-NESTED-ARCHIVE"
+    },
+    "msg": {
+     "value": "Embedded tar archive inside the package."
+    },
+    "name": {
+     "value": "Nested archive in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Nested archives can conceal second-stage payloads from source review."
+    }
+   }
+  },
+  "_BIN_WHEEL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Cross-check against the upstream build; prefer building from source in sensitive contexts."
+    },
+    "id": {
+     "value": "SC-BINARY"
+    },
+    "msg": {
+     "value": "Bundled binary: {desc}."
+    },
+    "name": {
+     "value": "Binary artifact in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Wheels legitimately ship compiled extensions. Listed for inventory; verify it matches the project's published, reproducible build."
+    }
+   }
+  },
   "_BRACKET_DELTA": {
    "map": {
     "(": {
@@ -4476,6 +5780,9 @@
   "_BRACKET_RE": {
    "flags": "",
    "re": "[()\\[\\]{}]"
+  },
+  "_BUILD_SCRIPT_WHY": {
+   "value": "cargo compiles and runs a dependency's build script with the user's privileges, before anything is reviewed, whenever a crate that depends on it is built: the Rust twin of an npm install hook and an sdist's setup.py, where proc-macro1 and rustdecimal ran their payloads."
   },
   "_CAPPED_RULE": {
    "map": {
@@ -4617,6 +5924,95 @@
     }
    }
   },
+  "_CERT_OFF_RE": {
+   "flags": "",
+   "re": "\\bverify['\\\"]?\\s*[:=]\\s*False\\b|_create_unverified_context|\\bCERT_NONE\\b|\\bcheck_hostname\\s*=\\s*False\\b|\\brejectUnauthorized['\\\"]?\\s*[:=]\\s*false\\b|\\bNODE_TLS_REJECT_UNAUTHORIZED['\\\"]?\\s*\\]?\\s*[:=]\\s*['\\\"]?0|\\bstrictSSL['\\\"]?\\s*[:=]\\s*false\\b|\\bInsecureSkipVerify\\s*[:=]\\s*true\\b|danger_accept_invalid_certs\\s*\\(\\s*true|danger_accept_invalid_hostnames\\s*\\(\\s*true|\\bGIT_SSL_NO_VERIFY\\b|(?i:\\bhttp\\.(?:[^\\s=]*\\.)?sslverify\\s*=?\\s*false)\\b|\\bstrict-ssl\\s*=?\\s*false\\b|--no-check-certificate\\b|\\bcurl\\b[^\\n`|;&]{0,160}?[\\s'\\\",]--insecure\\b|\\bcurl\\b[^\\n`|;&]{0,160}?[\\s'\\\",]-[A-Za-z]*k\\b"
+  },
+  "_CFG_JWT_IO_PAYLOAD": {
+   "value": "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"
+  },
+  "_CFG_KV_RE": {
+   "flags": "",
+   "re": "(?<![A-Za-z0-9_.\\-])[\\\"']?([A-Za-z0-9_.\\-]{1,128})[\\\"']?[ \\t]*([:=])[ \\t]*(\\\"[^\\\"\\n]*\\\"|'[^'\\n]*'|[^\\s\\\"',;#{}\\[\\]]+)"
+  },
+  "_CFG_LOCAL_HOSTS": {
+   "set": [
+    "0.0.0.0",
+    "127.0.0.1",
+    "host.docker.internal",
+    "localhost"
+   ]
+  },
+  "_CFG_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z][a-z]*[0-9]{0,2}(?:[\\-._/:][A-Za-z][a-z]*[0-9]{0,2})+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"
+  },
+  "_CFG_NETRC_ANONYMOUS": {
+   "set": [
+    "anonymous",
+    "ftp"
+   ]
+  },
+  "_CFG_NETRC_NAMES": {
+   "set": [
+    ".netrc",
+    "_netrc"
+   ]
+  },
+  "_CFG_NETRC_PASSWORD_RE": {
+   "flags": "",
+   "re": "(?<![^ \\t])password[ \\t]+(\"[^\"\\n]*\"|[^\\s\"]+)"
+  },
+  "_CFG_NETRC_TOKEN_RE": {
+   "flags": "",
+   "re": "\"[^\"\\n]*\"|[^\\s\"]+"
+  },
+  "_CFG_NOT_SECRET_KEY_RE": {
+   "flags": "i",
+   "re": "(?:page|continuation|next|cursor|sync|csrf|xsrf|idempotency)[_\\-]?token$"
+  },
+  "_CFG_PEM_BODY_RE": {
+   "flags": "",
+   "re": "[A-Za-z0-9+/]{40,}={0,2}"
+  },
+  "_CFG_PLACEHOLDER_RE": {
+   "flags": "i",
+   "re": "example|sample|dummy|placeholder|change[_\\-.]?(?:me|this|it)|your[_\\-.]|xxx|\\*\\*\\*|\\.\\.\\.|redacted|replace|insert[_\\-.]|enter[_\\-.]|todo|fixme|fake|mock|encoded|secret|passw|p[a@4]ssw[o0]rd|string|123456|654321|abcdef|a1b2c3|<|>|\\$\\{|\\{\\{|\\}\\}|%\\(|\\$\\("
+  },
+  "_CFG_SECRET_KEY_RE": {
+   "flags": "i",
+   "re": "(?:password|passwd|passphrase|secret|token|(?:api|access|account|app|client|encryption|master|private|restricted|secret|signing)[_\\-]?key)$|(?:^|[_.\\-])(?:pass|pwd|pat|auth)$"
+  },
+  "_CFG_SECRET_KV_HINT_RE": {
+   "flags": "",
+   "re": "(?:password|passwd|passphrase|secret|token|key|pass|pwd|pat|auth)[\\\"']?[ \\t]*[:=]"
+  },
+  "_CFG_STRING_PREFIX_RE": {
+   "flags": "",
+   "re": "[A-Za-z][A-Za-z0-9]{0,2}#*[\\\"']"
+  },
+  "_CFG_URL_CRED_RE": {
+   "flags": "",
+   "re": "(?<![A-Za-z0-9+.\\-])[A-Za-z][A-Za-z0-9+.\\-]{0,31}://([^\\s/:@'\\\"]{1,256}):([^\\s/@'\\\"]{1,512})@([^\\s/:?#'\\\"]{1,256})"
+  },
+  "_CFG_URL_START_RE": {
+   "flags": "",
+   "re": "[A-Za-z][A-Za-z0-9+.\\-]*://"
+  },
+  "_CFG_WEBHOOK_RE": {
+   "flags": "",
+   "re": "https://hooks\\.slack\\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{20,32}|https://(?:ptb\\.|canary\\.)?discord(?:app)?\\.com/api/webhooks/[0-9]{5,20}/[A-Za-z0-9_\\-]{20,100}"
+  },
+  "_CGO_EXTS": {
+   "list": [
+    {
+     "value": ".c"
+    },
+    {
+     "value": ".h"
+    }
+   ]
+  },
   "_CHARCODE_CALL_TAIL_RE": {
    "flags": "",
    "re": "\\s*(?:\\.\\s*(?:apply|call)\\s*)?\\("
@@ -4661,6 +6057,156 @@
    "flags": "",
    "re": "['\\\"`](?:node:)?child_process['\\\"`]"
   },
+  "_CMD_RUNNERS": {
+   "set": [
+    "arch",
+    "bunx",
+    "caffeinate",
+    "chroot",
+    "chrt",
+    "doas",
+    "firejail",
+    "flock",
+    "ionice",
+    "ltrace",
+    "mshta",
+    "npx",
+    "nsenter",
+    "parallel",
+    "pkexec",
+    "pnpx",
+    "prlimit",
+    "regsvr32",
+    "runas",
+    "rundll32",
+    "runuser",
+    "sandbox-exec",
+    "setsid",
+    "stdbuf",
+    "strace",
+    "su",
+    "systemd-run",
+    "taskset",
+    "timeout",
+    "unbuffer",
+    "unshare",
+    "watch",
+    "wsl",
+    "xargs"
+   ]
+  },
+  "_COLLECT_SKIPPED_CONFIG_RULE": {
+   "map": {
+    "fix": {
+     "value": "Keep credentials out of large data files, and real configuration in files of its own."
+    },
+    "id": {
+     "value": "Q-SKIPPED-CONFIG"
+    },
+    "msg": {
+     "value": "{path} was not checked for credentials: {detail}."
+    },
+    "name": {
+     "value": "Config file not checked (too large)"
+    },
+    "ref": {
+     "value": "Scan coverage"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Config and data files are read only to look for credentials, and one this large is data rather than configuration: a credential in it would not be reported."
+    }
+   }
+  },
+  "_COLLECT_SKIPPED_TREE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Only exclude generated trees you control; remove the exclusion otherwise so the tree is scanned."
+    },
+    "id": {
+     "value": "Q-SKIPPED-TREE"
+    },
+    "msg": {
+     "value": "Directory {path} was skipped ({files} files, {bytes} bytes unread)."
+    },
+    "name": {
+     "value": "Skipped directory (not scanned)"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Skipped trees are invisible to every rule \u2014 the classic hiding places (dist, build, .git) hold published code and committed-then-deleted secrets. Generated trees you own are fine to skip on purpose; unexpected entries here are blind spots."
+    }
+   }
+  },
+  "_COLLECT_SYMLINK_RULE": {
+   "map": {
+    "fix": {
+     "value": "If the target belongs to the project, scan it directly."
+    },
+    "id": {
+     "value": "Q-SYMLINK"
+    },
+    "msg": {
+     "value": "Symbolic link {path} -> {target} was not followed; its target was not scanned."
+    },
+    "name": {
+     "value": "Symbolic link (not followed)"
+    },
+    "ref": {
+     "value": "CWE-59 \u00b7 Scan coverage"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Following links would let a repository pull files from outside the scanned tree (host credentials, /dev/urandom) into the scan and its reports, or loop forever. The link target is not part of the tree under review."
+    }
+   }
+  },
+  "_COLLECT_UNREADABLE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Fix the permissions (or remove the special file) and re-scan."
+    },
+    "id": {
+     "value": "Q-UNREADABLE"
+    },
+    "msg": {
+     "value": "{path} could not be read ({reason}); it was not scanned."
+    },
+    "name": {
+     "value": "Unreadable entry (not scanned)"
+    },
+    "ref": {
+     "value": "Scan coverage"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "An entry the scanner cannot read is invisible to every rule. Special files (named pipes, sockets, devices) are never opened: reading one can hang or exhaust the scan."
+    }
+   }
+  },
   "_COMMENT_LINE_RULES": {
    "set": [
     "Q-TODO",
@@ -4676,9 +6222,71 @@
     },
     "py": {
      "flags": "",
-     "re": "^\\s*([A-Za-z_]\\w*)\\s*(?:\\[[^\\[\\]\\n]*\\]\\s*(?:[-+*/%&|^@]|//|\\*\\*|<<|>>)?=(?!=)|\\.\\s*(?:append|extend|insert|add)\\s*\\()\\s*(.+)"
+     "re": "^\\s*([A-Za-z_]\\w*)\\s*(?:\\[[^\\[\\]\\n]*\\]\\s*(?:[-+*/%&|^@]|//|\\*\\*|<<|>>)?=(?!=)|\\.\\s*(?:append|extend|insert|add|set)\\s*\\()\\s*(.+)"
     }
    }
+  },
+  "_COOKIE_CALL_RE": {
+   "flags": "",
+   "re": "\\.\\s*set_cookie\\s*\\("
+  },
+  "_COOKIE_HOW": {
+   "map": {
+    "false": {
+     "value": "with secure=False"
+    },
+    "missing": {
+     "value": "without secure=True"
+    }
+   }
+  },
+  "_COOKIE_OFF": {
+   "list": [
+    {
+     "value": "False"
+    },
+    {
+     "value": "0"
+    },
+    {
+     "value": "None"
+    }
+   ]
+  },
+  "_COOKIE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Pass secure=True (and httponly=True for a cookie no script reads)."
+    },
+    "id": {
+     "value": "S-COOKIE"
+    },
+    "msg": {
+     "value": "Cookie set {how}: the browser also sends it over plain HTTP."
+    },
+    "name": {
+     "value": "Cookie without the Secure flag"
+    },
+    "ref": {
+     "value": "CWE-614 \u00b7 OWASP A05"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A cookie without the Secure flag goes out with every http:// request to the site, where anyone on the network path can read it (a session or remember-me value among them)."
+    }
+   }
+  },
+  "_COOKIE_SECURE_ARG": {
+   "value": 6
+  },
+  "_COOKIE_SECURE_KW_RE": {
+   "flags": "",
+   "re": "secure\\s*=(?!=)(.*)"
   },
   "_CP_ALIAS_RE": {
    "flags": "",
@@ -4690,7 +6298,7 @@
   },
   "_CRED_STORE_RE": {
    "flags": "i",
-   "re": "\\.ssh\\b|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|Local Storage"
+   "re": "\\.ssh\\b|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|Local Storage|\\.aws(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:credentials|config)\\b|\\.aws(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)sso(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)cache\\b|\\.kube(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)config\\b|\\.docker(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)config\\.json\\b|\\bgcloud(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:credentials\\.db|access_tokens\\.db|legacy_credentials)\\b|\\bapplication_default_credentials\\.json\\b|\\.azure(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:accessTokens\\.json|msal_token_cache)|\\.npmrc\\b|\\.pypirc\\b|[._]netrc\\b|\\.cargo(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)credentials\\b|\\bgh(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)hosts\\.yml\\b|\\.vault-token\\b|\\.terraform\\.d(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)credentials\\b"
   },
   "_CRED_SWEEP_MAX": {
    "value": 200
@@ -4890,12 +6498,80 @@
    "flags": "",
    "re": "^\\s*(?:async\\s+def|def|class)\\b"
   },
+  "_DEPS_AGENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not install or run this package; read what it tells the agent to do. Report it to the registry."
+    },
+    "id": {
+     "value": "SC-AGENT-HIJACK"
+    },
+    "msg": {
+     "value": "Dependency launches the {agent} AI agent with {flag} \u2014 running your coding agent with its confirmations turned off."
+    },
+    "name": {
+     "value": "Dependency drives your AI agent"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A dependency that runs your AI coding agent hands the attacker your agent's access to your machine and accounts, and a flag like --dangerously-skip-permissions or --yolo runs it with every confirmation turned off: the s1ngularity / Nx attack spawned the agent from a postinstall hook to search the disk for secrets, wallets and SSH keys and write them out (the first weaponized-AI-agent malware). No package needs to launch your agent."
+    }
+   }
+  },
+  "_DEPS_HOOK_COMMAND_MSG": {
+   "value": "Install hook command {reasons}."
+  },
+  "_DEPS_HOOK_NOT_FOLLOWED": {
+   "value": "its install hook is more than Lazaret follows ({commands} commands, {scripts} scripts, {chars} characters, {path}-character paths)"
+  },
+  "_DEPS_HOOK_RUNS_MSG": {
+   "value": "Install hook runs {target}, which {reasons}."
+  },
+  "_DEPS_HOOK_STARTS_MSG": {
+   "value": "Install hook runs {target}, which starts {shown}, which {reasons}."
+  },
+  "_DEPS_IMPORT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Read the file: what does it collect, and where does it send it?"
+    },
+    "id": {
+     "value": "SC-IMPORT-RISK"
+    },
+    "msg": {
+     "value": "Dependency code {reasons}."
+    },
+    "name": {
+     "value": "Risky import-time code"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An installed package's code runs with the application's privileges when it is loaded or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an import-time stealer; SDKs read the few variables they need. A weaker indicator than the same code in an install script: the file may have a reason."
+    }
+   }
+  },
   "_DEPS_LOCAL_DEP_RE": {
    "flags": "m",
    "re": "(?:\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*|\\bfrom\\s+|^\\s*import\\s+|\\bexport\\s+[^'\"\\n;]*?\\bfrom\\s+)(['\"])(\\.{1,2}/[^'\"\\n]+)\\1"
   },
-  "_DEPS_REACH_MAX": {
-   "value": 5000
+  "_DEPS_OBFUSCATED": {
+   "value": "is obfuscated"
   },
   "_DEPS_WEB_DIRS": {
    "set": [
@@ -4910,6 +6586,13 @@
   },
   "_DEP_IMPORT_RISK_WHY": {
    "value": "An installed package's code runs with the application's privileges when it is loaded or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an import-time stealer; SDKs read the few variables they need. A weaker indicator than the same code in an install script: the file may have a reason."
+  },
+  "_DEP_URL_RE": {
+   "flags": "",
+   "re": "\\s*(?P<scheme>[A-Za-z][A-Za-z0-9+.\\-]*)://(?:[^@/?#\\s]*@)?(?P<host>\\[[^\\]/?#\\s]*\\]|[^:/?#\\s]*)"
+  },
+  "_DEP_URL_WHY": {
+   "value": "npm installs a dependency from wherever its spec says. Over plain http it is fetched with no integrity check, so anyone on the network path can replace it; at a raw IP address it comes from no registry and no domain anyone can vet. Packages from a registry name versions, and git dependencies use https or ssh."
   },
   "_DJANGO_IMPORT_RE": {
    "flags": "",
@@ -9612,9 +11295,15 @@
    "flags": "",
    "re": "&\\d$"
   },
+  "_DV_ARRAY_MAX_CHARS": {
+   "value": 400
+  },
+  "_DV_ARRAY_MAX_ITEMS": {
+   "value": 64
+  },
   "_DV_ARRAY_RE": {
    "flags": "",
-   "re": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,){0,63}\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,?\\s*)\\]"
+   "re": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")\\s*,)*\\s*(?:'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")\\s*,?\\s*)\\]"
   },
   "_DV_ARRAY_SRC": {
    "value": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,){0,63}\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,?\\s*)\\]"
@@ -9664,8 +11353,11 @@
   "_DV_CC_ARG_STR_SRC": {
    "value": "'(?P<a>[ -&(-\\[\\]-~]{0,400})'|\"(?P<b>[ !#-\\[\\]-~]{0,400})\\\""
   },
+  "_DV_CC_ARRAY_MAX_INTS": {
+   "value": 4096
+  },
   "_DV_CC_ARRAY_TAIL": {
-   "value": "[ \\t]*=[ \\t]*[\\[(]\\s*(?P<items>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:\\s*,\\s*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,4095}\\s*,?)\\s*[\\])]"
+   "value": "[ \\t]*=[ \\t]*[\\[(]\\s*(?P<items>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:\\s*,\\s*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*\\s*,?)\\s*[\\])]"
   },
   "_DV_CC_BINARY": {
    "map": {
@@ -9704,12 +11396,18 @@
   "_DV_CC_BODY": {
    "value": 600
   },
+  "_DV_CC_CALL_MAX_CHARS": {
+   "value": 400
+  },
+  "_DV_CC_CALL_MAX_ITEMS": {
+   "value": 20000
+  },
   "_DV_CC_CALL_TAIL": {
-   "value": "[ \\t]*\\((?P<args>(?:[^()'\"\\n]|'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\"){0,20000})\\)"
+   "value": "[ \\t]*\\((?P<args>(?:[^()'\"\\n]|'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")*)\\)"
   },
   "_DV_CC_FOR_RE": {
    "flags": "",
-   "re": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
+   "re": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*(?P<i_again>[A-Za-z_$][\\w$]*)[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
   },
   "_DV_CC_FOR_SRC": {
    "value": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
@@ -9734,9 +11432,12 @@
    "flags": "",
    "re": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
   },
+  "_DV_CC_LITERAL_MAX_INTS": {
+   "value": 400
+  },
   "_DV_CC_LITERAL_RE": {
    "flags": "",
-   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
+   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+(?P<v_again>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
   },
   "_DV_CC_LITERAL_SRC": {
    "value": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
@@ -9947,6 +11648,90 @@
   "_DV_XOR_MIN_CALLS": {
    "value": 5
   },
+  "_ENC_ESCAPE_CODEC_RULE": {
+   "map": {
+    "fix": {
+     "value": "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it)."
+    },
+    "id": {
+     "value": "SC-ESCAPE-CODEC"
+    },
+    "msg": {
+     "value": "Python source declares {encoding}; code can hide in escape sequences."
+    },
+    "name": {
+     "value": "Escape-sequence source encoding"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Python decodes this file's escape sequences before it reads the code: '\\u000a' is a newline and '\\u0065' is 'e', so text that every editor, diff and reviewer shows as a comment or a string escape becomes executable code. No legitimate project needs this source encoding."
+    }
+   }
+  },
+  "_ENC_RULE": {
+   "map": {
+    "fix": {
+     "value": "Re-save the file as UTF-8 so tooling reads it as written."
+    },
+    "id": {
+     "value": "Q-ENCODING"
+    },
+    "msg": {
+     "value": "Source file is not UTF-8 (detected {encoding}); decoded explicitly."
+    },
+    "name": {
+     "value": "Non-UTF-8 source encoding"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every pattern-based finding \u2014 a UTF-16 eval() scans clean."
+    }
+   }
+  },
+  "_ENC_UTF7_RULE": {
+   "map": {
+    "fix": {
+     "value": "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it)."
+    },
+    "id": {
+     "value": "SC-UTF7"
+    },
+    "msg": {
+     "value": "Python source declares UTF-7; code can hide in comments."
+    },
+    "name": {
+     "value": "UTF-7 source encoding"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff and reviewer shows as a comment becomes executable code when Python reads the file. No legitimate project needs a UTF-7 source file."
+    }
+   }
+  },
   "_ENTROPY_RULE": {
    "map": {
     "fix": {
@@ -10020,9 +11805,101 @@
    "flags": "",
    "re": "^\\s*(?:from\\s+(?:flask|quart)\\b|import\\s+(?:flask|quart)\\b)"
   },
+  "_FN_CX_RULE": {
+   "map": {
+    "fix": {
+     "value": "Split branches into smaller functions; use early returns or lookup tables."
+    },
+    "id": {
+     "value": "Q-FN-CX"
+    },
+    "msg": {
+     "value": "Function \"{name}\" has complexity ~{cx} (limit {limit})."
+    },
+    "name": {
+     "value": "High cyclomatic complexity"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Highly branched code is hard to reason about and to cover with tests."
+    }
+   }
+  },
   "_FN_DEF_BEFORE_RE": {
    "flags": "",
    "re": "(?:^|[^\\w$])(?:function\\s*\\*?|def)\\s*$"
+  },
+  "_FN_JS_CX_RE": {
+   "flags": "",
+   "re": "\\b(if|for|while|case|catch)\\b|&&|\\|\\||\\?[^.:]"
+  },
+  "_FN_JS_HEADER_RE": {
+   "flags": "",
+   "re": "(?:function\\s+(\\w+)|(?:const|let|var)\\s+(\\w+)\\s*=\\s*(?:async\\s*)?(?:function|\\([^()]*\\)\\s*=>|\\w+\\s*=>)|(?<!\\w)(\\w+)\\s*\\([^()]*\\)\\s*\\{)"
+  },
+  "_FN_JS_WINDOW_LINES": {
+   "value": 800
+  },
+  "_FN_LONG_RULE": {
+   "map": {
+    "fix": {
+     "value": "Extract cohesive blocks into helper functions."
+    },
+    "id": {
+     "value": "Q-FN-LONG"
+    },
+    "msg": {
+     "value": "Function \"{name}\" is {len} lines long (limit {limit})."
+    },
+    "name": {
+     "value": "Function too long"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Long functions do too much and resist testing and reuse."
+    }
+   }
+  },
+  "_FN_PY_CX_RE": {
+   "flags": "",
+   "re": "\\b(if|elif|for|while|and|or|except|case)\\b"
+  },
+  "_FN_PY_DEF_RE": {
+   "flags": "",
+   "re": "^(\\s*)(?:async\\s+)?def\\s+(\\w+)"
+  },
+  "_FONT_MAGIC": {
+   "list": [
+    {
+     "value": "\u0000\u0001\u0000\u0000"
+    },
+    {
+     "value": "true"
+    },
+    {
+     "value": "typ1"
+    }
+   ]
+  },
+  "_FOR_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_]\\w*"
   },
   "_FULL_SAN": {
    "map": {
@@ -10051,6 +11928,290 @@
   },
   "_GLOBAL_OBJECT": {
    "value": "(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?"
+  },
+  "_GL_ARG_RE": {
+   "flags": "",
+   "re": "\\s+(\\\"(?:[^\\\"\\\\]|\\\\.)*\\\"|'[^']*'|[^\\s;&|\\\"']+)"
+  },
+  "_GL_COMMAND_VAR_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*(\\$\\{?(?:CI_MERGE_REQUEST_(?:TITLE|DESCRIPTION|SOURCE_BRANCH_NAME|LABELS)|CI_COMMIT_(?:MESSAGE|TITLE|DESCRIPTION|REF_NAME|BRANCH|TAG_MESSAGE)|CI_EXTERNAL_PULL_REQUEST_SOURCE_BRANCH_NAME)\\b\\}?)"
+  },
+  "_GL_EVAL_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*eval\\b"
+  },
+  "_GL_EXACT_RE": {
+   "flags": "",
+   "re": "\\Av?\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.+-]*)?\\Z"
+  },
+  "_GL_GLOBAL_KEYS": {
+   "list": [
+    {
+     "value": "image"
+    },
+    {
+     "value": "services"
+    },
+    {
+     "value": "before_script"
+    },
+    {
+     "value": "after_script"
+    }
+   ]
+  },
+  "_GL_IMAGE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Pin it to a digest and keep the tag next to it for readers (`image: python:3.12@sha256:<digest>`); let Renovate propose the updates."
+    },
+    "id": {
+     "value": "SC-GITLAB-IMAGE"
+    },
+    "msg": {
+     "value": "{who} {image}, which is not pinned to a digest: whoever controls that tag can change what runs in your pipeline."
+    },
+    "name": {
+     "value": "Pipeline runs an image not pinned to a digest"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A tag names whatever image its owner pushed last, and `latest` or any tag a maintainer can push again lets them, or an attacker with their account, change the image your jobs run in, with the job's variables and token. A digest (`@sha256:\u2026`) names one image."
+    }
+   }
+  },
+  "_GL_INCLUDE_COMPONENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Copy the file into the repository, or include it from a project at a full commit SHA (`ref: <sha>`) or a component at one (`component: gitlab.com/group/project/name@<sha>`), where a change is a commit you can review; let Renovate propose the updates."
+    },
+    "id": {
+     "value": "SC-GITLAB-INCLUDE"
+    },
+    "msg": {
+     "value": "The pipeline uses the component {component} at {at}, not a full commit SHA: whoever publishes to it changes what runs in your pipeline."
+    },
+    "name": {
+     "value": "Pipeline uses a component that is not pinned to a commit"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An included file becomes part of the pipeline: its jobs run with the project's variables, its secrets and its runners. A file from a URL can't be pinned to a commit or a hash, so it can change between two pipelines with no change in the repository (a new file at that address, a domain that expired and was bought, a man in the middle on plain HTTP). A branch moves with every push to it, and a tag can be moved too."
+    }
+   }
+  },
+  "_GL_INCLUDE_PROJECT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Copy the file into the repository, or include it from a project at a full commit SHA (`ref: <sha>`) or a component at one (`component: gitlab.com/group/project/name@<sha>`), where a change is a commit you can review; let Renovate propose the updates."
+    },
+    "id": {
+     "value": "SC-GITLAB-INCLUDE"
+    },
+    "msg": {
+     "value": "The pipeline includes a file from {project} at {at}, not a full commit SHA: whoever can push to that ref changes what runs in your pipeline."
+    },
+    "name": {
+     "value": "Pipeline includes a project's file that is not pinned to a commit"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An included file becomes part of the pipeline: its jobs run with the project's variables, its secrets and its runners. A file from a URL can't be pinned to a commit or a hash, so it can change between two pipelines with no change in the repository (a new file at that address, a domain that expired and was bought, a man in the middle on plain HTTP). A branch moves with every push to it, and a tag can be moved too."
+    }
+   }
+  },
+  "_GL_INCLUDE_REMOTE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Copy the file into the repository, or include it from a project at a full commit SHA (`ref: <sha>`) or a component at one (`component: gitlab.com/group/project/name@<sha>`), where a change is a commit you can review; let Renovate propose the updates."
+    },
+    "id": {
+     "value": "SC-GITLAB-INCLUDE"
+    },
+    "msg": {
+     "value": "The pipeline includes {url}: GitLab fetches it every time a pipeline runs{how} whoever controls that address decides what the pipeline does."
+    },
+    "name": {
+     "value": "Pipeline includes a file from a URL"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An included file becomes part of the pipeline: its jobs run with the project's variables, its secrets and its runners. A file from a URL can't be pinned to a commit or a hash, so it can change between two pipelines with no change in the repository (a new file at that address, a domain that expired and was bought, a man in the middle on plain HTTP). A branch moves with every push to it, and a tag can be moved too."
+    }
+   }
+  },
+  "_GL_MR_TEXT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Don't pass these through `eval` or `sh -c`. As an argument of a command (`\"$CI_COMMIT_TITLE\"`) the text is data; inside a script that you run, read it from the environment, and check it against a short pattern first."
+    },
+    "id": {
+     "value": "SC-GITLAB-MR-TEXT"
+    },
+    "msg": {
+     "value": "The job \"{job}\" puts {variable} in {how}: it is text of a merge request, a commit or a branch, which anyone who can open one writes, and the shell reads it as commands."
+    },
+    "name": {
+     "value": "Script runs text anyone can write as code"
+    },
+    "ref": {
+     "value": "CWE-94 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A variable holds the text as it is, but `eval` and `sh -c` read their argument again as shell code. A merge request's title and description, a commit message and a branch name can hold `$(\u2026)` and backticks, and whoever can open a merge request or push a branch writes them: they can run commands in the job, with its variables and token."
+    }
+   }
+  },
+  "_GL_MR_VAR_RE": {
+   "flags": "",
+   "re": "\\$\\{?(?:CI_MERGE_REQUEST_(?:TITLE|DESCRIPTION|SOURCE_BRANCH_NAME|LABELS)|CI_COMMIT_(?:MESSAGE|TITLE|DESCRIPTION|REF_NAME|BRANCH|TAG_MESSAGE)|CI_EXTERNAL_PULL_REQUEST_SOURCE_BRANCH_NAME)\\b\\}?"
+  },
+  "_GL_NOT_JOBS": {
+   "list": [
+    {
+     "value": "variables"
+    },
+    {
+     "value": "stages"
+    },
+    {
+     "value": "include"
+    },
+    {
+     "value": "workflow"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "spec"
+    },
+    {
+     "value": "inputs"
+    }
+   ]
+  },
+  "_GL_PIPE_SHELL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Save the script to a file, check its SHA-256 against a value kept in the repository, then run it; or install the tool from a package manager at a version, with its hash."
+    },
+    "id": {
+     "value": "SC-GITLAB-PIPE-SHELL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" fetches a script and runs it as it arrives (`{command}`): it runs whatever that address serves at that moment."
+    },
+    "name": {
+     "value": "Pipeline runs a script it downloads without reading it"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A script piped into a shell is not read before it runs: whoever controls the host, or anyone on the path when the address is not HTTPS, decides what runs, with the job's token and secrets. The Codecov Bash Uploader, piped into a shell by thousands of pipelines, was changed for two months in 2021 to send each job's environment to a server of the attacker's."
+    }
+   }
+  },
+  "_GL_SCRIPT_KEYS": {
+   "list": [
+    {
+     "value": "before_script"
+    },
+    {
+     "value": "script"
+    },
+    {
+     "value": "after_script"
+    }
+   ]
+  },
+  "_GL_SHELL_C_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*(?:[\\w./-]*/)?(?:ba|z|da|k|a|c)?sh(?:\\s+-[A-Za-z]+)*\\s+-[A-Za-z]*c(?![A-Za-z])"
+  },
+  "_GL_TOKEN_INSTALL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Install and build in a job without the credential, pass the result on as an artifact, and publish from a separate job that only downloads it and installs nothing."
+    },
+    "id": {
+     "value": "SC-GITLAB-TOKEN-INSTALL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" holds a publishing credential ({grant}) and runs `{command}`: an install script or build hook of a dependency runs with it."
+    },
+    "name": {
+     "value": "Job that installs dependencies holds a publishing credential"
+    },
+    "ref": {
+     "value": "CWE-250 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Dependencies run code while they install and build, with the job's variables. An OIDC token (`id_tokens`), a registry's token and the secrets a job fetches are what a registry, a cloud account or a signing service takes as proof of identity, so code that can read one can publish or deploy as the pipeline."
+    }
+   }
+  },
+  "_GL_TOKEN_VAR_RE": {
+   "flags": "",
+   "re": "\\$\\{?(?:NPM_TOKEN|NODE_AUTH_TOKEN|PYPI_[A-Z_]{0,30}TOKEN|TWINE_PASSWORD|CARGO_REGISTRY_TOKEN|GEM_HOST_API_KEY|RUBYGEMS_API_KEY|CI_JOB_JWT(?:_V2)?)\\b\\}?"
+  },
+  "_GO_GENERATE_WHY": {
+   "value": "A //go:generate line names a command for go generate to run. Nothing runs it when the module is built or imported; it runs when someone runs go generate in the module's folders, which is a developer's step, so it is listed rather than judged."
+  },
+  "_GO_START_WHY": {
+   "value": "Go runs nothing when a module is downloaded, but a package's init functions and the initializers of its package-level variables run when any program that imports the package starts, and so does a cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - \u2026 | /bin/bash` from init). Collecting credentials or the whole environment next to a network call is the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library needs: code fetched and run, a reverse shell, a beacon to a data-capture service."
   },
   "_GUARD_BLOCK_LINES": {
    "value": 12
@@ -10145,6 +12306,50 @@
     "DEPTH",
     "module_root_dir"
    ]
+  },
+  "_HELPER_CALLS": {
+   "value": 32
+  },
+  "_HELPER_CLASS_RE": {
+   "flags": "",
+   "re": "^\\s*class\\s+([A-Za-z_]\\w*)\\s*[(:]"
+  },
+  "_HELPER_DECORATOR_RE": {
+   "flags": "",
+   "re": "^\\s*@\\s*([A-Za-z_][\\w.]*)"
+  },
+  "_HELPER_DEF_RE": {
+   "flags": "",
+   "re": "^\\s*(?:async\\s+)?def\\s+([A-Za-z_]\\w*)\\s*\\("
+  },
+  "_HELPER_DEPTH": {
+   "value": 6
+  },
+  "_HELPER_FROM_RE": {
+   "flags": "",
+   "re": "^\\s*from\\s+(\\.*)\\s*([A-Za-z_][\\w.]*)?\\s+import\\s+(.+)"
+  },
+  "_HELPER_HOPS": {
+   "value": 4
+  },
+  "_HELPER_IMPORT_RE": {
+   "flags": "",
+   "re": "^\\s*import\\s+(.+)"
+  },
+  "_HELPER_LINES_BASE": {
+   "value": 2000
+  },
+  "_HELPER_LINES_PER_LINE": {
+   "value": 4
+  },
+  "_HELPER_NAMES_MAX": {
+   "value": 4096
+  },
+  "_HELPER_PROJECT_LINES": {
+   "value": 2000000
+  },
+  "_HELPER_SAME_NAME": {
+   "value": 8
   },
   "_HEXSTR_DANGER_WHY": {
    "value": "Escaping ordinary printable characters serves no purpose except hiding them from review and search; this text names code execution, a download, or a URL."
@@ -10268,6 +12473,14 @@
    "flags": "",
    "re": "&&|\\|\\||[;|&()]|[^\\s;|&()]+"
   },
+  "_HOOK_INERT": {
+   "set": [
+    ":",
+    "echo",
+    "exit",
+    "true"
+   ]
+  },
   "_HOOK_REDIRECTS": {
    "set": [
     "&>",
@@ -10320,6 +12533,10 @@
   "_HOST_INFO_RE": {
    "flags": "",
    "re": "\\b(?:socket\\.gethostname|socket\\.getfqdn|platform\\.node|getpass\\.getuser|os\\.getlogin|pwd\\.getpwuid|os\\.hostname|os\\.userInfo)\\s*\\(|\\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\\s*\\(\\s*\\[?\\s*[\"'](?:whoami|hostname|id|uname\\s+(?:-[A-Za-z]*[an]|--(?:all|nodename))|ifconfig|ipconfig|systeminfo)\\b|(?:\\$\\(|`)\\s*(?:whoami|hostname|id|uname\\s+(?:-[A-Za-z]*[an]|--(?:all|nodename))|ifconfig|ip\\s+a|pwd|ls|cat\\s+/etc/passwd|ps)\\b|\\bos\\.(?:hostname|userInfo)\\s*[,)]|\\brequire\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)\\s*\\.\\s*(?:hostname|userInfo)\\b|\\b(?:const|let|var|import)\\s*\\{[^{}\\n]{0,200}\\b(?:hostname|userInfo)\\b[^{}\\n]{0,200}\\}\\s*(?:=\\s*require\\(\\s*|from\\s*)[\"'](?:node:)?os[\"']|\\bfrom\\s+(?:socket|getpass)\\s+import\\s+[^\\n]{0,200}\\b(?:gethostname|getfqdn|getuser)\\b"
+  },
+  "_HOST_TEST_RE": {
+   "flags": "",
+   "re": "(?:(?:[A-Za-z_]\\w*\\s*\\.\\s*)*(?:urlparse|urlsplit)\\s*\\(\\s*([A-Za-z_]\\w*)\\s*(?:,[^()\\n]*)?\\)\\s*\\.\\s*(?:netloc|hostname)|([A-Za-z_]\\w*)\\s*\\.\\s*(?:netloc|hostname)|([A-Za-z_]\\w*))(?:\\s*\\.\\s*lower\\s*\\(\\s*\\))?\\s+(not\\s+)?in\\s+([A-Za-z_][\\w.]*(?:\\s*\\(\\s*\\))?|\\[[^\\[\\]\\n]*\\]|\\{[^{}\\n]*\\}|\\([^()\\n]*\\))"
   },
   "_HTML_RESPONSE_CLASS_RE": {
    "flags": "",
@@ -10409,12 +12626,19 @@
     "\u200d"
    ]
   },
+  "_IP_LABEL_RE": {
+   "flags": "",
+   "re": "[0-9]+|0[xX][0-9a-fA-F]*"
+  },
   "_IP_LITERAL_MAX": {
    "value": 100
   },
   "_IP_LITERAL_RE": {
    "flags": "",
    "re": "[\"'](?!(?:127|0|255)\\.)((?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d))[\"']"
+  },
+  "_JC_TECHNIQUE_REASON": {
+   "value": "hides its strings in one long string it decodes as it runs (JS-Confuser's string concealing)"
   },
   "_JSON_COLON_RE": {
    "flags": "",
@@ -10607,17 +12831,41 @@
    "flags": "",
    "re": "[A-Za-z0-9_\\-]*"
   },
+  "_KEYED_GET_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_]\\w*)\\s*\\.\\s*get\\s*\\(\\s*((?:([\"'])[^\"'\\\\\\n]*\\3\\s*,\\s*)*([\"'])[^\"'\\\\\\n]*\\4)\\s*,?\\s*\\)"
+  },
   "_KEYED_READ_RE": {
    "flags": "",
    "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\[\\s*([\"'])([^\"'\\\\\\n]*)\\2\\s*\\]"
+  },
+  "_KEYED_SET_RE": {
+   "flags": "",
+   "re": "^\\s*([A-Za-z_]\\w*)\\s*\\.\\s*set\\s*\\("
   },
   "_KEYED_WRITE_RE": {
    "flags": "",
    "re": "^\\s*([A-Za-z_$][\\w$]*)\\s*\\[\\s*([\"'])([^\"'\\\\\\n]*)\\2\\s*\\]\\s*=(?![=>])"
   },
+  "_KEY_LITERAL_RE": {
+   "flags": "",
+   "re": "([\"'])([^\"'\\\\\\n]*)\\1"
+  },
+  "_KWARG_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_]\\w*\\s*=(?!=)"
+  },
   "_KWARG_RE": {
    "flags": "",
    "re": "\\s*(?!(?:url|uri|file|filename|path|path_or_file|args|cmd|command|src|dst|source|destination)\\s*=)[A-Za-z_]\\w*\\s*=(?!=)"
+  },
+  "_LABEL_FILE_READ_RE": {
+   "flags": "",
+   "re": "(?<![\\w$])(?:open|openSync|readFile(?:Sync)?|createReadStream|read_text|read_bytes|readlines|readline|readinto|readall|read|fs|pathlib|io|builtins|__builtins__|__import__|getattr|exec|eval|Function)(?![\\w$])"
+  },
+  "_LABEL_SELF_READ_RE": {
+   "flags": "",
+   "re": "(?<![\\w$])(?:__doc__|__file__|__filename|__loader__|__spec__|__code__|__cached__|co_consts|f_code|tb_frame|_getframe|currentframe|inspect|linecache|traceback|tokenize|pydoc|get_docstring)(?![\\w$])|\\bhelp\\s*\\(|\\bimportlib(?:\\s*\\.\\s*|_)resources\\b|\\bget_data\\s*\\(|\\bargv\\s*\\[\\s*[01]\\s*\\]|\\bimport\\s*\\.\\s*meta\\b|\\bmodule\\s*\\.\\s*filename\\b|\\brequire\\s*\\.\\s*main\\b|\\bdocument\\s*\\.\\s*(?:currentScript|scripts)\\b|\\b(?:getElementsByTagName|querySelector(?:All)?)\\s*\\(\\s*['\\\"`]script\\b|\\barguments\\s*\\.\\s*callee\\b"
   },
   "_LATER_ID_CONTINUE": {
    "set": [
@@ -10629,7 +12877,7 @@
   },
   "_LD_ABSOLUTE_IN_RE": {
    "flags": "",
-   "re": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+   "re": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)(?=[/\\\\\"'`{$])|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_ABSOLUTE_RE": {
    "flags": "",
@@ -10785,10 +13033,10 @@
   },
   "_LD_FS_ROOT_RE": {
    "flags": "",
-   "re": "[fFrRbBuU]{0,2}[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)(?=[/\\\\\"'`{$])|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_FS_ROOT_SRC": {
-   "value": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+   "value": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)(?=[/\\\\\"'`{$])|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_FUNC_RE": {
    "flags": "",
@@ -12052,12 +14300,185 @@
   "_LOOKALIKE_WHY": {
    "value": "A name written with letters from another alphabet that look like Latin ones, or with an invisible character inside it, is not the name a reviewer reads: `const eval = eval` with a Cyrillic e (U+0435) makes a second eval that runs where no one sees eval called, and an isAdmin with a Cyrillic i is not isAdmin (CVE-2021-42694, the homoglyph half of Trojan Source)."
   },
+  "_LOOKS_SAMPLE": {
+   "value": 2048
+  },
   "_MANIFEST_WRITE_RE": {
    "flags": "",
    "re": "\\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync|outputFile|write_text|dump)\\s*\\("
   },
   "_MANIFEST_WRITE_SRC": {
    "value": "\\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync|outputFile|write_text|dump)\\s*\\("
+  },
+  "_METADATA_HEAD_BYTES": {
+   "value": 1048576
+  },
+  "_MF_DEPTH_RULE": {
+   "map": {
+    "fix": {
+     "value": "Reject this package/file at your ingestion boundary; investigate the source."
+    },
+    "id": {
+     "value": "SC-MANIFEST-DEPTH"
+    },
+    "msg": {
+     "value": "Manifest is too deeply nested to parse (more than 500 levels)."
+    },
+    "name": {
+     "value": "Hostile manifest nesting depth"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A manifest nested this deep cannot be produced by any real build tool \u2014 it exists purely to crash or blind security scanners. Treating it as data would silently drop every other finding in the package."
+    }
+   }
+  },
+  "_MF_DEP_URL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Depend on a registry version, else an https URL (or ssh) at a domain you trust."
+    },
+    "id": {
+     "value": "SC-DEP-URL"
+    },
+    "msg": {
+     "value": "Dependency \"{name}\" ({field}) is fetched from {reasons}: {spec!r}."
+    },
+    "name": {
+     "value": "Dependency from an insecure source"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "npm installs a dependency from wherever its spec says. Over plain http it is fetched with no integrity check, so anyone on the network path can replace it; at a raw IP address it comes from no registry and no domain anyone can vet. Packages from a registry name versions, and git dependencies use https or ssh."
+    }
+   }
+  },
+  "_MF_GYP_REST_FIX": {
+   "value": "Review every action and command expansion in the file; use --ignore-scripts in CI if unneeded."
+  },
+  "_MF_GYP_REST_MSG": {
+   "value": "{n} more binding.gyp actions and command expansions run code at install time ({bad} of them look hostile); only the first {limit} are listed."
+  },
+  "_MF_GYP_REST_WHY": {
+   "value": "Each action and command expansion in a binding.gyp runs a command during `node-gyp rebuild` (npm install). A file with this many is listed in part so the report stays readable; this finding carries the highest severity among the ones not listed."
+  },
+  "_MF_HOOK_HINT_MSG": {
+   "value": "\"{script}\" script runs a download or evaluation command at install time: {cmd!r}."
+  },
+  "_MF_HOOK_HOSTILE_MSG": {
+   "value": "\"{script}\" script {reasons}."
+  },
+  "_MF_HOOK_HOSTILE_WHY": {
+   "value": "Install hooks execute automatically on npm install \u2014 the most common supply-chain compromise vector \u2014 and this command does what malicious install hooks do."
+  },
+  "_MF_HOOK_MSG": {
+   "value": "\"{script}\" script runs code at install time: {cmd!r}."
+  },
+  "_MF_HOOK_PREPARE_WHY": {
+   "value": "A prepare-family script runs on `npm install` in this checkout; it is the project's own build step (husky, patch-package, a compile), listed for inventory. Hostile commands here stay CRITICAL."
+  },
+  "_MF_HOOK_WHY": {
+   "value": "Install hooks run automatically with user privileges on npm install, before anyone reviews the package. Many legitimate packages use one (to fetch a platform binary, for example), so on its own this is a capability to review, not evidence of malice."
+  },
+  "_MF_INSTALL_HOOK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Review the {script} script; use --ignore-scripts in CI if unneeded."
+    },
+    "id": {
+     "value": "SC-INSTALL-HOOK"
+    },
+    "msg": {
+     "value": ""
+    },
+    "name": {
+     "value": "Install hook"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": ""
+    }
+   }
+  },
+  "_MF_TRUNCATED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Review the file manually or raise the limit and re-scan."
+    },
+    "id": {
+     "value": "SC-TRUNCATED"
+    },
+    "msg": {
+     "value": "File not fully scanned: {detail}."
+    },
+    "name": {
+     "value": "Scan truncated"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Scanning stopped early, so a clean verdict for this file is not evidence of anything \u2014 the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal)."
+    }
+   }
+  },
+  "_MF_UNPARSEABLE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Make the manifest valid JSON (binding.gyp: a Python/JSON literal) and review its scripts by hand."
+    },
+    "id": {
+     "value": "SC-MANIFEST-UNPARSEABLE"
+    },
+    "msg": {
+     "value": "{name} could not be parsed ({reason}); its install hooks could not be checked."
+    },
+    "name": {
+     "value": "Unparseable manifest"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Package managers are more forgiving than a strict parser in places (a byte-order mark, number formats), so a manifest the scanner cannot read may still run install scripts when the package is installed. An unreadable root manifest is reported instead of treated as empty."
+    }
+   }
   },
   "_MINER_ARG_NEEDLES": {
    "list": [
@@ -12339,6 +14760,34 @@
   "_OFFSCREEN_WHY": {
    "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there."
   },
+  "_OPAQUE_ENTROPY": {
+   "value": 7.2
+  },
+  "_OPAQUE_MIN_SIZE": {
+   "value": 1024
+  },
+  "_OPAQUE_SAMPLE": {
+   "value": 8192
+  },
+  "_PACKAGE_RULE_NAMES": {
+   "map": {
+    "SC-GO-GENERATE": {
+     "value": "A go:generate command"
+    },
+    "SC-IMPORT-RISK": {
+     "value": "Risky import-time code"
+    },
+    "SC-INSTALL-HOOK": {
+     "value": "Install hook"
+    },
+    "SC-USE-RISK": {
+     "value": "Hostile code the package runs when used"
+    }
+   }
+  },
+  "_PACKAGE_USE_RISK_WHY": {
+   "value": "A payload need not run on install or import to reach you: a logger's constructor, a middleware or a script the package spawns runs it the first time your code uses the package. These are the shapes no library needs: code fetched and run, a reverse shell, hidden PowerShell, credentials sent to an exfiltration service, a beacon to a data-capture service."
+  },
   "_PARAM_RE": {
    "flags": "",
    "re": "\\s*\\*{0,2}\\s*([A-Za-z_]\\w*)\\s*"
@@ -12379,6 +14828,10 @@
        "flags": "",
        "re": "(?:shlex|pipes)\\.quote\\s*\\((?:[^()]|\\([^()]*\\))*\\)"
       },
+      "LDAP": {
+       "flags": "",
+       "re": "(?<!\\w)(?:[A-Za-z_][\\w.]*\\.)?(?:escape_filter_chars|escape_dn_chars|escape_rdn|filter_format)\\s*\\((?:[^()]|\\([^()]*\\))*\\)"
+      },
       "PATH": {
        "flags": "",
        "re": "(?:os\\.path\\.basename|basename|secure_filename|safe_join)\\s*\\((?:[^()]|\\([^()]*\\))*\\)"
@@ -12386,6 +14839,10 @@
       "REDIR": {
        "flags": "",
        "re": "(?<![\\w.])(?:[A-Za-z_][\\w.]*\\.)?(?:url_for|reverse|reverse_lazy)\\s*\\((?:[^()]|\\([^()]*\\))*\\)|request\\.(?:META\\.get|headers\\.get)\\s*\\(\\s*[\\\"'](?:HTTP_REFERER|[Rr]eferr?er)[\\\"'](?:[^()]|\\([^()]*\\))*\\)|request\\.META\\s*\\[\\s*[\\\"']HTTP_REFERER[\\\"']\\s*\\]"
+      },
+      "XPATH": {
+       "flags": "",
+       "re": "(?<![\\w.])[A-Za-z_][\\w.]*\\s*\\.\\s*replace\\s*\\(\\s*[rRuU]?(?:\"'\"|'\\\\''|'\"'|\"\\\\\"\")\\s*,(?:[^()]|\\([^()]*\\))*\\)"
       },
       "XSS": {
        "flags": "",
@@ -12531,14 +14988,17 @@
   },
   "_PERSIST_WRITE_RE": {
    "flags": "",
-   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\([^()\\n]{0,300}?[\"'][wax]b?\\+?[\"']"
+   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\((?:[^()\\n]|\\([^()\\n]*\\))*?[\"'][wax]b?\\+?[\"']"
   },
   "_PERSIST_WRITE_SRC": {
    "value": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\([^()\\n]{0,300}?[\"'][wax]b?\\+?[\"']"
   },
+  "_PE_DESC": {
+   "value": "Windows PE executable/DLL"
+  },
   "_PIPE_SCAN_RE": {
    "flags": "",
-   "re": "\\|\\s*(?:sudo\\s+)?(?:ba|z|da|k)?sh\\b|[\\n|;&]|\\b(?:curl|wget)\\b"
+   "re": "\\|\\s*(?:sudo\\s+)?(?:[\\w.~-]*/)*(?:env\\s+)?(?:ba|z|da|k)?sh\\b|[\\n|;&]|\\b(?:curl|wget)\\b"
   },
   "_PIPE_SHELL_RULE": {
    "map": {
@@ -12571,6 +15031,147 @@
   "_PLAIN_NAME_RE": {
    "flags": "",
    "re": "^[A-Za-z_][A-Za-z0-9_]*$"
+  },
+  "_PM_ARGV_RE": {
+   "flags": "",
+   "re": "\\b(?:spawn|spawnSync|execFile|execFileSync|execa|execaSync|run|call|check_call|check_output|Popen)\\s*\\(\\s*(?:(?P<prog>['\"`][^'\"`\\n]{1,100}['\"`]|sys\\.executable|process\\.execPath)\\s*,\\s*)?[\\[(](?P<items>[^\\[\\]()\\n]{0,2000})[\\])]"
+  },
+  "_PM_INSTALL_WORDS": {
+   "set": [
+    "add",
+    "i",
+    "in",
+    "ins",
+    "inst",
+    "insta",
+    "instal",
+    "install",
+    "isnt",
+    "isnta",
+    "isntal",
+    "isntall"
+   ]
+  },
+  "_PM_JS_MANAGERS": {
+   "set": [
+    "bun",
+    "cnpm",
+    "npm",
+    "pnpm",
+    "yarn"
+   ]
+  },
+  "_PM_NEEDLES": {
+   "list": [
+    {
+     "value": "bun"
+    },
+    {
+     "value": "npm"
+    },
+    {
+     "value": "pip"
+    },
+    {
+     "value": "pnpm"
+    },
+    {
+     "value": "yarn"
+    }
+   ]
+  },
+  "_PM_NPM_VALUE_OPTIONS": {
+   "set": [
+    "--before",
+    "--cache",
+    "--cwd",
+    "--dir",
+    "--filter",
+    "--globalconfig",
+    "--include",
+    "--install-strategy",
+    "--loglevel",
+    "--omit",
+    "--prefix",
+    "--registry",
+    "--save-prefix",
+    "--tag",
+    "--userconfig",
+    "--workspace",
+    "-C",
+    "-F",
+    "-w"
+   ]
+  },
+  "_PM_PIP_RE": {
+   "flags": "",
+   "re": "pip(?:3(?:\\.\\d+)?)?"
+  },
+  "_PM_PIP_VALUE_OPTIONS": {
+   "set": [
+    "--abi",
+    "--cache-dir",
+    "--cert",
+    "--client-cert",
+    "--config-settings",
+    "--constraint",
+    "--editable",
+    "--exists-action",
+    "--extra-index-url",
+    "--find-links",
+    "--global-option",
+    "--implementation",
+    "--index-url",
+    "--log",
+    "--platform",
+    "--prefix",
+    "--progress-bar",
+    "--proxy",
+    "--python",
+    "--python-version",
+    "--report",
+    "--requirement",
+    "--retries",
+    "--root",
+    "--src",
+    "--target",
+    "--timeout",
+    "--trusted-host",
+    "--upgrade-strategy",
+    "-C",
+    "-c",
+    "-e",
+    "-f",
+    "-i",
+    "-r",
+    "-t"
+   ]
+  },
+  "_PM_REASON": {
+   "value": "installs packages the release does not depend on"
+  },
+  "_PM_SELF": {
+   "set": [
+    "bun",
+    "cnpm",
+    "corepack",
+    "npm",
+    "pip",
+    "pnpm",
+    "setuptools",
+    "uv",
+    "wheel",
+    "yarn"
+   ]
+  },
+  "_PRESENTATION_REPEAT_MAX": {
+   "value": 4
+  },
+  "_PRESENTATION_SELECTORS": {
+   "value": "\ufe0e\ufe0f"
+  },
+  "_PROC_MACRO_WHY": {
+   "value": "A procedural macro is a program the compiler loads and runs, with the user's privileges, while it builds every crate that uses the macro: the moment of a build script, an install hook's twin."
   },
   "_PS_CRADLE_RE": {
    "flags": "i",
@@ -12614,6 +15215,54 @@
      "value": "import\t"
     }
    ]
+  },
+  "_PTH_PAYLOAD_TAIL": {
+   "value": " and executes or decodes a payload."
+  },
+  "_PTH_REASONS": {
+   "list": [
+    {
+     "value": "executes or decodes a payload"
+    },
+    {
+     "value": "reaches the network"
+    },
+    {
+     "value": "starts another program"
+    }
+   ]
+  },
+  "_PTH_RULE": {
+   "map": {
+    "fix": {
+     "value": "Find out why the package ships executable .pth code; remove it if unexplained."
+    },
+    "id": {
+     "value": "SC-PTH-EXEC"
+    },
+    "msg": {
+     "value": ".pth line runs code at every Python start{tail}"
+    },
+    "name": {
+     "value": "Code in a .pth file"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "site.py executes .pth lines that start with 'import' whenever the interpreter starts, whether or not the package is imported \u2014 a persistence and execution vector that needs no install hook."
+    }
+   }
+  },
+  "_PTH_RUN_RE": {
+   "flags": "",
+   "re": "\\bsubprocess\\b|\\bos\\s*\\.\\s*(?:system|popen|startfile|exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?)\\s*\\(|\\bpty\\s*\\.\\s*spawn\\s*\\(|\\bmultiprocessing\\b"
   },
   "_PUBLIC_IP_URL_RE": {
    "flags": "",
@@ -12698,6 +15347,62 @@
    "flags": "",
    "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\[\\s*(?:'([^'\\\\\\n]*)'|\"([^\"\\\\\\n]*)\")\\s*\\]"
   },
+  "_PYC_ORPHAN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the file, or restore the source it was compiled from and review it."
+    },
+    "id": {
+     "value": "SC-PYC-ORPHAN"
+    },
+    "msg": {
+     "value": "{path} has no matching source file."
+    },
+    "name": {
+     "value": "Bytecode without source"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Bytecode without its source cannot be reviewed, and a .pyc can be run directly (python file.pyc) or loaded by a custom importer."
+    }
+   }
+  },
+  "_PYC_UNCHECKED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the __pycache__ directory, keep bytecode out of version control and rebuild from reviewed source."
+    },
+    "id": {
+     "value": "SC-PYC-UNCHECKED"
+    },
+    "msg": {
+     "value": "{path} is an unchecked-hash .pyc (PEP 552): Python imports it without checking the source."
+    },
+    "name": {
+     "value": "Unchecked-hash bytecode"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An unchecked-hash .pyc is loaded on import even when the .py next to it says something else, so code that was never reviewed runs while the reviewed source looks benign."
+    }
+   }
+  },
   "_PYTHON_NAME_RE": {
    "flags": "i",
    "re": "^(?:python(?:\\d+(?:\\.\\d+)?)?|py)(?:\\.exe)?$"
@@ -12709,9 +15414,48 @@
   "_PY_JOINS": {
    "value": "([{,=+-*/%&|^<>~@\\.\"'"
   },
+  "_PY_KEYWORDS": {
+   "set": [
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
   "_PY_LIT_RE": {
    "flags": "",
-   "re": "(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\\\"[^\\\"]*\\\"|'[^']*'|`[^`]*`)"
+   "re": "(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`[^`]*`)"
   },
   "_PY_NEWLINE_RE": {
    "flags": "",
@@ -12720,6 +15464,13 @@
   "_PY_RUN_RE": {
    "flags": "",
    "re": "\\[\\s*(?:\\w*sys\\.executable|[\"']python[\\d.w]*(?:\\.exe)?[\"'])\\s*,|\\bstart\\s+pythonw?\\b|\\b(?:system|popen|getoutput|run|call|Popen)\\s*\\(\\s*f?[\"']python[\\d.w]*(?:\\.exe)?\\s"
+  },
+  "_PY_SOFT_KEYWORDS": {
+   "set": [
+    "_",
+    "case",
+    "match"
+   ]
   },
   "_QUOTE_CHAR_RE": {
    "flags": "",
@@ -12736,6 +15487,76 @@
    "flags": "i",
    "re": "https?://(?:\\d{1,3}\\.){3}\\d{1,3}\\b"
   },
+  "_READER_TEXTS": {
+   "map": {
+    "build_crate": {
+     "value": "is the crate's build script: cargo runs it on the machine that builds any crate that depends on it"
+    },
+    "build_sdist": {
+     "value": "is the build script of a Rust crate in this sdist: pip has cargo build the crate when it installs the sdist, and cargo runs the script on that machine"
+    },
+    "generate_fix": {
+     "value": "Read the commands before running go generate in this module."
+    },
+    "generate_msg": {
+     "value": "{path} has `{cmd}`{more}: go generate runs such commands when someone runs it in the module's folders; a build never does."
+    },
+    "hook_fix_crate": {
+     "value": "Do not build with this crate; report it to crates.io."
+    },
+    "hook_fix_sdist": {
+     "value": "Do not install this sdist; report it to PyPI."
+    },
+    "hook_msg": {
+     "value": "{path} {how}, and it {reasons}."
+    },
+    "macros_crate": {
+     "value": "is a procedural macro: it runs inside the compiler of every crate that uses it"
+    },
+    "macros_sdist": {
+     "value": "is a procedural macro of a Rust crate in this sdist: it runs inside the compiler when pip builds the sdist"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "start_crate": {
+     "value": "runs before a program's main (#[ctor], a load section, an exported main)"
+    },
+    "start_fix": {
+     "value": "Read that code: what does it run, and where does it send what it collects?"
+    },
+    "start_module": {
+     "value": "runs when any program that imports its package starts (init functions, package-level variables' initializers, cgo constructors)"
+    },
+    "start_sdist": {
+     "value": "runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], a load section)"
+    },
+    "use_fix": {
+     "value": "Don't use the {what}; report it to its registry."
+    },
+    "use_fix_sdist": {
+     "value": "Don't use the package; report it to PyPI."
+    },
+    "use_msg": {
+     "value": "{path} {strong}. Nothing runs it at {when}: it runs when {whose} is called."
+    },
+    "use_when": {
+     "value": "build or start"
+    },
+    "use_when_sdist": {
+     "value": "build or load"
+    },
+    "whose_crate": {
+     "value": "the crate's code"
+    },
+    "whose_module": {
+     "value": "the module's code"
+    },
+    "whose_sdist": {
+     "value": "the package's Rust code"
+    }
+   }
+  },
   "_READ_CALLBACK_RE": {
    "flags": "",
    "re": "\\(\\s*[A-Za-z_$][\\w$]*\\s*,\\s*([A-Za-z_$][\\w$]*)\\s*\\)\\s*(?:=>|\\{)"
@@ -12751,6 +15572,13 @@
   "_REDIRECT_TOKEN_RE": {
    "flags": "",
    "re": "\\d?[<>]{1,2}&?\\d?"
+  },
+  "_REGEX_CTOR_RE": {
+   "flags": "",
+   "re": "(?:new\\s+)?RegExp\\s*\\("
+  },
+  "_REGEX_CTOR_REACH": {
+   "value": 1000
   },
   "_RETURN_RE": {
    "flags": "",
@@ -12821,6 +15649,9 @@
    "flags": "",
    "re": "[\"'](?:/bin/(?:ba|z|da|k)?sh|cmd(?:\\.exe)?|powershell(?:\\.exe)?)[\"']|\\bpty\\.spawn\\s*\\("
   },
+  "_REWRITE_REASON": {
+   "value": "rewrites another package's code"
+  },
   "_ROUTE_DECORATOR_RE": {
    "flags": "",
    "re": "^\\s*@[\\w.]+\\.(route|get|post|put|patch|delete|options|head|api_route|websocket)\\s*\\("
@@ -12836,6 +15667,9 @@
    "flags": "i",
    "re": "\\.(?:[cm]?[jt]s|[jt]sx)$"
   },
+  "_RUST_START_WHY": {
+   "value": "A function marked #[ctor], placed in a load section (.init_array) or exported as C's main runs before Rust's own main in every program the crate is linked into: an import-time payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs."
+  },
   "_SAME_SITE_RE": {
    "flags": "",
    "re": "\\s*[rRuUfF]{0,2}[\"'`](?:/(?![/\\\\\"'`{$])|https?://[^/\"'`?#\\\\\\s{}$]+/)"
@@ -12847,13 +15681,13 @@
    "value": "(?:[^()]|\\([^()]*\\))*"
   },
   "_SA_ACC_A_HEAD": {
-   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
+   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P<p2>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<p3>[A-Za-z_$][\\w$]*)\\s*-\\s*(?P<off>[^;{}]{1,300});\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
   },
   "_SA_ACC_B_HEAD": {
    "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*[A-Za-z_$][\\w$]*\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
   },
   "_SA_ACC_B_TAIL": {
-   "value": "\\s*\\(\\s*\\)\\s*;\\s*return\\s+(?P=g)\\s*=\\s*function\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});"
+   "value": "\\s*\\(\\s*\\)\\s*;\\s*return\\s+(?P<g2>[A-Za-z_$][\\w$]*)\\s*=\\s*function\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P<p2>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<p3>[A-Za-z_$][\\w$]*)\\s*-\\s*(?P<off>[^;{}]{1,300});"
   },
   "_SA_ALIAS_RE": {
    "flags": "",
@@ -12882,7 +15716,7 @@
   },
   "_SA_CHECKSUM_RE": {
    "flags": "",
-   "re": "try\\s*\\{\\s*(?:var|const|let)\\s+(?P<v>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<e>[^;]{1,6000});\\s*if\\s*\\(\\s*(?P=v)\\s*===\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*break"
+   "re": "try\\s*\\{\\s*(?:var|const|let)\\s+(?P<v>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<e>[^;]{1,6000});\\s*if\\s*\\(\\s*(?P<v_again>[A-Za-z_$][\\w$]*)\\s*===\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*break"
   },
   "_SA_DECIMAL_RE": {
    "flags": "",
@@ -13066,6 +15900,61 @@
    "flags": "",
    "re": "(?:^|(?<=[\\s\\[(,'\"`/\\\\]))(?P<name>bash|sh|zsh|dash|ksh|node|nodejs|deno|bun|pwsh|powershell|perl|ruby|php|osascript|cscript|wscript)(?:\\.exe)?(?=['\"`\\s,\\])])"
   },
+  "_SCRIPT_LANG_EXTS": {
+   "map": {
+    "bat": {
+     "set": [
+      ".bat",
+      ".cmd"
+     ]
+    },
+    "js": {
+     "set": [
+      ".cjs",
+      ".cts",
+      ".js",
+      ".jsx",
+      ".mjs",
+      ".mts",
+      ".ts",
+      ".tsx"
+     ]
+    },
+    "other": {
+     "set": [
+      ".hta",
+      ".jse",
+      ".lua",
+      ".php",
+      ".pl",
+      ".pm",
+      ".ps1",
+      ".psm1",
+      ".rb",
+      ".tcl",
+      ".vbe",
+      ".vbs",
+      ".wsf"
+     ]
+    },
+    "py": {
+     "set": [
+      ".py",
+      ".pyw"
+     ]
+    },
+    "sh": {
+     "set": [
+      ".ash",
+      ".bash",
+      ".dash",
+      ".ksh",
+      ".sh",
+      ".zsh"
+     ]
+    }
+   }
+  },
   "_SCRIPT_LOAD_RE": {
    "flags": "",
    "re": "\\b(?P<fork>fork)\\s*\\(|\\b(?:execfile|run_path)\\s*\\(|(?<![\\w$.])exec\\s*\\(\\s*open\\s*\\("
@@ -13099,6 +15988,15 @@
    "flags": "",
    "re": "\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\b|\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]"
   },
+  "_SDIST_BUILD_WHY": {
+   "value": "pip builds an sdist's Rust extension with cargo when it installs the sdist (maturin, setuptools-rust), and cargo compiles and runs the crate's build script with the user's privileges before anything is reviewed: the moment of setup.py, and where proc-macro1 and rustdecimal ran their payloads on crates.io."
+  },
+  "_SDIST_PROC_MACRO_WHY": {
+   "value": "A procedural macro is a program the compiler loads and runs, with the user's privileges, while pip builds the sdist's Rust extension: the moment of setup.py."
+  },
+  "_SDIST_START_WHY": {
+   "value": "A function marked #[ctor] or placed in a load section (.init_array) runs when the package's Rust extension module is loaded, at import, before any of its code is called: an import-time payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs."
+  },
   "_SECRETS_DUMP_RE": {
    "flags": "i",
    "re": "\\btoJSON\\s*\\(\\s*secrets\\s*\\)"
@@ -13110,7 +16008,7 @@
    "list": [
     {
      "flags": "",
-     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
      "token": [
       "AKIA[0-9A-Z]{16}",
       "gh[pousr]_[A-Za-z0-9]{36,}",
@@ -13119,6 +16017,10 @@
       "sk_live_[A-Za-z0-9]{16,}",
       "AIza[0-9A-Za-z_\\-]{35}",
       "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+      "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+      "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+      "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+      "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
       "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
      ]
     },
@@ -13128,7 +16030,7 @@
     },
     {
      "flags": "i",
-     "re": "(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+     "re": "(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*(?::=|[:=]|:\\s*&(?:'static\\s+)?(?:str|\\[u8\\])\\s*=|[ \\t]+string\\s*=)\\s*(?:b|rb|r#*|br#*)?[\\\"'][^\\\"']{4,}[\\\"']"
     },
     {
      "flags": "",
@@ -13192,7 +16094,7 @@
   },
   "_SELF_READ_RE": {
    "flags": "",
-   "re": "\\bopen\\s*\\(\\s*(?:os\\.path\\.(?:abspath|realpath)\\s*\\(\\s*)?__file__\\b|\\bPath\\s*\\(\\s*__file__\\s*\\)\\s*\\.\\s*(?:read_text|read_bytes|open)\\s*\\(|\\blinecache\\.getlines?\\s*\\(\\s*__file__\\b|(?<![\\w.])__loader__\\s*\\.\\s*get_source\\s*\\(|(?<![\\w.])__doc__\\b|\\breadFile(?:Sync)?\\s*\\(\\s*(?:__filename\\b|(?:new\\s+URL\\s*\\(\\s*)?import\\.meta\\.url|fileURLToPath\\s*\\(\\s*import\\.meta\\.url)|\\barguments\\s*\\.\\s*callee\\b|\\}\\s*\\)?\\s*\\.\\s*toString\\s*\\(\\s*\\)"
+   "re": "\\bopen\\s*\\(\\s*(?:os\\.path\\.(?:abspath|realpath)\\s*\\(\\s*)?__file__\\b|\\bPath\\s*\\(\\s*__file__\\s*\\)\\s*\\.\\s*(?:read_text|read_bytes|open)\\s*\\(|\\blinecache\\.getlines?\\s*\\(\\s*__file__\\b|(?<![\\w.])__loader__\\s*\\.\\s*get_source\\s*\\(|(?<![\\w.])__doc__\\b(?![ \\t]*=[^=])|\\breadFile(?:Sync)?\\s*\\(\\s*(?:__filename\\b|(?:new\\s+URL\\s*\\(\\s*)?import\\.meta\\.url|fileURLToPath\\s*\\(\\s*import\\.meta\\.url)|\\barguments\\s*\\.\\s*callee\\b|\\}\\s*\\)?\\s*\\.\\s*toString\\s*\\(\\s*\\)"
   },
   "_SELF_READ_THEN_SPAN": {
    "value": 200
@@ -13699,6 +16601,15 @@
     },
     {
      "value": "ping"
+    },
+    {
+     "value": "base64"
+    },
+    {
+     "value": "xxd"
+    },
+    {
+     "value": "openssl"
     }
    ]
   },
@@ -13931,6 +16842,49 @@
    "flags": "i",
    "re": "TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|CREDENTIAL|AUTH"
   },
+  "_SH_SELF_MAX_DEPTH": {
+   "value": 8
+  },
+  "_SH_SELF_PATH_TOOLS": {
+   "set": [
+    ".",
+    "[",
+    "[[",
+    "ash",
+    "basename",
+    "bash",
+    "case",
+    "cd",
+    "chmod",
+    "dash",
+    "declare",
+    "dirname",
+    "echo",
+    "export",
+    "ksh",
+    "local",
+    "logger",
+    "ls",
+    "printf",
+    "pushd",
+    "readlink",
+    "readonly",
+    "realpath",
+    "sh",
+    "source",
+    "stat",
+    "test",
+    "typeset",
+    "zsh"
+   ]
+  },
+  "_SH_SELF_RESOLVERS": {
+   "set": [
+    "basename",
+    "readlink",
+    "realpath"
+   ]
+  },
   "_SH_SHELLS": {
    "set": [
     "ash",
@@ -14099,6 +17053,14 @@
    "flags": "",
    "re": "(?:__file__|__dirname|import\\.meta\\.url)[^\\n]{0,200}?(?:[\\\"'`]|\\}[/\\\\])(?:[^\\\"'`{}$\\n]{1,100}\\.(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll|dylib|exe)|(?:[^\\\"'`{}$\\n]{0,100}[/\\\\])?(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\\w{1,10})?)[\\\"'`]"
   },
+  "_SINK_IMPORTS": {
+   "map": {
+    "LDAP": {
+     "flags": "",
+     "re": "(?<![^\\n])[ \\t]*(?:from|import)[ \\t]+ldap3?\\b"
+    }
+   }
+  },
   "_SKIPPED_TREES": {
    "list": []
   },
@@ -14201,6 +17163,38 @@
   "_SPLIT_LITERAL": {
    "value": "(?:['\\\"`]\\s*\\+\\s*['\\\"`])?"
   },
+  "_SQL_CONCAT_RES": {
+   "list": [
+    {
+     "flags": "",
+     "re": "[\\\"'][^\\\"']*[\\\"']\\s*\\+"
+    },
+    {
+     "flags": "",
+     "re": "\\+\\s*[\\\"']"
+    }
+   ]
+  },
+  "_SQL_FORMAT_RE": {
+   "flags": "",
+   "re": "\\.format\\s*\\("
+  },
+  "_SQL_HOW": {
+   "map": {
+    "concat": {
+     "value": "concatenation"
+    },
+    "format": {
+     "value": ".format()/f-string"
+    },
+    "percent": {
+     "value": "%-interpolation"
+    }
+   }
+  },
+  "_SQL_HOW_OTHER": {
+   "value": "string-building"
+  },
   "_SQL_NOWHERE_RULES": {
    "map": {
     "SQL-DELETE-NOWHERE": {
@@ -14301,9 +17295,53 @@
     "SQL-UPDATE-NOWHERE"
    ]
   },
+  "_SQL_PERCENT_RE": {
+   "flags": "",
+   "re": "(?:[\\\"'][^\\\"']*[\\\"']|\\b[A-Za-z_]\\w*)\\s*%\\s*[^=%\\s]"
+  },
+  "_SQL_SINK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Use parameterized queries: cursor.execute(\"SELECT \u2026 WHERE id = %s\", (user_id,))."
+    },
+    "id": {
+     "value": "S-SQL-PY"
+    },
+    "msg": {
+     "value": "SQL query built with {how} into execute()."
+    },
+    "name": {
+     "value": "SQL built from strings"
+    },
+    "ref": {
+     "value": "CWE-89 \u00b7 OWASP A03"
+    },
+    "sev": {
+     "value": "BLOCKER"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "Interpolating values into SQL enables SQL injection \u2014 the classic path to full database compromise."
+    }
+   }
+  },
   "_SQL_WHERE_RE": {
    "flags": "i",
    "re": "\\bWHERE\\b"
+  },
+  "_SRC_CAMEL_NAME_RE": {
+   "flags": "",
+   "re": "(?:[A-Z][a-z]+){2,}|[a-z]+(?:[A-Z][a-z]+)+"
+  },
+  "_SRC_PLACEHOLDER_RE": {
+   "flags": "i",
+   "re": "example|sample|dummy|placeholder|change[_\\-.]?(?:me|this|it)|your[_\\-.]|xxx|\\*\\*\\*|\\.\\.\\.|redacted|replace|insert[_\\-.]|enter[_\\-.]|todo|fixme|fake|mock|canary|made[_\\-.]?up|<|>|\\$\\{|\\{\\{|\\}\\}|%\\(|\\$\\("
+  },
+  "_SRC_QUALIFIED_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_][A-Za-z0-9_]{0,29}(?:(?:\\.|::)[A-Za-z_][A-Za-z0-9_]{0,29}){2,}"
   },
   "_STAGER_MAX_LITERALS": {
    "value": 2000
@@ -14482,7 +17520,22 @@
      "value": "hides its code in a string array"
     },
     {
+     "value": "hides its strings in one long string"
+    },
+    {
      "value": "runs a program it extracts from inside another file"
+    },
+    {
+     "value": "pipes code it decodes into"
+    },
+    {
+     "value": "installs packages the release does not depend on"
+    },
+    {
+     "value": "rewrites another package's code"
+    },
+    {
+     "value": "deletes the user's files"
     }
    ]
   },
@@ -14591,6 +17644,13 @@
   "_SVC_PYCRON_WRITE_SRC": {
    "value": "\\.write\\s{0,20}\\("
   },
+  "_SVC_RC_ARGS_MAX": {
+   "value": 400
+  },
+  "_SVC_RC_CONTENT_CALL_RE": {
+   "flags": "",
+   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|outputFileSync|outputFile|write_text|write|writelines)\\s*\\("
+  },
   "_SVC_REG_WRITE_RE": {
    "flags": "i",
    "re": "\\breg(?:\\.exe)?[\"'`]?(?:[ \\t]+|\\s{0,20},\\s{0,20}\\[?\\s{0,20}[\"'`])add\\b|\\b(?:New|Set)-ItemProperty\\b|\\bSetValueEx\\b|\\bSetValue\\s{0,20}\\(|\\bputValue\\b|\\bRegSetValue|\\bREG_(?:EXPAND_)?SZ\\b|\\bKEY_(?:SET_VALUE|WRITE|ALL_ACCESS)\\b"
@@ -14614,6 +17674,18 @@
   },
   "_SVC_SCHTASKS_SRC": {
    "value": "\\bschtasks(?:\\.exe)?[\"'`]?(?:[ \\t]+|\\s{0,20},\\s{0,20}\\[?\\s{0,20}[\"'`])[/-]create\\b"
+  },
+  "_SVC_SHELL_RC_RE": {
+   "flags": "",
+   "re": "[\"'`][^\\s\"'`]{0,120}?(?<![\\w.-])\\.(?:bashrc|bash_profile|bash_login|zshrc|zshenv|zprofile|zlogin|kshrc|mkshrc|cshrc|tcshrc)[\"'`]|[\"'`][^\\s\"'`]{0,120}?[/\\\\~]\\.profile[\"'`]|[\"'`][^\\s\"'`]{0,120}?(?<![\\w.-])fish[/\\\\]config\\.fish[\"'`]"
+  },
+  "_SVC_SHELL_RC_RUN_RE": {
+   "flags": "",
+   "re": "\\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|certutil|bitsadmin)\\b|https?://|\\|\\s*(?:ba|z|k|da)?sh\\b|\\b(?:ba|z|k|da)?sh\\s+-c\\b|\\b(?:node|nodejs|python[23]?|perl|ruby|php|bun|deno|osascript|powershell|pwsh)(?:\\.exe)?[ \\t]+(?:-[A-Za-z]|[\\w./~$\\\\{\\\"'])|\\bnohup\\b|\\bsetsid\\b|\\bbase64\\s+(?:-d|-D|--decode)\\b|[^&\\s]\\s*&\\s*(?:disown\\s*)?(?:\\\\[nr]|[\\\"'`])"
+  },
+  "_SVC_SHELL_RC_SH_RE": {
+   "flags": "",
+   "re": "(?:~|\\$\\{?HOME\\}?)[/\\\\]\\.(?:bashrc|bash_profile|bash_login|zshrc|zshenv|zprofile|zlogin|kshrc|mkshrc|cshrc|tcshrc|profile)(?![\\w.-])|(?:~|\\$\\{?HOME\\}?)[/\\\\]\\.config[/\\\\]fish[/\\\\]config\\.fish(?![\\w.-])"
   },
   "_SVC_STARTUP_RE": {
    "flags": "i",
@@ -14689,6 +17761,37 @@
   "_TAINT_CONFIG_WARNINGS": {
    "list": []
   },
+  "_TAINT_MAX_MATCH_TEXT": {
+   "value": 2000
+  },
+  "_TAINT_RULE": {
+   "map": {
+    "msg": {
+     "value": "Possible {cat}: {what} reaches this sink."
+    },
+    "name": {
+     "value": "Tainted flow \u2192 {cat}"
+    },
+    "ref": {
+     "value": "{cwe} \u00b7 Taint analysis"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking)."
+    }
+   }
+  },
+  "_TAINT_WHAT": {
+   "value": "untrusted data"
+  },
+  "_TAINT_WHAT_CALL": {
+   "value": "untrusted data that '{callee}()' returns"
+  },
+  "_TAINT_WHAT_VIA": {
+   "value": "untrusted data via '{carrier}' (tainted at line {line})"
+  },
   "_TEMPLATE_IMPORT_RE": {
    "flags": "",
    "re": "(?<![^\\n])[ \\t]*from[ \\t]+(?:jinja2|mako\\.template|django\\.template)[ \\t]+import\\b[^\\n]*\\bTemplate\\b"
@@ -14740,13 +17843,25 @@
      "value": "-----BEGIN [A-Z ]*PRIVATE KEY-----"
     },
     {
+     "value": "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])"
+    },
+    {
+     "value": "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])"
+    },
+    {
+     "value": "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])"
+    },
+    {
+     "value": "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])"
+    },
+    {
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
     }
    ]
   },
   "_TOKEN_PATTERN": {
    "flags": "",
-   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
    "token": [
     "AKIA[0-9A-Z]{16}",
     "gh[pousr]_[A-Za-z0-9]{36}",
@@ -14755,6 +17870,10 @@
     "sk_live_[A-Za-z0-9]{16,}",
     "AIza[0-9A-Za-z_\\-]{35}",
     "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+    "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+    "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+    "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
     "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
    ]
   },
@@ -14782,13 +17901,25 @@
      "value": "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)"
     },
     {
+     "value": "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])"
+    },
+    {
+     "value": "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])"
+    },
+    {
+     "value": "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])"
+    },
+    {
+     "value": "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])"
+    },
+    {
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
     }
    ]
   },
   "_TOKEN_REDACT_PATTERN": {
    "flags": "",
-   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
    "token": [
     "AKIA[0-9A-Z]{16}",
     "gh[pousr]_[A-Za-z0-9]{36,}",
@@ -14797,6 +17928,10 @@
     "sk_live_[A-Za-z0-9]{16,}",
     "AIza[0-9A-Za-z_\\-]{35}",
     "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+    "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+    "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+    "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+    "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
     "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
    ]
   },
@@ -14829,7 +17964,7 @@
     },
     "re": {
      "flags": "",
-     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
      "token": [
       "AKIA[0-9A-Z]{16}",
       "gh[pousr]_[A-Za-z0-9]{36}",
@@ -14838,6 +17973,10 @@
       "sk_live_[A-Za-z0-9]{16,}",
       "AIza[0-9A-Za-z_\\-]{35}",
       "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+      "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+      "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+      "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
       "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
      ]
     },
@@ -14898,12 +18037,555 @@
    "flags": "",
    "re": "(?<![\\w.])[A-Za-z_][\\w.]*\\.get(?:list)?\\s*\\(([^()]{0,256})\\)"
   },
+  "_URL_HOST_OF_RE": {
+   "flags": "",
+   "re": "([A-Za-z_]\\w*)\\s*\\.\\s*(?:netloc|hostname)(?:\\s*\\.\\s*lower\\s*\\(\\s*\\))?"
+  },
+  "_URL_PARSED_RE": {
+   "flags": "",
+   "re": "(?:[A-Za-z_]\\w*\\s*\\.\\s*)*(?:urlparse|urlsplit)\\s*\\(\\s*([A-Za-z_]\\w*)\\s*(?:,[^()\\n]*)?\\)(\\s*\\.\\s*(?:netloc|hostname)(?:\\s*\\.\\s*lower\\s*\\(\\s*\\))?)?"
+  },
   "_UTF7_NAMES": {
    "set": [
     "u7",
     "unicode-1-1-utf-7",
     "utf-7",
     "utf7"
+   ]
+  },
+  "_VENDOR_PROBE": {
+   "value": 256
+  },
+  "_VENDOR_TEXT_CAP": {
+   "value": 4194304
+  },
+  "_VERIFY_PROVIDERS": {
+   "value": [
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "login"
+       }
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "GitHub says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        403,
+        429
+       ],
+       "why": "GitHub refused or rate limited the call"
+      }
+     ],
+     "host": "api.github.com",
+     "id": "github",
+     "label": "GitHub token",
+     "parts": {
+      "secret": "(?:gh[pousr]_[A-Za-z0-9]{36,251}|github_pat_[A-Za-z0-9_]{22,255})"
+     },
+     "request": {
+      "headers": {
+       "Accept": "application/vnd.github+json",
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify",
+       "X-GitHub-Api-Version": "2022-11-28"
+      },
+      "method": "GET",
+      "path": "/user",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "json": {
+        "ok": true
+       },
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "user"
+       }
+      },
+      {
+       "json": {
+        "error": [
+         "invalid_auth",
+         "not_authed",
+         "token_revoked",
+         "token_expired",
+         "account_inactive"
+        ],
+        "ok": false
+       },
+       "outcome": "rejected",
+       "status": [
+        200
+       ],
+       "why": "Slack says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        429
+       ],
+       "why": "Slack rate limited the call"
+      }
+     ],
+     "host": "slack.com",
+     "id": "slack",
+     "label": "Slack token",
+     "parts": {
+      "secret": "xox[baprs]-[A-Za-z0-9-]{10,250}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/api/auth.test",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Stripe knows the key but it may not read the balance"
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Stripe says the key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        429
+       ],
+       "why": "Stripe rate limited the call"
+      }
+     ],
+     "host": "api.stripe.com",
+     "id": "stripe",
+     "label": "Stripe live key",
+     "parts": {
+      "secret": "(?:sk|rk)_live_[A-Za-z0-9]{16,247}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/v1/balance",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "username"
+       }
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "npm says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        403,
+        429
+       ],
+       "why": "npm refused or rate limited the call"
+      }
+     ],
+     "host": "registry.npmjs.org",
+     "id": "npm",
+     "label": "npm token",
+     "parts": {
+      "secret": "npm_[A-Za-z0-9]{36}"
+     },
+     "request": {
+      "headers": {
+       "Accept": "application/json",
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/-/whoami",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.code": "invalid_api_key"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "OpenAI says the key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        401,
+        403,
+        429
+       ],
+       "why": "OpenAI refused or rate limited the call"
+      }
+     ],
+     "host": "api.openai.com",
+     "id": "openai",
+     "label": "OpenAI API key",
+     "parts": {
+      "secret": "sk-(?!ant-|admin-)(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/v1/models",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.type": "authentication_error"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Anthropic says the key is not valid"
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Anthropic knows the key but it may not list the models"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        401,
+        403,
+        429
+       ],
+       "why": "Anthropic refused or rate limited the call"
+      }
+     ],
+     "host": "api.anthropic.com",
+     "id": "anthropic",
+     "label": "Anthropic API key",
+     "parts": {
+      "secret": "sk-ant-(?:api03|usr)-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "User-Agent": "lazaret-secret-verify",
+       "anthropic-version": "2023-06-01",
+       "x-api-key": "{secret}"
+      },
+      "method": "GET",
+      "path": "/v1/models",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "xml": "Arn"
+       }
+      },
+      {
+       "code": [
+        "InvalidClientTokenId",
+        "SignatureDoesNotMatch",
+        "ExpiredToken"
+       ],
+       "outcome": "rejected",
+       "status": [
+        403
+       ],
+       "why": "AWS says the key pair is not valid"
+      },
+      {
+       "code": [
+        "Throttling",
+        "ThrottlingException",
+        "RequestLimitExceeded",
+        "ServiceUnavailable"
+       ],
+       "outcome": "unknown",
+       "status": [
+        400,
+        403,
+        429,
+        503
+       ],
+       "why": "AWS throttled the call"
+      }
+     ],
+     "host": "sts.amazonaws.com",
+     "id": "aws",
+     "label": "AWS access key",
+     "parts": {
+      "id": "AKIA[0-9A-Z]{16}",
+      "secret": "[A-Za-z0-9/+=]{40}"
+     },
+     "request": {
+      "body": "Action=GetCallerIdentity&Version=2011-06-15",
+      "headers": {
+       "Accept": "application/xml",
+       "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "POST",
+      "path": "/",
+      "query": {},
+      "sigv4": {
+       "region": "us-east-1",
+       "service": "sts"
+      }
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.code": "invalid_api_key"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "OpenAI says the admin key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        401,
+        403,
+        429
+       ],
+       "why": "OpenAI refused or rate limited the call"
+      }
+     ],
+     "host": "api.openai.com",
+     "id": "openai-admin",
+     "label": "OpenAI admin key",
+     "parts": {
+      "secret": "sk-admin-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/v1/organization/projects",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "name"
+       }
+      },
+      {
+       "json": {
+        "error.type": "authentication_error"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Anthropic says the admin key is not valid"
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Anthropic knows the key but it may not read the organization"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        401,
+        403,
+        429
+       ],
+       "why": "Anthropic refused or rate limited the call"
+      }
+     ],
+     "host": "api.anthropic.com",
+     "id": "anthropic-admin",
+     "label": "Anthropic admin key",
+     "parts": {
+      "secret": "sk-ant-admin01-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "User-Agent": "lazaret-secret-verify",
+       "anthropic-version": "2023-06-01",
+       "x-api-key": "{secret}"
+      },
+      "method": "GET",
+      "path": "/v1/organizations/me",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.type": "authentication_error"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Anthropic says the compliance key is not valid"
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Anthropic knows the key but it may not list the organizations"
+      },
+      {
+       "json": {
+        "error.message": "Compliance API is not enabled for this organization",
+        "error.type": "invalid_request_error"
+       },
+       "outcome": "live",
+       "status": [
+        400
+       ],
+       "why": "Anthropic knows the key, but its organization has the Compliance API turned off"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        400,
+        401,
+        403,
+        404,
+        429
+       ],
+       "why": "Anthropic refused or rate limited the call"
+      }
+     ],
+     "host": "api.anthropic.com",
+     "id": "anthropic-compliance",
+     "label": "Claude Enterprise compliance key",
+     "parts": {
+      "secret": "sk-ant-api01-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "User-Agent": "lazaret-secret-verify",
+       "anthropic-version": "2023-06-01",
+       "x-api-key": "{secret}"
+      },
+      "method": "GET",
+      "path": "/v1/compliance/organizations",
+      "query": {}
+     }
+    }
    ]
   },
   "_VIEW_CALL_RE": {
@@ -14917,6 +18599,1140 @@
   "_VIEW_RETURN_SKIP_RE": {
    "flags": "",
    "re": "\\s*(?:\\{|\\[|dict\\s*\\(|(?:[A-Za-z_][\\w.]*\\.)?(?:redirect|jsonify|url_for|send_file|send_from_directory|send_static_file|abort|render_template)\\s*\\()"
+  },
+  "_WEAK_INSTALL_REASONS": {
+   "list": [
+    {
+     "value": "turns off TLS certificate verification"
+    }
+   ]
+  },
+  "_WFX_ASSIGN_RE": {
+   "flags": "",
+   "re": "[A-Za-z_][A-Za-z0-9_]*="
+  },
+  "_WFX_CRED_KEY_RE": {
+   "flags": "i",
+   "re": "auth|token|key|secret|cookie|pass|session|signature|bearer|jwt|credential|user|login|client|account"
+  },
+  "_WFX_CRED_NAME_RE": {
+   "flags": "i",
+   "re": "auth|token|key|secret|cookie|pass|session|signature|bearer|jwt|credential|sig\\b"
+  },
+  "_WFX_CRED_PATTERN_RE": {
+   "flags": "i",
+   "re": "pass(?:word|wd)|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|private key|AKIA|ASIA|gh[pousr]_|github_pat|glpat|xox[abprs]|sk_live|credential|bearer|aws_"
+  },
+  "_WFX_CURL_BODY": {
+   "set": [
+    "F",
+    "T",
+    "d",
+    "data",
+    "data-ascii",
+    "data-binary",
+    "data-raw",
+    "data-urlencode",
+    "form",
+    "form-string",
+    "json",
+    "upload-file"
+   ]
+  },
+  "_WFX_CURL_HEADER": {
+   "set": [
+    "H",
+    "header",
+    "proxy-header"
+   ]
+  },
+  "_WFX_CURL_LONG_VALUE": {
+   "set": [
+    "abstract-unix-socket",
+    "aws-sigv4",
+    "cacert",
+    "capath",
+    "cert",
+    "cert-type",
+    "ciphers",
+    "config",
+    "connect-timeout",
+    "connect-to",
+    "continue-at",
+    "cookie",
+    "cookie-jar",
+    "create-file-mode",
+    "crlfile",
+    "data",
+    "data-ascii",
+    "data-binary",
+    "data-raw",
+    "data-urlencode",
+    "dns-servers",
+    "dump-header",
+    "engine",
+    "etag-compare",
+    "etag-save",
+    "expect100-timeout",
+    "form",
+    "form-string",
+    "ftp-port",
+    "happy-eyeballs-timeout-ms",
+    "header",
+    "hostpubmd5",
+    "interface",
+    "json",
+    "keepalive-time",
+    "key",
+    "key-type",
+    "limit-rate",
+    "local-port",
+    "mail-auth",
+    "mail-from",
+    "mail-rcpt",
+    "max-filesize",
+    "max-redirs",
+    "max-time",
+    "netrc-file",
+    "noproxy",
+    "oauth2-bearer",
+    "output",
+    "output-dir",
+    "parallel-max",
+    "pass",
+    "preproxy",
+    "proto",
+    "proto-default",
+    "proto-redir",
+    "proxy",
+    "proxy-cacert",
+    "proxy-cert",
+    "proxy-header",
+    "proxy-key",
+    "proxy-user",
+    "pubkey",
+    "quote",
+    "range",
+    "rate",
+    "referer",
+    "request",
+    "request-target",
+    "resolve",
+    "retry",
+    "retry-all-errors-count",
+    "retry-delay",
+    "retry-max-time",
+    "sasl-authzid",
+    "service-name",
+    "socks4",
+    "socks5",
+    "socks5-hostname",
+    "speed-limit",
+    "speed-time",
+    "stderr",
+    "telnet-option",
+    "time-cond",
+    "tls-max",
+    "trace",
+    "trace-ascii",
+    "unix-socket",
+    "upload-file",
+    "url",
+    "url-query",
+    "user",
+    "user-agent",
+    "variable",
+    "write-out"
+   ]
+  },
+  "_WFX_CURL_SHORT_VALUE": {
+   "value": "AbcCdDeEFHKmoPQrtTuUwxXyYz"
+  },
+  "_WFX_DEPTH": {
+   "value": 4
+  },
+  "_WFX_ENV_NAME_RE": {
+   "flags": "",
+   "re": "\\benv\\s*(?:\\.\\s*([A-Za-z_][A-Za-z0-9_-]*)|\\[\\s*'([^'\\\"\\]]{1,100})'\\s*\\]|\\[\\s*\\\"([^'\\\"\\]]{1,100})\\\"\\s*\\])"
+  },
+  "_WFX_GENERIC_LABELS": {
+   "set": [
+    "accounts",
+    "apis",
+    "cloud",
+    "example",
+    "files",
+    "gateway",
+    "global",
+    "hooks",
+    "internal",
+    "invalid",
+    "local",
+    "oauth",
+    "oauth2",
+    "online",
+    "static",
+    "storage",
+    "uploads"
+   ]
+  },
+  "_WFX_GENERIC_WORDS": {
+   "set": [
+    "access",
+    "account",
+    "address",
+    "admin",
+    "apikey",
+    "auth",
+    "build",
+    "channel",
+    "chat",
+    "client",
+    "code",
+    "config",
+    "data",
+    "deploy",
+    "deployment",
+    "email",
+    "endpoint",
+    "hook",
+    "host",
+    "info",
+    "login",
+    "name",
+    "notification",
+    "notify",
+    "pass",
+    "passwd",
+    "password",
+    "personal",
+    "private",
+    "prod",
+    "production",
+    "public",
+    "release",
+    "remote",
+    "repo",
+    "secret",
+    "secrets",
+    "server",
+    "service",
+    "staging",
+    "test",
+    "tests",
+    "token",
+    "tokens",
+    "upload",
+    "user",
+    "username",
+    "value",
+    "webhook",
+    "webhooks"
+   ]
+  },
+  "_WFX_GREPS": {
+   "list": [
+    {
+     "value": "grep"
+    },
+    {
+     "value": "egrep"
+    },
+    {
+     "value": "fgrep"
+    },
+    {
+     "value": "zgrep"
+    },
+    {
+     "value": "rg"
+    },
+    {
+     "value": "ag"
+    },
+    {
+     "value": "ack"
+    },
+    {
+     "value": "findstr"
+    },
+    {
+     "value": "select-string"
+    },
+    {
+     "value": "sls"
+    }
+   ]
+  },
+  "_WFX_HEREDOC_RE": {
+   "flags": "",
+   "re": "(?<!<)<<(?!<)-?\\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|\"([A-Za-z_][A-Za-z0-9_]*)\"|([A-Za-z_][A-Za-z0-9_]*))"
+  },
+  "_WFX_IPV4_RE": {
+   "flags": "",
+   "re": "([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})\\Z"
+  },
+  "_WFX_LINE_MAX": {
+   "value": 100000
+  },
+  "_WFX_MARK_RE": {
+   "flags": "",
+   "re": "\\x01([0-9]+)\\x01"
+  },
+  "_WFX_NC_VALUE": {
+   "set": [
+    "--exec",
+    "--idle-timeout",
+    "--lua-exec",
+    "--output",
+    "--proxy",
+    "--proxy-auth",
+    "--proxy-type",
+    "--sh-exec",
+    "--source",
+    "--source-port",
+    "--wait",
+    "-G",
+    "-I",
+    "-O",
+    "-P",
+    "-T",
+    "-V",
+    "-W",
+    "-X",
+    "-c",
+    "-e",
+    "-g",
+    "-i",
+    "-o",
+    "-p",
+    "-q",
+    "-s",
+    "-w",
+    "-x"
+   ]
+  },
+  "_WFX_PS_ASSIGN_RE": {
+   "flags": "i",
+   "re": "\\s*\\$(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\\s*=(?!=)"
+  },
+  "_WFX_PS_SWITCHES": {
+   "set": [
+    "allowinsecureredirect",
+    "allowunencryptedauthentication",
+    "disablekeepalive",
+    "nobodyprogress",
+    "passthru",
+    "preserveauthorizationonredirect",
+    "preservehttpmethodonredirect",
+    "resume",
+    "skipcertificatecheck",
+    "skipheadervalidation",
+    "skiphttperrorcheck",
+    "usebasicparsing",
+    "usedefaultcredentials"
+   ]
+  },
+  "_WFX_REF_RE": {
+   "flags": "i",
+   "re": "\\x01[0-9]+\\x01|\\$env:[A-Za-z_][A-Za-z0-9_]*|\\$\\{?[A-Za-z_][A-Za-z0-9_]*\\}?|%[A-Za-z_][A-Za-z0-9_]*%"
+  },
+  "_WFX_SECRET_NAME_RE": {
+   "flags": "",
+   "re": "\\bsecrets\\s*(?:\\.\\s*([A-Za-z_][A-Za-z0-9_-]*)|\\[\\s*'([^'\\\"\\]]{1,100})'\\s*\\]|\\[\\s*\\\"([^'\\\"\\]]{1,100})\\\"\\s*\\])"
+  },
+  "_WFX_SENDERS": {
+   "list": [
+    {
+     "value": "curl"
+    },
+    {
+     "value": "wget"
+    },
+    {
+     "value": "nc"
+    },
+    {
+     "value": "ncat"
+    },
+    {
+     "value": "netcat"
+    },
+    {
+     "value": "socat"
+    },
+    {
+     "value": "invoke-webrequest"
+    },
+    {
+     "value": "iwr"
+    },
+    {
+     "value": "invoke-restmethod"
+    },
+    {
+     "value": "irm"
+    }
+   ]
+  },
+  "_WFX_SENT_CHECK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret it names and any credential the repository or its history holds. A step should send a secret only to the service it is for, as that service's credential."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-EXFIL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" sends {names} out with {how} {where}, not as a credential of that service: check that this is the service the secret is for."
+    },
+    "name": {
+     "value": "Workflow sends secrets out"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "GhostAction (August to October 2026) committed workflows under the identities of the accounts it had stolen: the first wave named the secrets the repository's own workflows use and sent their values in one request to a raw IP address over plain HTTP; the October wave checked out the whole history, searched the tree and `git log -p` for credentials and sent what it found. A secret sent as the credential of the service it is for (an Authorization or token header, `-u`, a token parameter), or that is the address itself (a webhook's URL), is not counted."
+    }
+   }
+  },
+  "_WFX_SENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret it names and any credential the repository or its history holds. A step should send a secret only to the service it is for, as that service's credential."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-EXFIL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" sends {names} out with {how} {where} ({why}): GhostAction's workflows sent repositories' secrets this way."
+    },
+    "name": {
+     "value": "Workflow sends secrets out"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "GhostAction (August to October 2026) committed workflows under the identities of the accounts it had stolen: the first wave named the secrets the repository's own workflows use and sent their values in one request to a raw IP address over plain HTTP; the October wave checked out the whole history, searched the tree and `git log -p` for credentials and sent what it found. A secret sent as the credential of the service it is for (an Authorization or token header, `-u`, a token parameter), or that is the address itself (a webhook's URL), is not counted."
+    }
+   }
+  },
+  "_WFX_SOCAT_ADDR_RE": {
+   "flags": "i",
+   "re": "(tcp[46]?|udp[46]?|tcp[46]?-connect|udp[46]?-sendto|udp[46]?-connect|openssl|openssl-connect|ssl):(\\[[^\\]]*\\]|[^:,]+)"
+  },
+  "_WFX_SWEEP_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret it names and any credential the repository or its history holds. A step should send a secret only to the service it is for, as that service's credential."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-EXFIL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" searches the repository for credentials (`{search}`) and sends what it finds out with {how}: GhostAction's workflows swept repositories and their history this way."
+    },
+    "name": {
+     "value": "Workflow sends secrets out"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "GhostAction (August to October 2026) committed workflows under the identities of the accounts it had stolen: the first wave named the secrets the repository's own workflows use and sent their values in one request to a raw IP address over plain HTTP; the October wave checked out the whole history, searched the tree and `git log -p` for credentials and sent what it found. A secret sent as the credential of the service it is for (an Authorization or token header, `-u`, a token parameter), or that is the address itself (a webhook's URL), is not counted."
+    }
+   }
+  },
+  "_WFX_VAR_RE": {
+   "flags": "i",
+   "re": "\\$env:([A-Za-z_][A-Za-z0-9_]*)|\\$\\{?([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%"
+  },
+  "_WFX_WGET_LONG_VALUE": {
+   "set": [
+    "accept",
+    "append-output",
+    "base",
+    "bind-address",
+    "body-data",
+    "body-file",
+    "ca-certificate",
+    "certificate",
+    "directory-prefix",
+    "domains",
+    "exclude-directories",
+    "execute",
+    "header",
+    "http-password",
+    "http-user",
+    "include-directories",
+    "input-file",
+    "level",
+    "limit-rate",
+    "load-cookies",
+    "method",
+    "output-document",
+    "output-file",
+    "password",
+    "post-data",
+    "post-file",
+    "private-key",
+    "proxy-password",
+    "proxy-user",
+    "quota",
+    "referer",
+    "reject",
+    "save-cookies",
+    "timeout",
+    "tries",
+    "user",
+    "user-agent",
+    "wait"
+   ]
+  },
+  "_WFX_WGET_SHORT_VALUE": {
+   "value": "OoaPUetTwiBQlARDXI"
+  },
+  "_WFX_WRAPPERS": {
+   "list": [
+    {
+     "value": "sudo"
+    },
+    {
+     "value": "env"
+    },
+    {
+     "value": "time"
+    },
+    {
+     "value": "command"
+    },
+    {
+     "value": "exec"
+    },
+    {
+     "value": "nohup"
+    },
+    {
+     "value": "builtin"
+    },
+    {
+     "value": "nice"
+    },
+    {
+     "value": "stdbuf"
+    },
+    {
+     "value": "timeout"
+    }
+   ]
+  },
+  "_WF_BACKDOOR_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, and remove any runner you did not register. Otherwise pass the text through an environment variable and quote it in the script."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-BACKDOOR"
+    },
+    "msg": {
+     "value": "The job \"{job}\" puts {expr} into a command on a self-hosted runner, and {event} events start it: anyone who can {act} runs commands on that machine."
+    },
+    "name": {
+     "value": "Workflow runs event text on a self-hosted runner"
+    },
+    "ref": {
+     "value": "CWE-94 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A `${{ \u2026 }}` expression is pasted into the script before it runs, so text from an issue, a discussion or a pull request becomes shell commands; on a self-hosted runner they run on that machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's machine."
+    }
+   }
+  },
+  "_WF_CACHE_ACTIONS": {
+   "list": [
+    {
+     "value": "actions/cache"
+    },
+    {
+     "value": "swatinem/rust-cache"
+    }
+   ]
+  },
+  "_WF_CACHE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Build the release without restored caches: no actions/cache, `cache:` off in the setup actions, `package-manager-cache: false` for setup-node. The build is slower, and its inputs are the ones in the commit."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-CACHE"
+    },
+    "msg": {
+     "value": "The job \"{job}\" restores a cache ({what}) in a workflow where {why}: what the cache holds runs with the release's token."
+    },
+    "name": {
+     "value": "Release workflow restores a build cache"
+    },
+    "ref": {
+     "value": "CWE-345 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A cache entry can be written by any job that can write to the repository's cache, and the next run restores it as it is: a poisoned entry changes the build that gets published without any change to the source."
+    }
+   }
+  },
+  "_WF_COMMAND_START": {
+   "value": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*"
+  },
+  "_WF_EVENT_WORD_RE": {
+   "flags": "",
+   "re": "[A-Za-z_]+"
+  },
+  "_WF_EXPR_MAX": {
+   "value": 500
+  },
+  "_WF_FETCHED_ARG_RE": {
+   "flags": "i",
+   "re": "(?:\\b(?:ba|z|da|k|a|c)?sh|\\bsource|(?<![\\w.])\\.)(?:\\s+-[A-Za-z]+)*\\s+[\\\"']?<\\(\\s*(?:curl|wget|iwr|irm)\\b|\\b(?:(?:ba|z|da|k|a|c)?sh(?:\\s+-[A-Za-z]+)*\\s+-[A-Za-z]*c|eval)\\s+[\\\"']?\\$\\(\\s*(?:curl|wget|iwr|irm)\\b|\\b(?:iex|Invoke-Expression)\\b[\\s\\\"'&{($]{0,20}(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|New-Object\\b)"
+  },
+  "_WF_FETCH_RE": {
+   "flags": "i",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*((?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\\b)"
+  },
+  "_WF_FIRST_PARTY": {
+   "list": [
+    {
+     "value": "actions/"
+    },
+    {
+     "value": "github/"
+    }
+   ]
+  },
+  "_WF_GH_PR_CHECKOUT_RE": {
+   "flags": "",
+   "re": "\\bgh\\s+pr\\s+checkout\\b"
+  },
+  "_WF_INSTALL_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*((?:npm\\s+(?:ci|install|i|add)|pnpm\\s+(?:install|i|add)|yarn\\s+(?:install|add)|bun\\s+(?:install|i|add)|pip3?\\s+install|python3?\\s+-m\\s+pip\\s+install|uv\\s+(?:sync|add|pip\\s+install)|poetry\\s+install|pipenv\\s+install|bundle\\s+install|composer\\s+(?:install|update)|cargo\\s+(?:build|fetch|install)|go\\s+(?:get|install|build|mod\\s+download))(?![\\w-])|yarn(?=\\s*(?:$|[;&|)])))"
+  },
+  "_WF_NETWORK_RE": {
+   "flags": "i",
+   "re": "\\b(?:curl|wget|nc|ncat|netcat|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\\b|https?://|/dev/tcp/"
+  },
+  "_WF_OIDC_INSTALL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Install and build in a job without `id-token: write`, upload the result as an artifact, and publish from a separate job that only downloads it and installs nothing."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-OIDC-INSTALL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" can request an OIDC token ({source}) and runs `{command}`: an install script or build hook of a dependency can request it too."
+    },
+    "name": {
+     "value": "Job that installs dependencies can request an OIDC token"
+    },
+    "ref": {
+     "value": "CWE-250 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Dependencies run code while they install and build, with the job's permissions. An OIDC token is what a package registry's trusted publishing and a cloud account's federation take as proof of identity, so code that can request one can publish or deploy as the workflow."
+    }
+   }
+  },
+  "_WF_OUTSIDER_ACTS": {
+   "list": [
+    {
+     "value": "open a discussion"
+    },
+    {
+     "value": "comment on a discussion"
+    },
+    {
+     "value": "open an issue"
+    },
+    {
+     "value": "comment on an issue"
+    },
+    {
+     "value": "open a pull request"
+    },
+    {
+     "value": "open a pull request"
+    },
+    {
+     "value": "review a pull request"
+    },
+    {
+     "value": "comment on a pull request's code"
+    }
+   ]
+  },
+  "_WF_OUTSIDER_EVENTS": {
+   "list": [
+    {
+     "value": "discussion"
+    },
+    {
+     "value": "discussion_comment"
+    },
+    {
+     "value": "issues"
+    },
+    {
+     "value": "issue_comment"
+    },
+    {
+     "value": "pull_request_target"
+    },
+    {
+     "value": "pull_request"
+    },
+    {
+     "value": "pull_request_review"
+    },
+    {
+     "value": "pull_request_review_comment"
+    }
+   ]
+  },
+  "_WF_PERMS_MISSING_RULE": {
+   "map": {
+    "fix": {
+     "value": "Set `permissions: contents: read` at the top of the workflow and grant more only where a job needs it."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-PERMISSIONS"
+    },
+    "msg": {
+     "value": "The workflow sets no top-level `permissions:`, and {who} none of its own: the token gets the repository's default permissions, which can include write access."
+    },
+    "name": {
+     "value": "Workflow sets no permissions"
+    },
+    "ref": {
+     "value": "CWE-250 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A job should get only the access it uses. A workflow-level `permissions:` with a write scope hands it to every job, the ones that run third-party actions and install dependencies among them."
+    }
+   }
+  },
+  "_WF_PERMS_RULE": {
+   "map": {
+    "fix": {
+     "value": "Set `permissions: contents: read` at the top of the workflow and grant a write scope only in the job that needs it."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-PERMISSIONS"
+    },
+    "msg": {
+     "value": "The workflow's token has write access in every job ({scopes}): a step in any job, or any action it runs, can use it."
+    },
+    "name": {
+     "value": "Workflow grants write permissions to every job"
+    },
+    "ref": {
+     "value": "CWE-250 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A job should get only the access it uses. A workflow-level `permissions:` with a write scope hands it to every job, the ones that run third-party actions and install dependencies among them."
+    }
+   }
+  },
+  "_WF_PIPELINE_RE": {
+   "flags": "",
+   "re": "\\|\\||&&|[;\\n]"
+  },
+  "_WF_PIPE_SHELL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Save the script to a file, check its SHA-256 against a value kept in the repository, then run it; or install the tool from a package manager at a version, with its hash."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-PIPE-SHELL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" fetches a script and runs it as it arrives (`{command}`): it runs whatever that address serves at that moment."
+    },
+    "name": {
+     "value": "Workflow runs a script it downloads without reading it"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A script piped into a shell is not read before it runs: whoever controls the host, or anyone on the path when the address is not HTTPS, decides what runs, with the job's token and secrets. The Codecov Bash Uploader, piped into a shell by thousands of pipelines, was changed for two months in 2021 to send each job's environment to a server of the attacker's."
+    }
+   }
+  },
+  "_WF_PR_CHECKOUT_CMD_RE": {
+   "flags": "",
+   "re": "\\bgit\\s+(?:checkout|fetch|switch|pull|merge|cherry-pick)\\b"
+  },
+  "_WF_PR_CHECKOUT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Run a pull request's code under `pull_request` (no secrets, a read-only token). If a job needs secrets, check out only the base branch and treat the pull request's files as data: never install, build or run them."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-PR-CHECKOUT"
+    },
+    "msg": {
+     "value": "The job \"{job}\" runs on pull_request_target and checks out the pull request's code ({via}: {expr}): whatever it then installs, builds or runs gets the repository's secrets and a token that can write."
+    },
+    "name": {
+     "value": "pull_request_target job checks out the pull request"
+    },
+    "ref": {
+     "value": "CWE-94 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "pull_request_target runs the base repository's workflow with its secrets and a token that can write, so that a workflow can answer a pull request from a fork. Running the fork's code there lets anyone who can open a pull request run commands with that access (the \"pwn request\")."
+    }
+   }
+  },
+  "_WF_PR_HEAD_RE": {
+   "flags": "",
+   "re": "github\\.event\\.pull_request\\.head\\.(?:sha|ref|repo)|github\\.head_ref|refs/pull/|\\bpull/(?:\\d|\\$\\{\\{)"
+  },
+  "_WF_PUBLISH_ACTIONS": {
+   "list": [
+    {
+     "value": "pypa/gh-action-pypi-publish"
+    },
+    {
+     "value": "softprops/action-gh-release"
+    },
+    {
+     "value": "ncipollo/release-action"
+    },
+    {
+     "value": "goreleaser/goreleaser-action"
+    },
+    {
+     "value": "actions/create-release"
+    },
+    {
+     "value": "actions/attest-build-provenance"
+    },
+    {
+     "value": "actions/attest"
+    },
+    {
+     "value": "rust-lang/crates-io-auth-action"
+    },
+    {
+     "value": "js-devtools/npm-publish"
+    },
+    {
+     "value": "slsa-framework/slsa-github-generator"
+    },
+    {
+     "value": "sigstore/gh-action-sigstore-python"
+    }
+   ]
+  },
+  "_WF_PUBLISH_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*((?:npm|pnpm|bun)\\s+publish\\b|yarn\\s+(?:npm\\s+)?publish\\b|twine\\s+upload\\b|uv\\s+publish\\b|poetry\\s+publish\\b|cargo\\s+publish\\b|gh\\s+release\\s+create\\b|docker\\s+push\\b|vsce\\s+publish\\b|ovsx\\s+publish\\b|gem\\s+push\\b|dotnet\\s+nuget\\s+push\\b|helm\\s+push\\b)"
+  },
+  "_WF_SCOPE_OUTPUT_RE": {
+   "flags": "",
+   "re": "\\b(steps|needs)\\s*\\.\\s*([\\w-]+)\\s*\\.\\s*outputs\\s*\\.\\s*([\\w-]+)"
+  },
+  "_WF_SCRIPT_HEAD_RE": {
+   "flags": "i",
+   "re": "\\s*(?:sudo\\b(?:\\s+-\\S+)*\\s+)?(?:env\\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*(?:[\\w./-]*/)?((?:ba|z|da|k|a|c)?sh|python[0-9.]*|node|perl|ruby|iex|Invoke-Expression|pwsh|powershell)\\b"
+  },
+  "_WF_SECRETS_HELD_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret of the repository. A job should get only the secrets it uses, by name (${{ secrets.NAME }})."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-SECRETS"
+    },
+    "msg": {
+     "value": "The workflow hands every repository secret to {where} (toJSON(secrets)): any step there can read them all."
+    },
+    "name": {
+     "value": "Workflow hands out every secret"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets from the repositories they reached (a webhook.site upload, a build artifact)."
+    }
+   }
+  },
+  "_WF_SECRETS_RE": {
+   "flags": "i",
+   "re": "\\btoJSON\\s*\\(\\s*secrets\\s*\\)"
+  },
+  "_WF_SECRETS_SENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret of the repository. A job should get only the secrets it uses, by name (${{ secrets.NAME }})."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-SECRETS"
+    },
+    "msg": {
+     "value": "The workflow hands every repository secret to {where} and sends that value out ({how})."
+    },
+    "name": {
+     "value": "Workflow hands out every secret"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "The complete secrets object reaches a send, or a send-capable step cannot be fully cleared. Unsupported senders, unresolved paths and unmodeled hand-offs remain CRITICAL; MAJOR requires positive clearance."
+    }
+   }
+  },
+  "_WF_SECRETS_UNCLEARED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret of the repository. A job should get only the secrets it uses, by name (${{ secrets.NAME }})."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-SECRETS"
+    },
+    "msg": {
+     "value": "The workflow hands every repository secret to {where}; the reader cannot rule out exposure ({how})."
+    },
+    "name": {
+     "value": "Workflow hands out every secret"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "The complete secrets object reaches a send, or a send-capable step cannot be fully cleared. Unsupported senders, unresolved paths and unmodeled hand-offs remain CRITICAL; MAJOR requires positive clearance."
+    }
+   }
+  },
+  "_WF_SETUP_CACHE_ACTIONS": {
+   "list": [
+    {
+     "value": "actions/setup-node"
+    },
+    {
+     "value": "actions/setup-python"
+    },
+    {
+     "value": "actions/setup-go"
+    },
+    {
+     "value": "actions/setup-java"
+    },
+    {
+     "value": "actions/setup-dotnet"
+    },
+    {
+     "value": "ruby/setup-ruby"
+    },
+    {
+     "value": "astral-sh/setup-uv"
+    }
+   ]
+  },
+  "_WF_SETUP_CACHE_KEYS": {
+   "list": [
+    {
+     "value": "cache"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "bundler-cache"
+    },
+    {
+     "value": "enable-cache"
+    }
+   ]
+  },
+  "_WF_SETUP_CACHE_ON": {
+   "list": [
+    {
+     "value": "actions/setup-go"
+    },
+    {
+     "value": "astral-sh/setup-uv"
+    }
+   ]
+  },
+  "_WF_SHELLS": {
+   "list": [
+    {
+     "value": "sh"
+    },
+    {
+     "value": "bash"
+    },
+    {
+     "value": "zsh"
+    },
+    {
+     "value": "dash"
+    },
+    {
+     "value": "ksh"
+    },
+    {
+     "value": "ash"
+    },
+    {
+     "value": "csh"
+    },
+    {
+     "value": "iex"
+    },
+    {
+     "value": "invoke-expression"
+    },
+    {
+     "value": "pwsh"
+    },
+    {
+     "value": "powershell"
+    }
+   ]
+  },
+  "_WF_STDIN_ONLY_RE": {
+   "flags": "",
+   "re": "(?:\\s+-[A-Za-z]+)*(?:\\s+-)?\\s*\\Z"
+  },
+  "_WF_UNPINNED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Pin it to the full 40-character commit SHA and keep the version in a comment (`uses: owner/repo@<sha> # v4.1.0`); let Dependabot or Renovate propose the updates. For an image, pin `@sha256:\u2026`."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-UNPINNED"
+    },
+    "msg": {
+     "value": "The workflow runs {what}{uses}, which is not pinned to {pin}: whoever controls that ref can change what runs in your pipeline."
+    },
+    "name": {
+     "value": "Workflow runs something not pinned to a commit"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A tag or a branch can be moved to other code after you reviewed it: in March 2025 the tags of tj-actions/changed-files were rewritten to a commit that printed the secrets of every workflow that used it into its build log. A full commit SHA, or an image digest, can't be moved."
+    }
+   }
+  },
+  "_WF_UNTRUSTED_RE": {
+   "flags": "",
+   "re": "\\bgithub\\.head_ref\\b|\\bgithub\\.event\\.(?:discussion|issue|comment|pull_request|review|review_comment|head_commit|commits|pages|workflow_run)\\b[\\w.\\[\\]*-]{0,200}?\\.(?:title|body|message|name|email|ref|label|head_branch|page_name|default_branch)\\b"
+  },
+  "_WF_WRITE_SCOPE_RE": {
+   "flags": "",
+   "re": "([A-Za-z-]+)\\s*:\\s*write\\b"
   },
   "_WORKFLOW_BACKDOOR_WHY": {
    "value": "A `${{ \u2026 }}` expression is pasted into the script before it runs, so text from an issue, a discussion or a pull request becomes shell commands; on a self-hosted runner they run on that machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's machine."
@@ -15013,6 +19829,50 @@
      ]
     }
    }
+  },
+  "_WSH_EXEC_RE": {
+   "flags": "",
+   "re": "(?:\\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|execaSync|execa|system|popen|Popen|run|call|check_call|check_output|getoutput|getstatusoutput|create_subprocess_exec|create_subprocess_shell|startfile|Run|Exec|ShellExecute|ShellExecuteEx)|\\bCommand::new|\\bnew\\s+Command|\\bProcessBuilder)\\s*$"
+  },
+  "_WSH_LAUNCHER_RE": {
+   "flags": "i",
+   "re": "(?<![\\w.\\-%$])(?:[A-Za-z]:)?[\\\\/]?(?:[\\w.\\-%$~{}]+[\\\\/])*(?:wscript|cscript|mshta)(?:\\.exe)?\\b"
+  },
+  "_WSH_SCRIPT_RE": {
+   "flags": "i",
+   "re": "[\\w\\-]\\.(?:vbs|vbe|js|jse|wsf|wsh|hta)\\b"
+  },
+  "_WSH_WRAPPERS": {
+   "set": [
+    "ash",
+    "bash",
+    "call",
+    "cmd",
+    "command",
+    "dash",
+    "do",
+    "else",
+    "env",
+    "eval",
+    "exec",
+    "iex",
+    "invoke-expression",
+    "ksh",
+    "nice",
+    "nohup",
+    "powershell",
+    "pwsh",
+    "runas",
+    "saps",
+    "sh",
+    "start",
+    "start-process",
+    "sudo",
+    "then",
+    "time",
+    "wine",
+    "zsh"
+   ]
   },
   "_WS_ADDRESS_RE": {
    "flags": "",

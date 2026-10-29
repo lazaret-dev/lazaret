@@ -29,9 +29,8 @@ class PythonAnnotationTests(unittest.TestCase):
         self.assertIn(("T-CMD", 3), found(src, "py"))
 
     def test_keywords_are_not_names(self):
-        self.assertEqual(core._assignment("else: x = request.args['a']", "py"), (None, None))
-        self.assertEqual(core._assignment("case y: z = input()", "py"), (None, None))
-        self.assertEqual(core._assignment("match = input()", "py"), (["match"], "input()"))
+        # (the engine's own tests hold the assignments a line makes: taint_tests.rs)
+        self.assertIn(("T-CMD", 3), found("import os\nmatch = input()\nos.system(match)\n", "py"))
         src = ("import os\n"
                "if a:\n    pass\n"
                "else: x = input()\n"
@@ -40,7 +39,7 @@ class PythonAnnotationTests(unittest.TestCase):
         self.assertNotIn(("T-CMD", 6), found(src, "py"))
 
     def test_comparison_is_not_assignment(self):
-        self.assertEqual(core._assignment("x == input()", "py"), (None, None))
+        self.assertNotIn(("T-CMD", 3), found("import os\nx == input()\nos.system(x)\n", "py"))
 
 
 class JavaScriptDestructuringTests(unittest.TestCase):
@@ -52,8 +51,11 @@ class JavaScriptDestructuringTests(unittest.TestCase):
         self.assertIn(("T-PATH", 3), found(src, "js"))
 
     def test_renamed_default_and_rest_bindings(self):
-        self.assertEqual(core._destructured_names("{ a, b: c, d = 1, ...e }"), ["a", "c", "d", "e"])
-        self.assertEqual(core._destructured_names("[a, , b = 2, ...c]"), ["a", "b", "c"])
+        for name, n in (("a", 1), ("c", 2), ("d", 3), ("e", 4)):
+            src = "const { a, b: c, d = 1, ...e } = req.query;\n" + "\n" * (n - 1) + f"eval({name});\n"
+            self.assertIn(("T-CODE", n + 1), found(src, "js"))
+        self.assertIn(("T-CODE", 2), found("let [a, , b = 2, ...c] = process.argv;\neval(c);\n", "js"))
+        self.assertNotIn(("T-CODE", 2), found("const { b: c } = req.query;\neval(b);\n", "js"))
         src = ("const { id, path: p } = req.params;\n"
                "require('child_process').exec(p);\n")
         self.assertIn(("T-CMD", 2), found(src, "js"))

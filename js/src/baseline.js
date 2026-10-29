@@ -1,5 +1,7 @@
-// Baselines (new-code focus) — twin of lazaret.scanner.reports fingerprint /
-// sign_fingerprints / verify_signature and core.apply_baseline.
+// Baselines (new-code focus): the engine's (baseline.rs, BR-7 step 4 d), as core.apply_baseline and the
+// reports module's fingerprints and signature ask it. What stays here is the package's: whether the file is one
+// of our reports (its head), where it is (inside the scanned tree, links followed), its bytes, the key from the
+// environment, and the warnings handed to `warn`.
 //
 // Trust (G17): the engine marker is a public constant, so a hand-written
 // "baseline" carrying it could zero `newIssues`. Therefore:
@@ -8,109 +10,52 @@
 //     signature verifies with that key (wherever it lives);
 //   * no key: a baseline inside the scanned tree is untrusted (the scanned
 //     repository could have planted it); outside it the marker check applies.
-// An untrusted baseline counts every finding as new (fail closed).
-//
-// Signature serialization (shared with the Python engine):
-//   HMAC-SHA256(key = UTF-8(LAZARET_BASELINE_KEY),
-//               b"lazaret-baseline-v1\n" + json.dumps(sorted(set(fingerprints)),
-//                                                    ensure_ascii=True, separators=(",", ":")))
-//   stored as {"alg": "HMAC-SHA256", "value": <hex>} under "baselineSignature".
+// An untrusted baseline counts every finding as new (fail closed). N-15: a signed baseline that verifies accepts
+// the findings it holds that no marker can accept (SC-*, X-*): the gate's conditions on findings are judged
+// without them.
 
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { sep } from "node:path";
 import { isOurReport } from "./lib/fs.js";
-import { pyStrip, pyStr, cmpCodePoints, MAX_JSON_DEPTH } from "./lib/pycompat.js";
-import { pyJsonParse } from "./lib/pyjson.js";
+import { call, bytesText } from "./lib/native.js";
+import { findingRows } from "./result.js";
 
 export const BASELINE_KEY_ENV = "LAZARET_BASELINE_KEY";
 export const SIGNATURE_FIELD = "baselineSignature";
 export const SIGNATURE_ALG = "HMAC-SHA256";
-const DOMAIN = "lazaret-baseline-v1\n";
 
-class Malformed extends Error {}
-const isNum = (v) => typeof v === "number" || typeof v === "boolean";
+/** Findings per engine call. */
+const BATCH = 2000;
 
-/** rule|path|flagged-line fingerprint; throws Malformed where Python raises KeyError/TypeError/AttributeError. */
-export function fingerprint(issue) {
-  if (issue === null || typeof issue !== "object" || Array.isArray(issue)) throw new Malformed();
-  if (!("line" in issue) || !("snipStart" in issue) || !isNum(issue.line) || !isNum(issue.snipStart)) throw new Malformed();
-  const idx = Number(issue.line) - Number(issue.snipStart);
-  let snippet = issue.snippet;
-  if (!snippet || (typeof snippet === "object" && !Array.isArray(snippet) && !Object.keys(snippet).length)) snippet = [];
-  if (isNum(snippet)) throw new Malformed();
-  let lineText = "";
-  const len = typeof snippet === "string" ? Array.from(snippet).length
-    : Array.isArray(snippet) ? snippet.length : Object.keys(snippet).length;
-  if (idx >= 0 && idx < len) {
-    if (!Number.isInteger(idx)) throw new Malformed();
-    const v = typeof snippet === "string" ? Array.from(snippet)[idx] : Array.isArray(snippet) ? snippet[idx] : undefined;
-    if (typeof v !== "string") throw new Malformed();
-    lineText = pyStrip(v);
-  }
-  if (!("file" in issue) || !("rule" in issue)) throw new Malformed();
-  const path = pyStr(issue.file).replace(/\\/g, "/");
-  return `${pyStr(issue.rule)}|${path}|${lineText}`;
-}
-
-function fingerprints(issues) {
+/** Each finding's rule|path|flagged-line fingerprint, null for an entry that has none (the engine's). */
+export function fingerprints(issues) {
   const out = [];
-  let skipped = 0;
-  for (const i of Array.isArray(issues) ? issues : []) {
-    try { out.push(fingerprint(i)); } catch (e) { if (e instanceof Malformed) skipped++; else throw e; }
+  for (let k = 0; k < issues.length; k += BATCH) {
+    for (const fp of call("baseline_fingerprints", { issues: issues.slice(k, k + BATCH) }).fingerprints) out.push(fp);
   }
-  return { out, skipped };
+  return out;
 }
 
-/** json.dumps(str, ensure_ascii=True) */
-function jsonAscii(s) {
-  let out = '"';
-  for (let k = 0; k < s.length; k++) {
-    const c = s.charCodeAt(k);
-    const ch = s[k];
-    if (ch === '"') out += '\\"';
-    else if (ch === "\\") out += "\\\\";
-    else if (ch === "\n") out += "\\n";
-    else if (ch === "\r") out += "\\r";
-    else if (ch === "\t") out += "\\t";
-    else if (ch === "\b") out += "\\b";
-    else if (ch === "\f") out += "\\f";
-    else if (c < 0x20 || c > 0x7e) out += "\\u" + c.toString(16).padStart(4, "0");
-    else out += ch;
-  }
-  return out + '"';
+/** One finding's fingerprint; throws a TypeError for an entry that has none (core.fingerprint). */
+export function fingerprint(issue) {
+  const fp = fingerprints([issue])[0];
+  if (fp === null) throw new TypeError("not a baseline entry (an object with rule, file, line and snipStart)");
+  return fp;
 }
 
-/** Hex HMAC-SHA256 over the canonical serialization of `fps` (see the header),
- * fed to the HMAC piece by piece: for a big report it is too long for one string. */
+/** Hex HMAC-SHA256 over a domain prefix and the sorted, distinct fingerprints as ASCII JSON (the engine's). */
 export function signFingerprints(fps, key) {
-  const mac = createHmac("sha256", Buffer.from(key, "utf8")).update(DOMAIN + "[", "utf8");
-  let sep = "";
-  for (const fp of [...new Set(fps)].sort(cmpCodePoints)) { mac.update(sep + jsonAscii(fp), "utf8"); sep = ","; }
-  return mac.update("]", "utf8").digest("hex");
+  return call("baseline_sign", { fingerprints: fps.filter((f) => typeof f === "string"), key }).value;
 }
 
 /** The signature object a JSON report carries when a key is configured (else null). */
 export function reportSignature(res, key) {
   if (!key) return null;
-  return { alg: SIGNATURE_ALG, value: signFingerprints(fingerprints(res.issues).out, key) };
+  return { alg: SIGNATURE_ALG, value: signFingerprints(Array.isArray(res.issues) ? fingerprints(res.issues) : [], key) };
 }
 /** Back-compatible helper: the signature value for a list of issues. */
 export function baselineSignature(issues, key) {
-  return signFingerprints(fingerprints(issues).out, key);
-}
-
-function verifySignature(doc, key) {
-  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) return [false, "not a JSON object"];
-  const sig = doc[SIGNATURE_FIELD];
-  if (!sig || typeof sig !== "object" || Array.isArray(sig) || typeof sig.value !== "string")
-    return [false, "it carries no baseline signature"];
-  if (sig.alg !== SIGNATURE_ALG) return [false, "unsupported signature algorithm"];
-  const want = Buffer.from(signFingerprints(fingerprints(doc.issues).out, key), "utf8");
-  const got = Buffer.from(sig.value, "utf8");
-  if (want.length !== got.length || !timingSafeEqual(want, got))
-    return [false, `its signature does not verify with $${BASELINE_KEY_ENV} (forged, edited, or signed with another key)`];
-  return [true, ""];
+  return signFingerprints(fingerprints(issues), key);
 }
 
 /** Does `path` resolve (symlinks followed) inside directory `root`? */
@@ -123,62 +68,38 @@ export function pathIsInside(path, root) {
   }
 }
 
-const pyTypeName = (v) => (v === null ? "NoneType" : Array.isArray(v) ? "list" : typeof v === "string" ? "str"
-  : typeof v === "boolean" ? "bool" : typeof v === "number" ? (Number.isInteger(v) ? "int" : "float") : "dict");
-
 /**
- * Apply a baseline to a scan result (mutates res): each issue gets `new`,
- * res gets `newIssues` (and `baselineUntrusted` when the baseline was not
- * trusted). `warn` receives warning lines.
+ * Apply a baseline to a scan result (mutates res): each issue gets `new`, res gets `newIssues` (and
+ * `baselineUntrusted` when the baseline was not trusted); a signed one's accepted findings get `accepted`, res
+ * `acceptedIssues` and the gate judged without them. `warn` receives the warning lines.
  */
 export function applyBaseline(res, baselinePath, { root = null, warn = () => {}, env = process.env } = {}) {
-  const untrusted = (reason) => {
-    warn(`warning: baseline ${baselinePath} ${reason} — treating it as untrusted: all current findings are counted as new`);
-    for (const i of res.issues) i.new = true;
-    res.newIssues = res.issues.length;
-    res.baselineUntrusted = true;
+  const issues = res.issues;
+  const args = {
+    path: String(baselinePath), ours: isOurReport(baselinePath, "json"),
+    inside: !!root && pathIsInside(baselinePath, root), key: env[BASELINE_KEY_ENV] || null,
+    fingerprints: fingerprints(issues), issues: findingRows(issues),
+    conditions: (res.conditions || []).map((c) => [c.label, c.ok]),
   };
-  if (!isOurReport(baselinePath, "json")) {
-    untrusted("is not a report produced by this engine (no matching engine marker, or wrong shape)");
-    return;
+  let data = "";
+  if (args.ours) {
+    try {
+      data = bytesText(readFileSync(baselinePath));
+    } catch (e) {
+      args.error = e.message;
+    }
   }
-  const key = env[BASELINE_KEY_ENV] || null;
-  if (!key && root && pathIsInside(baselinePath, root)) {
-    untrusted(`is inside the scanned tree and $${BASELINE_KEY_ENV} is not set (the scanned repository could have planted it) — keep baselines outside the scanned tree (e.g. in $RUNNER_TEMP) or set ${BASELINE_KEY_ENV} so reports are signed`);
-    return;
+  const got = call("baseline_apply", args, data);
+  for (const line of got.warnings) warn(line);
+  if (got.new) {
+    got.new.forEach((isNew, k) => { issues[k].new = isNew; });
+    res.newIssues = got.newIssues;
   }
-  let prev;
-  try {
-    const r = pyJsonParse(readFileSync(baselinePath, "utf8"));
-    if (r.depth) throw new Error(`JSON nested deeper than ${MAX_JSON_DEPTH} levels`);   // core.JsonTooDeep
-    if (!r.ok) throw new Error("the baseline is not valid JSON");
-    prev = r.value;
-  } catch (e) {
-    warn(`warning: could not read baseline ${baselinePath}: ${e.message}`);
-    return;
+  if (got.untrusted) res.baselineUntrusted = true;
+  if (got.accepted) {
+    got.accepted.forEach((yes, k) => { if (yes) issues[k].accepted = true; });
+    res.acceptedIssues = got.acceptedIssues;
+    got.conditions.forEach((now, k) => { res.conditions[k].ok = now.ok; });
+    res.pass = got.pass;
   }
-  if (prev === null || typeof prev !== "object" || Array.isArray(prev)) {
-    warn(`warning: baseline ${baselinePath}: top level is ${pyTypeName(prev)}, not an object — expected {"issues": [...]}; baseline ignored`);
-    return;
-  }
-  const issues = Object.prototype.hasOwnProperty.call(prev, "issues") ? prev.issues : [];
-  if (!Array.isArray(issues)) {
-    warn(`warning: baseline ${baselinePath}: 'issues' is ${pyTypeName(issues)}, not a list — baseline ignored`);
-    return;
-  }
-  if (key) {
-    const [ok, why] = verifySignature(prev, key);
-    if (!ok) { untrusted(`is not trusted: ${why}`); return; }
-  }
-  const { out, skipped } = fingerprints(issues);
-  const known = new Set(out);
-  if (skipped) warn(`warning: baseline ${baselinePath}: ${skipped} malformed issue entrie(s) skipped (expected objects with rule/file/line)`);
-  let n = 0;
-  for (const i of res.issues) {
-    let fp = null;
-    try { fp = fingerprint(i); } catch { /* our own issues are well-formed */ }
-    i.new = !known.has(fp);
-    if (i.new) n++;
-  }
-  res.newIssues = n;
 }

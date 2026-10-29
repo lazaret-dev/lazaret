@@ -3,8 +3,10 @@ values into f-strings and template literals, over the lines of a statement and
 through augmented assignments, read the same sink arguments, Flask views and
 guards, keep a taint where it lives, model the same frameworks (route
 parameters, sinks, sanitizers, containers, allowlists) — and so report the
-same T-* findings on every case of tests/scanner/test_taint_fstrings.py and
-test_taint_frameworks.py, each written as a file of its own, next to
+same T-* findings on every case of tests/scanner/test_taint_fstrings.py,
+test_taint_frameworks.py, test_taint_redirect_host.py (Q-5) and
+test_taint_helpers.py (Q-4: its project trees too, a helper in another file
+followed), each written as a file of its own, next to
 adversarial shapes (unterminated literals, deep brackets, astral characters,
 CRLF, very long lines). Skipped where the npm engine is not built (node, and npm run build in js/).
 """
@@ -16,6 +18,8 @@ from tests.architecture.test_js_parity import DERIVED, NODE, _python_only, both,
 from tests.architecture.test_js_parity_lexing import write_tree
 from tests.scanner.test_taint_fstrings import QUIET, REPORTED
 from tests.scanner import test_taint_frameworks as frameworks
+from tests.scanner import test_taint_redirect_host as redirect_host
+from tests.scanner import test_taint_helpers as helpers
 
 TREE = {}
 for n, (lang, src, _) in enumerate(REPORTED):
@@ -26,6 +30,17 @@ for n, (lang, src, _) in enumerate(frameworks.REPORTED):
     TREE[f"frameworks/r{n:02d}.{lang}"] = src
 for n, (lang, src) in enumerate(frameworks.QUIET):
     TREE[f"frameworks/q{n:02d}.{lang}"] = src
+for n, (lang, src, _) in enumerate(redirect_host.REPORTED):
+    TREE[f"redirect_host/r{n:02d}.{lang}"] = src
+for n, (lang, src) in enumerate(redirect_host.QUIET):
+    TREE[f"redirect_host/q{n:02d}.{lang}"] = src
+for n, (lang, src, _) in enumerate(helpers.REPORTED):
+    TREE[f"helpers/r{n:02d}.{lang}"] = src
+for n, (lang, src) in enumerate(helpers.QUIET):
+    TREE[f"helpers/q{n:02d}.{lang}"] = src
+for n, files in enumerate([f for f, _ in helpers.PROJECT_REPORTED] + helpers.PROJECT_QUIET):
+    for rel, src in files.items():
+        TREE[f"helper_projects/p{n:02d}/{rel}"] = src
 TREE.update({
     "odd/unterminated.py": "import os\nq = input()\nos.system(f'ls {q}\nos.system(\"a\" + q\n",
     "odd/unterminated.js": "const cp = require('child_process');\nconst q = process.argv[2];\ncp.exec(`ls ${q}\n",

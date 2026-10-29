@@ -118,52 +118,20 @@ impl TokenPattern {
         EYJ.get_or_init(|| Regex::compile("eyJ", 0).expect("eyJ compiles"))
     }
 
+    /// The matches at or after `pos`, leftmost-first, one at a time (core's `_spans`, lazily): each part's
+    /// search is kept until the matches pass it, so reading them all is one pass over the text.
+    pub fn iter<'a>(&'a self, s: &'a [u32], pos: usize) -> Tokens<'a> {
+        Tokens { t: self, s, pos, other: None, jwt: None, fresh_other: false, fresh_jwt: false, done: false }
+    }
+
     /// Every match at or after `pos`, leftmost-first, as core's `_spans`.
-    pub fn spans(&self, s: &[u32], mut pos: usize) -> Vec<(usize, usize)> {
-        let mut out = Vec::new();
-        let mut other: Option<(usize, usize)> = None;
-        let mut jwt: Option<(usize, usize)> = None;
-        let (mut fresh_other, mut fresh_jwt) = (false, false);
-        loop {
-            if !fresh_other || matches!(other, Some((a, _)) if a < pos) {
-                other = self.others.search_at(s, pos as isize, s.len() as isize).map(|m| (m.start(), m.end()));
-                fresh_other = true;
-            }
-            if !fresh_jwt || matches!(jwt, Some((a, _)) if a < pos) {
-                jwt = jwt_search(s, pos);
-                fresh_jwt = true;
-            }
-            let best = match (other, jwt) {
-                (None, None) => return out,
-                (Some(o), None) => o,
-                (None, Some(j)) => j,
-                (Some(o), Some(j)) => {
-                    if o.0 < j.0 {
-                        o
-                    } else {
-                        j
-                    }
-                }
-            };
-            out.push(best);
-            pos = best.1; // (matches are never empty)
-            if pos >= s.len() {
-                // one more round could still find nothing: every part needs a character
-                return out;
-            }
-        }
+    pub fn spans(&self, s: &[u32], pos: usize) -> Vec<(usize, usize)> {
+        self.iter(s, pos).collect()
     }
 
     /// The first match at or after `pos`.
     pub fn search(&self, s: &[u32], pos: usize) -> Option<(usize, usize)> {
-        let other = self.others.search_at(s, pos as isize, s.len() as isize).map(|m| (m.start(), m.end()));
-        let jwt = jwt_search(s, pos);
-        match (other, jwt) {
-            (None, None) => None,
-            (Some(o), None) => Some(o),
-            (None, Some(j)) => Some(j),
-            (Some(o), Some(j)) => Some(if o.0 < j.0 { o } else { j }),
-        }
+        self.iter(s, pos).next()
     }
 
     /// re.sub with a literal replacement.
@@ -181,6 +149,56 @@ impl TokenPattern {
         }
         out.extend_from_slice(&s[pos..]);
         out
+    }
+}
+
+/// TokenPattern::iter's matches.
+pub struct Tokens<'a> {
+    t: &'a TokenPattern,
+    s: &'a [u32],
+    pos: usize,
+    other: Option<(usize, usize)>,
+    jwt: Option<(usize, usize)>,
+    fresh_other: bool,
+    fresh_jwt: bool,
+    done: bool,
+}
+
+impl Iterator for Tokens<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        if self.done {
+            return None;
+        }
+        let (s, pos) = (self.s, self.pos);
+        if !self.fresh_other || matches!(self.other, Some((a, _)) if a < pos) {
+            self.other = self.t.others.search_at(s, pos as isize, s.len() as isize).map(|m| (m.start(), m.end()));
+            self.fresh_other = true;
+        }
+        if !self.fresh_jwt || matches!(self.jwt, Some((a, _)) if a < pos) {
+            self.jwt = jwt_search(s, pos);
+            self.fresh_jwt = true;
+        }
+        let best = match (self.other, self.jwt) {
+            (None, None) => {
+                self.done = true;
+                return None;
+            }
+            (Some(o), None) => o,
+            (None, Some(j)) => j,
+            (Some(o), Some(j)) => {
+                if o.0 < j.0 {
+                    o
+                } else {
+                    j
+                }
+            }
+        };
+        self.pos = best.1; // (matches are never empty)
+        // one more round could still find nothing: every part needs a character
+        self.done = self.pos >= s.len();
+        Some(best)
     }
 }
 
@@ -215,5 +233,27 @@ mod tests {
         assert_eq!(t.search(&s, 0), None);
         s.extend(u(".eyJabcdefghijk"));
         assert_eq!(t.search(&s, 0), Some((2, s.len())));
+    }
+
+    #[test]
+    fn the_matches_one_at_a_time_in_one_walk() {
+        let t = pattern();
+        // fake credentials in pieces, as above
+        let s = u(concat!("a AKIA", "ABCDEFGHIJKLMNOP -----BEGIN PRIVATE KEY----- x eyJhbGciOiJIUzI1NiJ9.",
+                          "eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig end"));
+        let texts: Vec<String> = t.iter(&s, 0).map(|(a, b)| crate::pystr::to_string(&s[a..b])).collect();
+        assert_eq!(texts, [concat!("AKIA", "ABCDEFGHIJKLMNOP"), "-----BEGIN PRIVATE KEY-----",
+                           concat!("eyJhbGciOiJIUzI1NiJ9.", "eyJzdWIiOiIxMjM0NTY3ODkwIn0")]);
+        assert_eq!(t.iter(&s, 0).collect::<Vec<_>>(), t.spans(&s, 0));
+        assert_eq!(t.iter(&s, 3).next(), t.search(&s, 3));
+        // 60,000 headers: each match is read on from the one before (S-TOKEN-PEM's walk past headers without their
+        // keys), not by searching the rest of the line again (over 45 seconds)
+        let mut many = Vec::new();
+        for _ in 0..60_000 {
+            many.extend(u("\"-----BEGIN PRIVATE KEY-----\")x("));
+        }
+        let start = std::time::Instant::now();
+        assert_eq!(t.iter(&many, 0).count(), 60_000);
+        assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
     }
 }

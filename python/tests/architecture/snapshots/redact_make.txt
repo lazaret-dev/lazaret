@@ -1,0 +1,13 @@
+# redact_make: 1200 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+68074acaf93f2349
+c8c1238df6be1344
+dcbc6dc867e8c67e
+586836d766c57f5a
+4e7996295c457f75
+064c76e91f3f48d1
+80addbb160e3e8df
+717076a33f2eb5b1
+a22fb842e9545140
+b4eccba1b2c80ba0
+c9ec96480482cb04
+8ed1ce2b68648299

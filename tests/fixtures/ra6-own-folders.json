@@ -1,0 +1,483 @@
+{
+  "paths": [
+    {
+      "path": "~/.abs/hooks/claude-code",
+      "found": false
+    },
+    {
+      "path": "~/.cursor/skills/muggle",
+      "found": false
+    },
+    {
+      "path": "~/.tool/overrides/config.json",
+      "found": false
+    },
+    {
+      "path": "~/.tool/versions/1.2.3",
+      "found": false
+    },
+    {
+      "path": "~/.neurolink/proxy-packages",
+      "found": false
+    },
+    {
+      "path": "~/.neurolink/bin",
+      "found": false
+    },
+    {
+      "path": "~/.neurolink/logs",
+      "found": false
+    },
+    {
+      "path": "~/Library/LaunchAgents/tool.plist",
+      "found": false
+    },
+    {
+      "path": "~/.config/tool/state",
+      "found": false
+    },
+    {
+      "path": "~/.cache/tool",
+      "found": false
+    },
+    {
+      "path": "~/.cache/tool/*",
+      "found": false
+    },
+    {
+      "path": "~/Library/Caches/tool/$unknown",
+      "found": false
+    },
+    {
+      "path": "/Users/example/.tool/state",
+      "found": false
+    },
+    {
+      "path": "/home/example/.tool/state",
+      "found": false
+    },
+    {
+      "path": "C:\\Users\\example\\.tool\\state",
+      "found": false
+    },
+    {
+      "path": "~/.tool/staging/../state",
+      "found": false
+    },
+    {
+      "path": "~/Documents-old/tool/state",
+      "found": false
+    },
+    {
+      "path": "~/.ssh-old/tool/state",
+      "found": false
+    },
+    {
+      "path": "~",
+      "found": true
+    },
+    {
+      "path": "~/",
+      "found": true
+    },
+    {
+      "path": "~/*",
+      "found": true
+    },
+    {
+      "path": "~/.neurolink",
+      "found": true
+    },
+    {
+      "path": "~/Library",
+      "found": true
+    },
+    {
+      "path": "~/.config",
+      "found": true
+    },
+    {
+      "path": "~/.abs",
+      "found": true
+    },
+    {
+      "path": "~/Documents",
+      "found": true
+    },
+    {
+      "path": "~/.cache",
+      "found": true
+    },
+    {
+      "path": "~/Library/Caches",
+      "found": true
+    },
+    {
+      "path": "/",
+      "found": true
+    },
+    {
+      "path": "C:/",
+      "found": true
+    },
+    {
+      "path": "/home/example",
+      "found": true
+    },
+    {
+      "path": "/Users/example",
+      "found": true
+    },
+    {
+      "path": "~/.tool/*",
+      "found": true
+    },
+    {
+      "path": "~/.tool/?",
+      "found": true
+    },
+    {
+      "path": "~/.tool/[a]",
+      "found": true
+    },
+    {
+      "path": "~/.tool/{a,b}",
+      "found": true
+    },
+    {
+      "path": "~/.tool/$name",
+      "found": true
+    },
+    {
+      "path": "~/.tool/\u0002",
+      "found": true
+    },
+    {
+      "path": "~/.tool/\ufffd",
+      "found": true
+    },
+    {
+      "path": "~/.tool/$name/../state",
+      "found": true
+    },
+    {
+      "path": "~/.tool/../../state/file",
+      "found": true
+    },
+    {
+      "path": "~/.tool/../Documents/report",
+      "found": true
+    },
+    {
+      "path": "~/.cache/tool/../../.ssh/key",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Google",
+      "found": true
+    },
+    {
+      "path": "~/Library/CloudStorage",
+      "found": true
+    },
+    {
+      "path": "~/.tool/repos/app/.git",
+      "found": true
+    },
+    {
+      "path": "~/.tool/Photos.photoslibrary/database",
+      "found": true
+    },
+    {
+      "path": "~/.cache/*/item",
+      "found": true
+    },
+    {
+      "path": "~/Documents/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Desktop/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Downloads/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Pictures/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Music/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Movies/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Videos/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/OneDrive/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/OneDrive - Work/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Dropbox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Dropbox (Personal)/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Mobile Documents/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/CloudStorage/OneDrive-Work/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/CloudStorage/Dropbox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Google/Chrome/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Google/Chrome Canary/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Chromium/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Firefox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Safari/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Microsoft Edge/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/BraveSoftware/Brave-Browser/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/google-chrome/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/google-chrome-beta/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/google-chrome-unstable/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/chromium/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/firefox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/microsoft-edge/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/microsoft-edge-beta/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/microsoft-edge-dev/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/BraveSoftware/Brave-Browser/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.mozilla/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Safari/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Containers/com.apple.Safari/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Mail/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Messages/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Photos/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.ssh/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.aws/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.gnupg/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.kube/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.docker/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.azure/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/gcloud/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Keychains/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.npmrc/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.pypirc/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.netrc/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.git-credentials/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Local/Google/Chrome/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Local/Microsoft/Edge/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Local/BraveSoftware/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Roaming/Mozilla/Firefox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Roaming/Apple Computer/Safari/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/dOcUmEnTs/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/lIbRaRy/aPpLiCaTiOn SuPpOrT/gOoGlE/cHrOmE/Default",
+      "found": true
+    },
+    {
+      "path": "C:/Users/example/.SSH/key",
+      "found": true
+    },
+    {
+      "path": "/home/example/.AWS/credentials",
+      "found": true
+    }
+  ],
+  "sources": [
+    {
+      "name": "agent-hook-cleanup",
+      "lang": "js",
+      "text": "const fs=require('fs'); const {join}=require('path'); const {homedir}=require('os');\nasync function uninstall(){await fs.rm(join(homedir(),'.abs','hooks','claude-code'),{recursive:true,force:true});}\nuninstall();",
+      "found": false
+    },
+    {
+      "name": "owned-skill-and-version-cleanup",
+      "lang": "js",
+      "text": "const {rmSync}=require('fs'); const {join}=require('path'); const {homedir}=require('os');\nconst overridePath=join(homedir(),'.tool','overrides','example.json');\nconst skillPath=join(homedir(),'.cursor','skills','muggle');\nconst targetSkillDirectoryPath=join(homedir(),'.tool','skills','example');\nconst staleVersionDir=join(homedir(),'.tool','versions','1.2.3');\nrmSync(overridePath);rmSync(skillPath,{recursive:true});rmSync(targetSkillDirectoryPath,{recursive:true});rmSync(staleVersionDir,{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "launch-agent-cleanup",
+      "lang": "js",
+      "text": "const {unlinkSync}=require('fs'); const {join}=require('path'); const {homedir,hostname}=require('os');\nconst PLIST_DIR=join(homedir(),'Library','LaunchAgents');\nconst PLIST_PATH=join(PLIST_DIR,'example.tool.plist');\nfetch('http://localhost:4000/internal/update-control',{method:'POST',body:hostname()});\n// local cleanup follows the unrelated request\nunlinkSync(PLIST_PATH);\n",
+      "found": false
+    },
+    {
+      "name": "deletion-line-after-local-fetch",
+      "lang": "js",
+      "text": "const {unlinkSync}=require('fs'); const {join}=require('path'); const {homedir,hostname}=require('os');\nconst PLIST_DIR=join(homedir(),'.ssh');\nconst PLIST_PATH=join(PLIST_DIR,'example-key');\nfetch('http://localhost:4000/internal/update-control',{method:'POST',body:hostname()});\n// local cleanup follows the unrelated request\nunlinkSync(PLIST_PATH);\n",
+      "found": true,
+      "line": 6
+    },
+    {
+      "name": "deletion-line-before-local-fetch",
+      "lang": "js",
+      "text": "const fs=require('fs');\nfs.unlinkSync('/home/example/.ssh/example-key');\nfetch('http://localhost:4000/update',{method:'POST',body:require('os').hostname()});",
+      "found": true,
+      "line": 2
+    },
+    {
+      "name": "python-deletion-line",
+      "lang": "py",
+      "text": "import os, requests\nrequests.post('http://localhost:4000/update',data=os.uname().nodename)\nos.remove('/home/example/.ssh/example-key')",
+      "found": true,
+      "line": 3
+    },
+    {
+      "name": "unknown-child-js",
+      "lang": "js",
+      "text": "const fs=require('fs');fs.rmSync(require('os').homedir()+'/.tool/'+unknown,{recursive:true});",
+      "found": true,
+      "line": 1
+    },
+    {
+      "name": "unknown-child-py",
+      "lang": "py",
+      "text": "import os,shutil\nshutil.rmtree(os.path.join(os.path.expanduser('~'),'.tool',unknown))",
+      "found": true,
+      "line": 2
+    }
+  ]
+}

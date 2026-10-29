@@ -12,7 +12,7 @@ exit code on a tree exercising each of them, with and without --deps:
 5. .pth files at the root, in a subdirectory and in a venv's site-packages,
    plus a directory holding only a .pth file (a valid target in both).
 
-The dashboard's side of each is checked in tests/scanner/test_review_*.py.
+The dashboard runs the npm package's scan (BR-7 step 5: tests/scanner/test_review_dashboard_parity.py).
 All content is inert (nothing is executed). Skipped where the npm engine is not built (node, and npm run build in js/).
 """
 import collections

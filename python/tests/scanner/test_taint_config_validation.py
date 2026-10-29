@@ -39,25 +39,24 @@ CLI = _support.CLI
 PY = sys.executable or "python3"
 
 from lazaret.scanner import core as lazaret  # noqa: E402
+from lazaret.scanner import taintspec  # noqa: E402
 from lazaret.scanner import flow as lazaret_flow  # noqa: E402
 
 APPEAL_JS = "var data = getUserInput();\ndangerous_sink(data);\n"
 
-VALID_CATS = sorted(lazaret._CAT_META)
+VALID_CATS = sorted(taintspec.CATEGORIES)
 VALID_CATS_TXT = ", ".join(VALID_CATS)
 
 
 class _EngineState:
-    """Snapshot/restore the global taint tables that apply_taint_config /
+    """Snapshot/restore the global taint state that apply_taint_config (the
+    configured part of the intra-file model, core._TAINT_CONFIGURED) and
     configure mutate, so tests cannot poison each other."""
 
     def __init__(self):
         import copy
         self.saved = (
-            dict(lazaret.TAINT_SOURCES),
-            [list(s) for s in lazaret.TAINT_SINKS.values()],
-            dict(lazaret._FULL_SAN),
-            copy.deepcopy(lazaret._PARTIAL_SAN),
+            copy.deepcopy(lazaret._TAINT_CONFIGURED),
             list(lazaret_flow._PY_SOURCE_EXTRA),
             list(lazaret_flow._EXTRA_PY_SINKS),
             set(lazaret_flow.FULL_SANITIZERS_PY),
@@ -70,16 +69,9 @@ class _EngineState:
 
     def restore(self):
         import copy
-        (srcs, sinks, full, part, pse, eps, fsp, epp, jsrc, jsinks,
-         jfull, jpart) = self.saved
-        lazaret.TAINT_SOURCES.clear()
-        lazaret.TAINT_SOURCES.update(srcs)
-        for lang, rows in zip(("py", "js"), sinks):
-            lazaret.TAINT_SINKS[lang][:] = rows
-        lazaret._FULL_SAN.clear()
-        lazaret._FULL_SAN.update(full)
-        lazaret._PARTIAL_SAN.clear()
-        lazaret._PARTIAL_SAN.update(part)
+        (configured, pse, eps, fsp, epp, jsrc, jsinks, jfull, jpart) = self.saved
+        lazaret._TAINT_CONFIGURED.clear()
+        lazaret._TAINT_CONFIGURED.update(copy.deepcopy(configured))
         lazaret_flow._PY_SOURCE_EXTRA[:] = pse
         lazaret_flow._EXTRA_PY_SINKS[:] = eps
         lazaret_flow.FULL_SANITIZERS_PY.clear()
@@ -182,9 +174,9 @@ class TestIntraFileWarnings(unittest.TestCase):
         self.assertEqual(intra, flow)
 
     def test_rejected_rule_not_added_to_sink_table(self):
-        before = len(lazaret.TAINT_SINKS["js"])
+        before = lazaret.taint_args("js")
         self.apply({"javascript": {"sinks": [{"pattern": "p", "category": "sql"}]}})
-        self.assertEqual(len(lazaret.TAINT_SINKS["js"]), before)
+        self.assertEqual(lazaret.taint_args("js"), before)
 
     def test_warnings_reset_between_calls(self):
         self.apply({"python": {"sinks": [{"pattern": "(", "category": "sql"}]}})

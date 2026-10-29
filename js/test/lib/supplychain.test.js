@@ -1,7 +1,7 @@
 // Install-hook classification. Mirrors python/tests/scanner/test_install_hooks.py.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hookIsSuspicious, scanManifest, isDependencyManifest } from "../../src/lib/supplychain.js";
+import { hookIsSuspicious, scanManifest } from "../../src/lib/supplychain.js";
 
 test("suspicious hook commands", () => {
   const cases = {
@@ -30,11 +30,10 @@ test("a checked-out project also counts prepare, never publisher-only scripts", 
   assert.deepEqual(hooks("package.json"), ["postinstall", "preinstall", "prepare"]);
 });
 
-test("dependency manifests are recognized by directory", () => {
-  assert.equal(isDependencyManifest("node_modules/a/package.json"), true);
-  assert.equal(isDependencyManifest("app/vendor/x/package.json"), true);
-  assert.equal(isDependencyManifest("package.json"), false);
-  assert.equal(isDependencyManifest("packages/node_modules_tools/package.json"), false);
+test("dependency manifests are recognized by directory (the engine's: collect.rs)", () => {
+  assert.deepEqual(hooks("node_modules/a/package.json"), ["postinstall", "preinstall"]);
+  assert.deepEqual(hooks("app/vendor/x/package.json"), ["postinstall", "preinstall"]);
+  assert.deepEqual(hooks("packages/node_modules_tools/package.json"), ["postinstall", "preinstall", "prepare"]);
 });
 
 test("a plain hook is MAJOR, a suspicious one CRITICAL", () => {

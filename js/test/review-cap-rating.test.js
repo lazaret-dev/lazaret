@@ -4,14 +4,14 @@
 // smells over 2000 lines of code, rating C and a passing gate (the real
 // density is E). Q-CAPPED now records `omitted` (how many findings it
 // replaces) and `omittedType`, and the rating counts those findings instead
-// of the note when they are smells (twin of core._rated_smells).
+// of the note when they are smells (the engine's rating since BR-7 step 4 (a): result.rs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { run, scanFile, buildResult, maintainabilityRating } from "../src/index.js";
+import { run, scanFile, buildResult } from "../src/index.js";
 
 const TABLE = Array.from({ length: 2000 }, (_, n) => {
   const k = String(n).padStart(4, "0");
@@ -34,7 +34,10 @@ test("a capped bug rule adds no smells; a note without a count is one", () => {
   assert.deepEqual([note.omitted, note.omittedType], [100, "BUG"]);
   // 15 TODO smells over 300 lines of code: 5.0 per 100 is A
   assert.equal(buildResult(".", [{ path: "c.js", lang: "js", content: CATCHES }], issues).ratings.maintainability, "A");
-  assert.equal(maintainabilityRating(Array(6).fill({ rule: "Q-CAPPED", type: "SMELL" }), 100), "B");
+  // six notes without a count over 100 lines of code: 6 smells per 100 is B
+  const notes = Array.from({ length: 6 }, (_, n) => ({ rule: "Q-CAPPED", type: "SMELL", sev: "INFO", file: "x.py", line: n + 1 }));
+  const code = "x = 1\n".repeat(100);
+  assert.equal(buildResult(".", [{ path: "x.py", lang: "py", content: code }], notes).ratings.maintainability, "B");
 });
 
 test("the CLI exits 1 with --ci", () => {

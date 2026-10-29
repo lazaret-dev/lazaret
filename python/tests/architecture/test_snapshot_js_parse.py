@@ -24,7 +24,7 @@ from lazaret.scanner import _native
 from tests.architecture import _snapshots, jsgen
 from tests.architecture import jsparse_cases as cases
 
-DEPTHS = [1, 2, 83, 84, 85, 124, 125, 126, 127, 128, 129, 250, 251, 252, 253, 254, 255, 256, 257]
+DEPTHS = [1, 2, 83, 84, 85, 126, 127, 128, 189, 190, 191, 254, 255, 256, 257, 383, 384, 385, 400]
 
 
 def project_files(seed, n):
@@ -93,7 +93,9 @@ class JsParseSnapshotTests(unittest.TestCase):
             self.assertGreater(kinds[label].count("error"), len(kinds[label]) // 2, label)
         deepest = dict(zip([(name, k) for name, _, _ in cases.NESTINGS for k in DEPTHS], kinds["nestings"]))
         for name, _, _ in cases.NESTINGS:
-            self.assertEqual((deepest[(name, 84)], deepest[(name, 257)]), ("tree", "error"), name)
+            # 126 reads for every construct (the costliest, objects, read 126 with MAX_DEPTH 384 and 84 with 256);
+            # 385 is past the cheapest (blocks read 384), so every construct errors there
+            self.assertEqual((deepest[(name, 126)], deepest[(name, 385)]), ("tree", "error"), name)
 
     def test_trees_with_spans(self):
         got = answers(snapshot_sets()["js_parse_spans"]())

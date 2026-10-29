@@ -1,5 +1,6 @@
 //! Print what the search of each named pack pattern needs the text to hold
-//! (pyre/literal.rs), a development aid:
+//! (linre/literal.rs: the strings one of which every match holds, or those
+//! every match starts with), a development aid:
 //!     cargo run --release --example show_need -- NAME...
 use lazaret_engine::pack;
 
@@ -11,7 +12,7 @@ fn main() {
         if p.raw(name).and_then(|r| r.get("re")).is_none() {
             continue;
         }
-        let need = p.re(name).need_text();
+        let need = p.re(name).need().map(|n| n.describe());
         total += 1;
         with += need.is_some() as usize;
         if names.is_empty() || names.iter().any(|n| n == name) {

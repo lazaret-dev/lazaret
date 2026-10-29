@@ -158,6 +158,20 @@ JS_QUIET = [
                              "pull().then((c) => console.log(c));\n"}),
     ("an environment variable the package never set",
      {"net.js": JS_NET + "module.exports = { pull };\n", "run.js": "eval(process.env.PAYLOAD);\n"}),
+    # (a variable one file writes and reads itself is that file's, which the
+    # single-file test reads: vite's bundle writes process.env.BROWSER from a
+    # local the follower reads, by its name, as a function that returns what
+    # it fetches, and passes the variable to exec 9,000 lines later; the
+    # finding said it was received "in another file of the package (run)")
+    ("an environment variable written and read in one file",
+     {"run.js": "const { exec } = require('child_process');\nconst fs = require('fs');\n"
+                "function parsed() {\n  return fetch(" + U + ").then((r) => r.text());\n}\n"
+                "function loadEnv(file) {\n  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));\n"
+                "  if (parsed.BROWSER) process.env.BROWSER = parsed.BROWSER;\n}\n"
+                + "".join(f"function f{i}(x) {{\n  return x + {i};\n}}\n" for i in range(40))
+                + "function openBrowser(url) {\n  const browser = process.env.BROWSER;\n  exec(browser + ' ' + url);\n}\n"
+                "module.exports = { parsed, loadEnv, openBrowser };\n",
+      "lib.js": "module.exports = { version: '1.0.0' };\n"}),
 ]
 
 
@@ -391,7 +405,7 @@ ADVERSARIAL_QUIET += [
 # Known misses, kept here so a change that reads them is noticed (see docs/DESIGN.md §12):
 # two top-level modules of site-packages no RECORD lists together (in a
 # --deps scan they may be two distributions; a registry scan reads them as
-# one; the detection round reads a distribution's: _xf_site_groups).
+# one; the detection round reads a distribution's: the engine's deps_files).
 KNOWN_MISSES = [
     ("two top-level modules", py({"a.py": PY_NET, "b.py": "from a import pull\nexec(pull())\n"})),
 ]
@@ -464,7 +478,7 @@ class CrossFileFollowerTests(unittest.TestCase):
 
 
 class SiteGroupTests(unittest.TestCase):
-    """_xf_site_groups: the top-level modules and packages a distribution's
+    """The engine's site-packages groups (deps.rs, deps_files): the top-level modules and packages a distribution's
     .dist-info/RECORD lists together, read from the disk of a --deps scan."""
 
     def setUp(self):
@@ -487,8 +501,9 @@ class SiteGroupTests(unittest.TestCase):
         return [{"path": self.site + "/" + r, "lang": "py", "dep": True, "content": "x = 1\n"} for r in rels]
 
     def groups(self, rels):
-        return {k[len(self.site) + 1:]: v[len(self.site) + 1:] for k, v in
-                core._xf_site_groups(self.root, self.files(rels)).items()}
+        files = self.files(rels)
+        plan, _stopped = core._deps_plan(core._DependencyTree(self.root, files, [], ()), files)
+        return {k[len(self.site) + 1:]: v[len(self.site) + 1:] for k, v in plan["groups"]}
 
     def test_a_record_joins_what_it_lists(self):
         self.write("x-1.0.dist-info/RECORD", "a.py,sha256=1,2\nb.py,,\npkg/__init__.py,,\nx-1.0.dist-info/RECORD,,\n"
@@ -515,10 +530,10 @@ class SiteGroupTests(unittest.TestCase):
         except (OSError, NotImplementedError):
             self.skipTest("no symbolic links here")
         self.assertEqual(self.groups(["ns/one/__init__.py", "top.py"]), {})
+        # (a RECORD is read to 4 MiB: the engine's _XF_RECORD_BYTES)
+        self.write("big-1.dist-info/RECORD", "top.py,,\nns/one/__init__.py,,\n" + "#" * (4 << 20))
+        self.assertEqual(self.groups(["ns/one/__init__.py", "top.py"]), {})
         self.write("big-1.dist-info/RECORD", "top.py,,\nns/one/__init__.py,,\n")
-        from unittest import mock
-        with mock.patch.object(core, "_XF_RECORD_BYTES", 10):
-            self.assertEqual(self.groups(["ns/one/__init__.py", "top.py"]), {})
         self.assertEqual(set(self.groups(["ns/one/__init__.py", "top.py"]).values()), {"big-1.dist-info"})
 
     def test_a_deps_scan_reads_a_distribution(self):

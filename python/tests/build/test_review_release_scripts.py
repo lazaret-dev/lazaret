@@ -30,7 +30,7 @@ FAKE_SIGNER = textwrap.dedent("""\
 
 def version_files(py, js, crlf=False, rust=None, lock=None):
     """The version files at these versions. The native engine's (rust/Cargo.toml's
-    [workspace.package] and its two Cargo.lock entries) follow python's unless
+    [workspace.package] and its crates' Cargo.lock entries) follow python's unless
     given; rust=False leaves rust/ out, as in the releases before it."""
     nl = "\r\n" if crlf else "\n"
     files = {
@@ -172,6 +172,24 @@ class CheckVersionsTests(RepoCase):
         p = self.check()
         self.assertEqual(p.returncode, 1)
         self.assertIn("uncommitted changes to the version files", p.stderr)
+
+    def test_every_lazaret_crate_of_the_lock_file_is_bumped(self):
+        # lazaret-net and lazaret-verify (0.1.9, NET-1) are workspace crates too, so `cargo build --locked`
+        # fails on a lock file that left one behind; pratique keeps the version of its own repository
+        files = version_files("0.0.2", "0.0.2")
+        lock = files["rust/Cargo.lock"]
+        files["rust/Cargo.lock"] = (lock + '\n[[package]]\nname = "lazaret-net"\nversion = "0.0.1"\n'
+                                   '\n[[package]]\nname = "pratique"\nversion = "0.1.0"\n')
+        self.commit(files, "lazaret-net left behind")
+        p = self.check("HEAD", "v0.0.2")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("rust/Cargo.lock has lazaret-net 0.0.1, not 0.0.2", p.stderr)
+        files["rust/Cargo.lock"] = files["rust/Cargo.lock"].replace('"lazaret-net"\nversion = "0.0.1"',
+                                                                '"lazaret-net"\nversion = "0.0.2"')
+        self.commit(files, "The whole bump")
+        p = self.check("HEAD", "v0.0.2")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("tag: v0.0.2 matches", p.stdout)
 
     def test_a_release_from_before_the_native_engine(self):
         old = self.git("rev-parse", "HEAD")

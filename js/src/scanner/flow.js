@@ -11,8 +11,7 @@
 // the Python pass was flow.py's own, on Python's ast, and had no port here.)
 import { cmpCodePoints } from "../lib/pycompat.js";
 import { jsFlow, pyFlow } from "../lib/native.js";
-import { REDACT, contextRedacted, contextSecrets, redactText, registerScanContext, SECRET_SKIP_RE }
-  from "../lib/redact.js";
+import { REDACT, redactFileIssues } from "../lib/redact.js";
 import { splitLines } from "./lines.js";
 
 const LINES_RE = /\r\n|[\n\r\u2028\u2029]/;                // JavaScript's line terminators
@@ -149,11 +148,12 @@ export function analyzeFlows(files) {
 }
 
 /**
- * Give flow findings their file's redaction (twin of core.redact_file_issues
- * for the findings this module builds from raw lines): a snippet line that is
- * still its file line's raw text becomes the line as a file scan shows it
- * (PEM blocks, the file's entropy literals, credential patterns); msg gets
- * the file's literals. In place.
+ * Give flow findings their file's redaction (core.redact_file_issues for the
+ * findings this module builds from raw lines): a snippet line that is still
+ * its file line's raw text becomes the line as a file scan shows it (PEM
+ * blocks, the file's entropy literals, credential patterns); msg gets the
+ * file's literals. The engine reads each file once, with all of its findings
+ * (redact.rs). In place.
  */
 export function redactFlowIssues(issues, files) {
   if (!REDACT.on) return issues;
@@ -166,28 +166,7 @@ export function redactFlowIssues(issues, files) {
   }
   for (const [path, group] of groups) {
     const f = byPath.get(path);
-    const lines = splitLines(f.content, f.lang);
-    const ctx = registerScanContext(lines, SECRET_SKIP_RE);
-    for (const i of group) {
-      for (const key of ["msg", "cmd"]) {
-        const v = i[key];
-        if (typeof v === "string") {
-          const nv = redactText(v, contextSecrets(ctx));
-          if (nv !== v) i[key] = nv;
-        }
-      }
-      const snip = i.snippet, start = i.snipStart;
-      if (!Array.isArray(snip) || !Number.isInteger(start)) continue;
-      let out = null;
-      snip.forEach((line, k) => {
-        const j = start - 1 + k;
-        if (typeof line === "string" && j >= 0 && j < lines.length && line === lines[j]) {
-          const shown = contextRedacted(ctx, j);
-          if (shown !== line) { out ??= [...snip]; out[k] = shown; }
-        }
-      });
-      if (out !== null) i.snippet = out;
-    }
+    redactFileIssues(group, splitLines(f.content, f.lang));
   }
   return issues;
 }

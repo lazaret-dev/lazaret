@@ -18,17 +18,25 @@
 // NativeExhausted. A trap (the module aborts on a panic) throws NativeError
 // too, and the next call starts a fresh instance; so does a call after one
 // that left the memory larger than MEMORY_KEEP.
+//
+// The module comes from ./wasmload.js: native/lazaret.wasm, read and compiled
+// in this thread. The browser dashboard (BR-7 step 5) is built from this
+// package's modules with its own wasmload.js in that one's place
+// (js/dashboard/wasmload.js: the engine the page carries, compiled when it
+// loads), so this module and those it serves use nothing of Node's.
 
-import { readFileSync } from "node:fs";
-import { sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { compileEngine, newEngine } from "./wasmload.js";
 
-const WASM = new URL("../../native/lazaret.wasm", import.meta.url);
 const MEMORY_KEEP = 512 * 1024 * 1024;   // bytes of module memory kept between calls
+/** The path separator a file's path is written with here ("\\" on Windows, as os.sep; "/" in a browser). */
+const SEP = typeof process !== "undefined" && process.platform === "win32" ? "\\" : "/";
 
 export class NativeError extends Error {
   constructor(message) { super(message); this.name = "NativeError"; }
 }
+/** SC-TRUNCATED's detail for a file whose reading spent the engine's work budget. */
+export const EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)";
+
 /** The call's work budget was spent (a hostile input): it has no answer. */
 export class NativeExhausted extends NativeError {
   constructor(message) { super(message); this.name = "NativeExhausted"; }
@@ -37,23 +45,36 @@ export class NativeExhausted extends NativeError {
 let compiled = null;       // the WebAssembly.Module (compiled once per process)
 let engine = null;         // the instance's exports
 let workBudget = null;     // steps of the regex matcher a call may take (null: the engine's default)
+// The calls that make and redact the findings a scan reports (BR-7 step 3 c), and that classify a file's bytes and
+// read its bytecode and .pth lines (step 3 d), run on the engine's default budget whatever setWorkBudget asks, as
+// the Python package asks them: a file that spent its budget still gets its SC-TRUNCATED finding, redacted. So do
+// --deps' calls (step 3 e), whose checks each have a budget of their own, as each was a call of its own (deps.rs);
+// dep_file_issues, the import-time test of a file, is budgeted.
+const UNBUDGETED = new Set(["batch", "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line",
+  "pem_lines", "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
+  "deps_hooks", "deps_script", "deps_targets", "deps_files", "agent_issue", "declared_names",
+  // the reports' forms and the terminal's sanitizers (step 4 c): no matcher runs
+  "term", "issue_excerpt", "report_json", "report_items", "sarif_rules", "sarif_frame", "sarif_items", "html_frame",
+  "html_items", "text_frame", "text_order", "text_items",
+  // the baselines' fingerprints, signature and application (step 4 d)
+  "baseline_fingerprints", "baseline_sign", "baseline_apply",
+  // the collection (step 4 e): what a folder's entries and a file are to the scan, and the coverage notes; its steps
+  // that run patterns each have a budget of their own, as each was a call of its own
+  "collect_dir", "collect_file", "collect_pycache", "collect_issue", "collect_check"]);
 
 /** The work each call may do, in steps of the engine's regex matcher (null: its default, about 4e9). */
 export function setWorkBudget(steps = null) {
   workBudget = steps;
 }
 
-/** The compiled module; throws NativeError when native/lazaret.wasm is missing. */
+/** The compiled module; throws NativeError when it can't be had (native/lazaret.wasm missing: wasmload.js). */
 export function wasmModule() {
   if (compiled) return compiled;
-  let bytes;
   try {
-    bytes = readFileSync(WASM);
+    compiled = compileEngine();
   } catch (e) {
-    throw new NativeError(`the native engine is missing (${fileURLToPath(WASM)}: ${e.code ?? e.message}); `
-      + "build it with `npm run build` (Rust and its wasm32-unknown-unknown target)");
+    throw new NativeError(e.message);
   }
-  compiled = new WebAssembly.Module(bytes);
   return compiled;
 }
 
@@ -72,7 +93,7 @@ export function workBudgetSteps() {
 }
 
 function instance() {
-  if (!engine) engine = new WebAssembly.Instance(wasmModule(), {}).exports;
+  if (!engine) engine = newEngine(wasmModule());
   return engine;
 }
 
@@ -126,6 +147,18 @@ function concatBytes(parts) {
   return out;
 }
 
+/**
+ * The first `n` of `data`'s bytes (a Uint8Array; a Buffer is one) as the engine reads a file's bytes: latin-1
+ * text, a character per byte.
+ */
+export function bytesText(data, n = data.length) {
+  const end = Math.min(n, data.length);
+  if (typeof Buffer !== "undefined") return Buffer.from(data.buffer, data.byteOffset, end).toString("latin1");
+  let out = "";
+  for (let k = 0; k < end; k += 8192) out += String.fromCharCode.apply(null, data.subarray(k, Math.min(k + 8192, end)));
+  return out;
+}
+
 /** The code points of `s` as the engine reads it: a surrogate pair is one, a lone surrogate one. */
 export function codePoints(s) {
   let n = s.length;
@@ -140,7 +173,7 @@ export function codePoints(s) {
  */
 export function call(name, args = {}, text = "") {
   const e = instance();
-  if (workBudget !== null && name !== "batch") args = { ...args, budget: workBudget };
+  if (workBudget !== null && !UNBUDGETED.has(name)) args = { ...args, budget: workBudget };
   const nameBytes = utf8.encode(name);
   const argBytes = utf8.encode(JSON.stringify(args));   // lone surrogates come out as \u escapes
   const textBytes = Array.isArray(text) ? concatBytes(text.map((t) => wtf8(String(t)))) : wtf8(String(text));
@@ -202,18 +235,61 @@ export function packValues(...names) {
 
 // ---- the supply-chain tests (core's functions of the same names) ----
 
+/** The dialect the engine's supply-chain tree reads a JavaScript-family file in, by its name (TS-STRIP): "ts" for
+ * .ts, .mts and .cts, "tsx" for .tsx, null for any other (JavaScript first, then TypeScript). core's
+ * engine.js_dialect */
+export const jsDialect = (path) => {
+  const p = String(path ?? "").toLowerCase();
+  if (p.endsWith(".ts") || p.endsWith(".mts") || p.endsWith(".cts")) return "ts";
+  return p.endsWith(".tsx") ? "tsx" : null;
+};
+/** The engine's `dialect` argument for a file's name: {dialect} for a TypeScript file's, else {} (core's
+ * engine.dialect_args). */
+export const dialectArgs = (path) => {
+  const dialect = jsDialect(path);
+  return dialect ? { dialect } : {};
+};
+
 /** Reasons an install-time script looks hostile ([] if none). `shell`: read a shell script as a program
  * too; `command`: the text is a hook's command; `lang`: the script's language when known ("js", "py": its
- * strings are read as its runtime reads them). core.install_script_risk */
-export const installScriptRisk = (text, shell = true, command = false, lang = null) =>
-  call("install_script_risk", lang ? { shell, command, lang } : { shell, command }, text);
-/** The language a script runs in, for the tests that read its strings: "py" for a .py file, null for a
- * shell script (.sh), "js" for the rest (what node runs). core's engine.script_lang */
-export const scriptLang = (path) => (path.endsWith(".py") ? "py" : path.endsWith(".sh") ? null : "js");
-/** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null. */
-export const importTimeRisk = (text, lang = null) => call("import_time_risk", lang ? { lang } : {}, text);
+ * strings are read as its runtime reads them); `own`: the package's name, when known (D-9: a rewrite of its
+ * own code is its own); `path`: the script's name, when known (a TypeScript file's text is read in its
+ * dialect: TS-STRIP). core.install_script_risk */
+export const installScriptRisk = (text, shell = true, command = false, lang = null, own = null, path = null) => {
+  const args = lang ? { shell, command, lang } : { shell, command };
+  if (own) args.own = own;
+  if (lang === "js") Object.assign(args, dialectArgs(path));
+  return call("install_script_risk", args, text);
+};
+/** The language the tests read a script a hook runs in, its comments blanked in it: by its extension ("js" for
+ * .js, .mjs, .cjs, .ts…; "py" for .py, .pyw; null for a shell script, .sh, .bash…; "bat" for .cmd, .bat; "other" for
+ * another language's, .ps1, .pl, .rb, .vbs…); a file with no such extension, by its `#!` line (`text`: its text, of
+ * which its first line is read), else "js", what node runs. core's engine.script_lang (deps::script_lang) */
+export const scriptLang = (path, text = "") => {
+  const head = (text || "").slice(0, 512);
+  const nl = head.indexOf("\n");
+  return call("script_lang", { path }, nl >= 0 ? head.slice(0, nl) : head);
+};
+/** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null; `names`: the
+ * package's [declared, own], when known (D-12: an install of a package it does not name is a reason; D-9: a
+ * rewrite of its own code is its own); `path`: the file's name, when known (a .ts, .mts, .cts or .tsx file's text
+ * is read in its dialect alone: TS-STRIP). core.import_time_risk */
+export const importTimeRisk = (text, lang = null, names = null, path = null) => {
+  const args = lang ? { lang } : {};
+  if (names && names[0] != null) args.declared = names[0];
+  if (names && names[1]) args.own = names[1];
+  if (lang === "js") Object.assign(args, dialectArgs(path));
+  return call("import_time_risk", args, text);
+};
+/** The parser's refusal of a JavaScript-family text the supply-chain tests read on its tree, [line, reason], or
+ * null (JS-PARSE-STRICT); `path`: the file's name, when known (a TypeScript file is read in its dialect).
+ * core.js_refusal */
+export const jsRefusal = (text, path = null) => call("js_refusal", dialectArgs(path), text);
 /** "CRITICAL" when one of importTimeRisk's reasons is a strong one, else "MAJOR". */
 export const importTimeSeverity = (reasons) => call("import_time_severity", { reasons });
+/** "CRITICAL" when one of installScriptRisk's reasons is a strong one, else "MAJOR" when every reason is a weaker
+ * one (RA-12: TLS certificate verification turned off); null for no reasons. core.install_script_severity */
+export const installScriptSeverity = (reasons) => call("install_script_severity", { reasons });
 /** [targets, complete]: the files an install hook's command runs, and whether it was read to the end
  * ([[], true] for what is not a string, as core answers). */
 export const followHook = (cmd) => (typeof cmd === "string" ? call("follow_hook", {}, cmd) : [[], true]);
@@ -234,6 +310,8 @@ export const shebangLang = (text) => call("shebang_lang", {}, text);
 export const spawnedScripts = (text, lang = null) => call("spawned_scripts", lang ? { lang } : {}, text);
 /** What a text plants to run again (a login item, a cron job, a shell profile …). */
 export const persistenceReasons = (text) => call("persistence_reasons", {}, text);
+/** Why a .pth file's import line is hostile (SC-PTH-EXEC CRITICAL), or []. core.pth_issues */
+export const pthLineRisk = (line) => call("pth_line_risk", {}, line);
 /** [agent, flag, line] when dependency code hands an AI agent's CLI a flag that turns off its confirmations
  * to an exec call, else null. */
 export const agentHijack = (text) => call("agent_hijack", {}, text);
@@ -289,10 +367,10 @@ export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependenc
   const texts = todo.map((f) => String(f.content));
   const args = {
     files: todo.map((f, k) => [f.path, f.lang, codePoints(texts[k])]), skip: [...skipPaths], who,
-    one_package: onePackage, sep, redact, neumaier: false,
+    one_package: onePackage, sep: SEP, redact, neumaier: false,
   };
   if (siteGroups && Object.keys(siteGroups).length) {
-    args.groups = todo.map((f) => siteGroups[sep === "/" ? f.path : f.path.split(sep).join("/")] ?? null);
+    args.groups = todo.map((f) => siteGroups[SEP === "/" ? f.path : f.path.split(SEP).join("/")] ?? null);
   }
   const out = [];
   for (const pkg of call("cross_file", args, texts)) {
@@ -301,6 +379,46 @@ export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependenc
   }
   return out;
 }
+
+// ---- Go modules and crates (0.1.9): the readers, and what a vendored manifest says ----
+
+/** A reader's arguments, asking for its findings when `what` is given ("module", "crate", "sdist": whose code it is,
+ * for the words) with the files' `names` as the findings show them (readers.rs, BR-7 step 3 f; engine._reader_args). */
+function readerArgs(args, what, names, redact) {
+  if (what !== null) Object.assign(args, { what, names: [...names], redact: Boolean(redact), neumaier: false });
+  return args;
+}
+
+/** The Go reader (G-1; the Python package's engine.go_package) on a module's files, [[path below the module's root,
+ * text]] of its .go files and its cgo packages' .c and .h files; `module`: its path. With `what` and `names`, its
+ * answer's `issues` are its findings, [[file index, issue]]. */
+export function goPackage(files, { module = null, useFileChars = null, useChars = null, what = null, names = [],
+  redact = true } = {}) {
+  const args = { files: files.map(([path, text]) => [path, codePoints(text)]) };
+  if (module) args.module = module;
+  if (useFileChars !== null) args.use_file_chars = useFileChars;
+  if (useChars !== null) args.use_chars = useChars;
+  return call("go_package", readerArgs(args, what, names, redact), files.map(([, text]) => text));
+}
+
+/** The Rust reader (R-1; engine.rs_crate) on a crate's .rs files, [[path below the crate's root, text]]: `build` its
+ * build script's path, `procMacro` whether its library is a procedural macro, `lib` its library's root; `what` and
+ * `names` as goPackage's. */
+export function rsCrate(files, { build = null, procMacro = false, lib = null, useFileChars = null, useChars = null,
+  what = null, names = [], redact = true } = {}) {
+  const args = { proc_macro: Boolean(procMacro), files: files.map(([path, text]) => [path, codePoints(text)]) };
+  if (build) args.build = build;
+  if (lib) args.lib = lib;
+  if (useFileChars !== null) args.use_file_chars = useFileChars;
+  if (useChars !== null) args.use_chars = useChars;
+  return call("rs_crate", readerArgs(args, what, names, redact), files.map(([, text]) => text));
+}
+
+/** What a crate's Cargo.toml says of its build script and library ({build: a path, false or null, lib, proc_macro});
+ * engine.cargo_layout. */
+export const cargoLayout = (text) => call("cargo_layout", {}, text);
+/** The module paths a vendor/modules.txt says are vendored, longest first (engine.go_vendored_modules). */
+export const goVendoredModules = (text) => call("go_vendored_modules", {}, text);
 
 // ---- the cross-file JavaScript taint pass ----
 
@@ -347,7 +465,8 @@ export function pyFlow(files, { maxIters = null, maxFiles = null, maxBytes = nul
 const ISSUE_KEYS = ["rule", "name", "type", "sev", "msg", "why", "fix", "ref"];
 
 /** The engine's findings as this package's issues (lib/issue.js mkIssue's keys, in its order). */
-function issuesOf(path, answer) {
+/** The engine's issues ([rule, name, type, sev, msg, why, fix, ref, line, snippet, snipStart, …]) as this package's. */
+export function issuesOf(path, answer) {
   return answer.map((a) => {
     const issue = {};
     ISSUE_KEYS.forEach((k, i) => { issue[k] = a[i]; });
@@ -355,7 +474,8 @@ function issuesOf(path, answer) {
     issue.line = a[8];
     issue.snippet = a[9];
     issue.snipStart = a[10];
-    if (a.length > 11) { issue.omitted = a[11]; issue.omittedType = a[12]; }
+    if (a.length > 11 && a[11] !== null && typeof a[11] === "object") Object.assign(issue, a[11]);   // (a hook's "cmd")
+    else if (a.length > 11) { issue.omitted = a[11]; issue.omittedType = a[12]; }
     return issue;
   });
 }
@@ -366,14 +486,62 @@ function issuesOf(path, answer) {
  * splits it into lines and pins it to Unicode 13.0 as core does).
  */
 export function scanDependencyFile(path, content, lang, { jsx = true, redact = true } = {}) {
-  return issuesOf(path, call("scan_file", { lang, dep: true, jsx, redact, neumaier: false }, content));
+  const dialect = lang === "js" ? dialectArgs(path) : {};
+  return issuesOf(path, call("scan_file", { lang, dep: true, jsx, redact, neumaier: false, ...dialect }, content));
 }
 
 /**
- * scan_file's first part in project mode (core.scan_rules): every pattern rule of the language,
- * the supply-chain and credential families, the file-level ones and the whole-text rules, in core's
- * order, before the passes that follow them, the suppression markers and the cap.
+ * scan_file in project mode (core.scan_file(dep=False); Q-1, 0.1.9): every pattern rule of the
+ * language, the supply-chain and credential families, the file-level and whole-text rules, then the
+ * SQL statements without WHERE, the intra-file taint, the SQL built from strings into execute(), the
+ * function metrics, the suppression markers and the cap, as core lists them.
  */
-export function scanRules(path, content, lang, { jsx = true, redact = true } = {}) {
-  return issuesOf(path, call("scan_rules", { lang, jsx, redact, neumaier: false }, content));
+export function scanProjectFile(path, content, lang, { jsx = true, redact = true, helpers = null } = {}) {
+  const dialect = lang === "js" ? dialectArgs(path) : {};
+  const args = { lang, dep: false, jsx, redact, neumaier: false, ...dialect };
+  if (helpers && lang === "py") args.helpers = helpers;     // (Q-4) what it imports that the taint pass follows
+  return issuesOf(path, call("scan_file", args, content));
+}
+
+/**
+ * (Q-4) What each of a project's own Python files ([{path, content}]) imports from the others that the intra-file
+ * taint pass follows calls into (engine.taint_helpers): a Map of path -> the slice scanProjectFile passes as
+ * `helpers`, for the files that import one.
+ */
+export function taintHelpers(files) {
+  const todo = files.filter((f) => typeof f.content === "string");
+  const out = new Map();
+  if (todo.length < 2) return out;
+  const args = { files: todo.map((f) => [f.path, codePoints(f.content)]) };
+  const answer = call("taint_helpers", args, todo.map((f) => f.content));
+  answer.forEach((slice, k) => { if (slice !== null) out.set(todo[k].path, slice); });
+  return out;
+}
+
+/**
+ * A config or data file's scan (core.scan_config_file; BR-7 step 3, the engine's config.rs): {issues} as this
+ * package's issues, or {need}: the files of the tree a settings file's commands run, still to be read. `args`:
+ * {path, follow, files, redact, neumaier}.
+ */
+export function scanConfig(path, args, content) {
+  const got = call("scan_config", args, content);
+  return got.issues ? { issues: issuesOf(path, got.issues) } : { need: got.need };
+}
+
+const LEXED = new Set(["py", "js", "sql", "go", "rs"]);
+
+/**
+ * A project file's line metrics (core.compute_metrics' part for one file; Q-1 step 4, the engine's metrics.rs):
+ * {ncloc, comments, measured, windows}, `windows` the duplication windows' keys as one string of 16 hexadecimal
+ * digits each. `lang` as the scan read it; `jsx` false for a TypeScript file.
+ */
+export function fileMetrics(content, lang, { jsx = true } = {}) {
+  const args = { jsx };
+  if (LEXED.has(lang)) args.lang = lang;
+  return call("file_metrics", args, content);
+}
+
+/** Project mode's intra-file taint alone (core.taint_scan): its T-* findings, before the markers and the cap. */
+export function taintFindings(path, content, lang, { jsx = true, redact = true } = {}) {
+  return issuesOf(path, call("taint_scan", { lang, jsx, redact, neumaier: false }, content));
 }

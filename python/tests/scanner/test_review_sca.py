@@ -241,10 +241,16 @@ class NpmInventory(Tmp):
 
     def test_dedup_keeps_versions_and_drops_redundant_unknowns(self):
         inv = sca.Inventory([("npm", "lodash", "4.17.21", "a"), ("npm", "lodash", "4.17.11", "b"),
-                             ("npm", "lodash", "", "c"), ("npm", "lodash", "4.17.21", "d"),
-                             ("npm", "only-range", "", "e")])
+                             ("npm", "lodash", "", sca.Declared("c")), ("npm", "lodash", "4.17.21", "d"),
+                             ("npm", "only-range", "", sca.Declared("e"))])
         self.assertEqual(inv.dedup(), [("npm", "lodash", "4.17.21", "a"), ("npm", "lodash", "4.17.11", "b"),
                                        ("npm", "only-range", "", "e")])
+
+    def test_dedup_keeps_an_unknown_a_lock_or_the_build_names(self):
+        """(the Go/Rust review's SCA-2: a lock entry with no version, a git dependency say, is another thing than the
+        version known of its name; dropping it made its advisories silent where they are unknown)"""
+        inv = sca.Inventory([("npm", "lodash", "4.17.21", "package-lock.json"), ("npm", "lodash", "", "package-lock.json (git)")])
+        self.assertEqual(inv.dedup(), list(inv))
 
     def test_dedup_counts_one_version_spelled_two_ways_once(self):
         # pyproject.toml pins django==3.2.0 and the lockfile says 3.2: every

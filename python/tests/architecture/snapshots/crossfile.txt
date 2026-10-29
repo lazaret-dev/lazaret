@@ -1,10 +1,10 @@
-# crossfile: 803 outputs, a hash per 100 (tests/architecture/_snapshots.py)
-e1d6112930fdb3f2
-837924d25bb869dd
-693e2729eff8e119
-ce68e73a708e0407
-92a983f8bfdbafde
-670573beecc74017
-ab0da071d9f4d3eb
-6b4a6a6ead014398
-86ca2e1a1bf5f336
+# crossfile: 804 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+d86d8d32824c6568
+b1adeb037fe797a6
+2f23d71f638af3e3
+775342e6fab5769a
+c71115c8ad8a4022
+85b0c39f9e3d15b2
+cd528c458ac4fdf9
+0b638ab6766ab95d
+85717d8f6dba3e1b
