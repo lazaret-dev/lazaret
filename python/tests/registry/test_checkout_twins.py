@@ -245,6 +245,33 @@ class FoundAtTheirPaths(unittest.TestCase):
         self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
 
 
+@unittest.skipUnless(engine.available(), "the scan needs the native engine")
+class ScanTwins(unittest.TestCase):
+    def test_what_a_twin_tree_was_given_is_not_its_own(self):
+        # (core.scan_twins: the commit's other files a twin tree was given, '/'-separated paths of the commit, are
+        # left out of what it holds of its own, its metrics' files and configs, and of where its findings are, at
+        # the scan's os.sep-separated paths: on Windows a nested one was counted twice, the root's and the twin's)
+        from lazaret.scanner import core
+        twin = tempfile.mkdtemp(prefix="lazaret-twin-")
+        self.addCleanup(shutil.rmtree, twin, ignore_errors=True)
+        files = dict(CASES["a tainted call into a helper of the root, from a twin folder"][0],
+                     **{"conf/settings.yaml": b"region: us-east-1\n"})
+        del files["Lib/x.js"]                           # (the root's own, one name there with lib/: not given)
+        for rel, data in files.items():
+            path = os.path.join(twin, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(data)
+        given = {"util/h.js", "conf/settings.yaml"}
+        issues, where, _why, read, own = core.scan_twins([twin], overlaid={twin: given})
+        self.assertEqual(read, 1)
+        self.assertEqual([f["path"] for f in own["files"]], [native_rel("lib/run.js")])
+        self.assertEqual(own["configs"], 0)
+        self.assertIn(("X-CMD", native_rel("lib/run.js")), {(i["rule"], i["file"]) for i in issues})
+        self.assertIn(("S-EXEC-JS", native_rel("util/h.js")), {(i["rule"], i["file"]) for i in issues})
+        self.assertEqual(where, {native_rel("lib/run.js"): twin})
+
+
 class MergeFindings(unittest.TestCase):
     """core.merge_findings: one commit's findings from two trees (the root and a twin tree given the root's other
     files), each once, at the most severe."""
