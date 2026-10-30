@@ -781,12 +781,16 @@ pub(super) fn serve_with(
                 if let Some(t) = &ctl.timer {
                     t.until(Instant::now() + ctl.limits.idle_timeout);
                 }
-                ctl.idle.store(true, std::sync::atomic::Ordering::SeqCst);
-                let waited = if ctl.is_closing() { Ok(0) } else { c.fill() };
-                ctl.idle.store(false, std::sync::atomic::Ordering::SeqCst);
+                // (the shutdown, which may take the connection while it waits, stops it: even with a request come, as
+                // nothing may be written to it once it is stopped)
+                let Some(waited) = ctl.idle_wait(|| c.fill()) else {
+                    return Ok(());
+                };
                 match waited {
                     Ok(0) => return Ok(()),
                     Ok(_) => {}
+                    // the shutdown ended the wait (on Windows the read it woke fails rather than ending: B-119)
+                    Err(_) if ctl.is_closing() => return Ok(()),
                     Err(e) => return Err(e),
                 }
             }

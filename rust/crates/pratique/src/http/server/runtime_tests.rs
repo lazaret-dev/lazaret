@@ -11,7 +11,7 @@ use crate::tls::server::ServerConfig;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -257,10 +257,37 @@ fn connections_past_the_limits_are_closed_at_once() {
 
 #[test]
 fn shutdown_finishes_what_is_under_way_and_closes_the_rest() {
-    let server = Arc::new(plain(Limits {
-        idle_timeout: Duration::from_secs(30),
-        ..quick()
-    }));
+    // The requests under way are held until the idle connection has closed, so the shutdown is seen to close it while
+    // they still run, whatever the machine's speed. (With requests that took 300 ms and a bound of 300 ms on that close,
+    // as this was, the test passed on Linux though the idle connection closed only once they were over: 321 ms on macOS's
+    // runner, Oct 30, and the whole grace of 3 s on Windows, whose read the shutdown did not wake. B-119.)
+    let held = Arc::new((Mutex::new(true), Condvar::new()));
+    let under_way = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let (held, under_way) = (held.clone(), under_way.clone());
+        Arc::new(
+            ServerBuilder::new(move |req: Request| {
+                if req.path() != "/slow" {
+                    return app(req);
+                }
+                under_way.fetch_add(1, Ordering::SeqCst);
+                let (lock, cv) = &*held;
+                let mut h = lock.lock().unwrap();
+                let give_up = Instant::now() + Duration::from_secs(10);
+                while *h && Instant::now() < give_up {
+                    h = cv.wait_timeout(h, Duration::from_millis(50)).unwrap().0;
+                }
+                Response::text(200, "slow\n")
+            })
+            .plain("127.0.0.1:0")
+            .limits(Limits {
+                idle_timeout: Duration::from_secs(30),
+                ..quick()
+            })
+            .start()
+            .unwrap(),
+        )
+    };
     let addr = server.local_addrs()[0];
     // idle after a request
     let mut idle = connect(addr);
@@ -275,17 +302,22 @@ fn shutdown_finishes_what_is_under_way_and_closes_the_rest() {
     // in the middle of a request, HTTP/2
     let mut h2 = Raw::connect_to(addr, &[]);
     h2.get(1, "/slow");
-    thread::sleep(Duration::from_millis(100));
+    wait_for("both requests under way", || {
+        under_way.load(Ordering::SeqCst) == 2
+    });
     let t = Instant::now();
     let stopper = {
         let server = server.clone();
         thread::spawn(move || server.shutdown(Duration::from_secs(3)))
     };
+    // at once: while the others are under way, and long before the grace of 3 s is over
     let (took, _) = until_closed(&mut idle);
     assert!(
-        took < Duration::from_millis(300),
+        took < Duration::from_millis(1000),
         "the idle connection closed at once: {took:?}"
     );
+    *held.0.lock().unwrap() = false;
+    held.1.notify_all();
     let (_, out) = until_closed(&mut busy);
     let r = &responses(&out, &[])[0];
     assert_eq!(
@@ -316,6 +348,883 @@ fn shutdown_finishes_what_is_under_way_and_closes_the_rest() {
             until_closed(&mut s).1.is_empty()
         }
     );
+}
+
+#[test]
+fn a_shutdown_lets_a_slow_client_have_all_of_a_response_whose_handler_has_returned() {
+    // B-119: an HTTP/2 stream is over for the server once its last frame is framed, and a shutdown that began while
+    // that frame was still being sent to a slow client stopped the connection's reading at once, which on Windows also
+    // cancels the send: the client lost the tail of the response. Here the handler has returned, the whole body is
+    // framed as one DATA frame that ends the stream, its send waits for a client that does not read yet, and then the
+    // shutdown begins: the client, reading slowly, must have every byte, then the GOAWAY, then the end of the connection,
+    // and the shutdown must end with the connection, long before its grace.
+    const N: usize = 12 << 20;
+    let body: Arc<Vec<u8>> = Arc::new((0..N).map(|i| (i % 251) as u8).collect());
+    let returned = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let (body, returned) = (body.clone(), returned.clone());
+        let mut http = HttpConfig::default();
+        http.h2.stream_send_buffer = 16 << 20;
+        Arc::new(
+            ServerBuilder::new(move |_req: Request| {
+                let r = Response::bytes(200, "application/octet-stream", body.to_vec());
+                returned.fetch_add(1, Ordering::SeqCst);
+                r
+            })
+            .plain("127.0.0.1:0")
+            .http_config(http)
+            .limits(Limits {
+                idle_timeout: Duration::from_secs(30),
+                write_timeout: Duration::from_secs(30),
+                ..Limits::default()
+            })
+            .start()
+            .unwrap(),
+        )
+    };
+    // no window for response data yet, and frames as large as there are
+    let mut c = Raw::connect_to(
+        server.local_addrs()[0],
+        &[
+            (setting::INITIAL_WINDOW_SIZE, 0),
+            (setting::MAX_FRAME_SIZE, 16_777_215),
+        ],
+    );
+    c.get(1, "/big");
+    let head = c.until(|f| f.h.stream == 1 && f.is(kind::HEADERS));
+    assert!(
+        head.last()
+            .is_some_and(|f| f.fields.contains(&(":status".into(), "200".into()))),
+        "{head:?}"
+    );
+    wait_for("the handler to return", || {
+        returned.load(Ordering::SeqCst) == 1
+    });
+    thread::sleep(Duration::from_millis(100));
+    // the window for all of it, the connection's first: the server frames the body as one DATA frame that ends the
+    // stream, and sends it to a client that reads nothing yet (more than the sockets hold on any system)
+    let mut out = Vec::new();
+    frame::write_window_update(&mut out, 0, N as u32);
+    c.send(&out);
+    thread::sleep(Duration::from_millis(50));
+    out.clear();
+    frame::write_window_update(&mut out, 1, N as u32);
+    c.send(&out);
+    thread::sleep(Duration::from_millis(300));
+    // the shutdown begins while that send waits for the client
+    let t = Instant::now();
+    let stopper = {
+        let server = server.clone();
+        thread::spawn(move || server.shutdown(Duration::from_secs(20)))
+    };
+    thread::sleep(Duration::from_millis(300));
+    // and the client reads, slowly, to the end of the connection
+    c.read_slowly(Duration::from_millis(1));
+    let mut got = Vec::with_capacity(N);
+    let (mut ended, mut goaway) = (false, None);
+    while let Some(f) = c.next() {
+        if f.is(kind::DATA) && f.h.stream == 1 {
+            got.extend_from_slice(&f.p);
+            ended |= f.h.has(flag::END_STREAM);
+        } else if f.is(kind::GOAWAY) {
+            goaway = Some(u32::from_be_bytes(f.p[4..8].try_into().unwrap()));
+        } else {
+            assert!(!f.is(kind::RST_STREAM), "{f:?}");
+        }
+    }
+    assert!(
+        ended && got[..] == body[..],
+        "{} bytes of {N}, the stream {}",
+        got.len(),
+        if ended { "ended" } else { "not ended" }
+    );
+    assert_eq!(goaway, Some(0), "GOAWAY with no error");
+    // the client ends the connection, which the server reads until it does (B-120)
+    drop(c);
+    stopper.join().unwrap();
+    assert!(
+        t.elapsed() < Duration::from_secs(10),
+        "the shutdown waited for its grace: {:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn a_body_a_handler_keeps_does_not_hold_an_http2_connection_open_after_a_shutdown() {
+    // B-119 (the review of round 3): the state an HTTP/2 connection's threads share held the runtime's hold on the
+    // connection, which has a handle to the socket, and a body a handler keeps reads through that state. After a
+    // shutdown such a connection was over, but its socket stayed open: no FIN, and its client saw the end only at its own
+    // timeout (5 s), against a few milliseconds without the kept body. The client must see the end promptly; and since
+    // the end is now a FIN from the end of our sending side (B-120), which comes whether or not the socket is held open,
+    // the socket must also be closed once the connection is over (the review of round 7, its LOW-4): here the client
+    // leaves it open, the connection ends at its idle time, and what the client sends after that draws a reset.
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let server = {
+        let kept = kept.clone();
+        Arc::new(
+            ServerBuilder::new(move |req: Request| {
+                kept.lock().unwrap().push(req.into_body());
+                Response::text(200, "kept\n")
+            })
+            .plain("127.0.0.1:0")
+            .limits(Limits {
+                idle_timeout: Duration::from_millis(500),
+                ..quick()
+            })
+            .start()
+            .unwrap(),
+        )
+    };
+    let mut c = Raw::connect_to(server.local_addrs()[0], &[]);
+    c.headers(
+        1,
+        &[
+            (":method", "POST"),
+            (":scheme", "http"),
+            (":authority", "a"),
+            (":path", "/keep"),
+        ],
+        false,
+    );
+    c.data(1, b"a body the handler keeps", true);
+    let (status, _, body) = c.response(1);
+    assert_eq!((status, body), (200, b"kept\n".to_vec()));
+    wait_for("the handler to keep the body", || {
+        kept.lock().unwrap().len() == 1
+    });
+    let t = Instant::now();
+    let stopper = {
+        let server = server.clone();
+        thread::spawn(move || server.shutdown(Duration::from_secs(10)))
+    };
+    let frames = c.until(|f| f.is(kind::GOAWAY));
+    assert_eq!(
+        frames
+            .last()
+            .filter(|f| f.is(kind::GOAWAY))
+            .map(|f| u32::from_be_bytes(f.p[4..8].try_into().unwrap())),
+        Some(0),
+        "GOAWAY with no error"
+    );
+    assert!(c.next().is_none(), "the connection ends");
+    let took = t.elapsed();
+    assert!(
+        took < Duration::from_secs(2),
+        "the client saw the end of the connection only after {took:?}"
+    );
+    // the client does not end the connection: the server reads it until the idle time is up, and then closes it, which
+    // the shutdown waits for (well within its grace)
+    stopper.join().unwrap();
+    assert!(
+        t.elapsed() < Duration::from_secs(5),
+        "the shutdown waited for its grace: {:?}",
+        t.elapsed()
+    );
+    // the socket is closed, not held open by the kept body: what the client sends now draws a reset, and a send fails
+    let mut s = c.socket();
+    let mut ping = Vec::new();
+    frame::write_ping(&mut ping, false, *b"anybody?");
+    let t = Instant::now();
+    loop {
+        if s.write_all(&ping).is_err() {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "the server's socket is still open after the connection is over"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    drop(c);
+    // the body is still kept: it was so all along
+    assert_eq!(kept.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_shutdown_lets_a_client_that_gives_window_credit_as_it_reads_have_all_of_a_response() {
+    // B-120 (the review of round 3's MEDIUM-2; so on main too, on every system): as the 12 MiB test above, but with
+    // frames of 16 KiB and a WINDOW_UPDATE for the connection after each DATA frame read, as a client does. Once the last
+    // of the response was in the server's send buffer, the server stopped reading and closed; the WINDOW_UPDATEs that
+    // the client still sent then came to a closed socket, which answered with a reset, and the reset threw away the
+    // tail still in the send buffer (on Linux about 10.3 of the 12.6 million bytes arrived). The server now ends only
+    // its sending side, and reads on until the client ends the connection.
+    const N: usize = 12 << 20;
+    let body: Arc<Vec<u8>> = Arc::new((0..N).map(|i| (i % 251) as u8).collect());
+    let returned = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let (body, returned) = (body.clone(), returned.clone());
+        let mut http = HttpConfig::default();
+        http.h2.stream_send_buffer = 16 << 20;
+        Arc::new(
+            ServerBuilder::new(move |_req: Request| {
+                let r = Response::bytes(200, "application/octet-stream", body.to_vec());
+                returned.fetch_add(1, Ordering::SeqCst);
+                r
+            })
+            .plain("127.0.0.1:0")
+            .http_config(http)
+            .limits(Limits {
+                idle_timeout: Duration::from_secs(30),
+                write_timeout: Duration::from_secs(30),
+                ..Limits::default()
+            })
+            .start()
+            .unwrap(),
+        )
+    };
+    let mut c = Raw::connect_to(
+        server.local_addrs()[0],
+        &[(setting::INITIAL_WINDOW_SIZE, 0)],
+    );
+    c.get(1, "/big");
+    let head = c.until(|f| f.h.stream == 1 && f.is(kind::HEADERS));
+    assert!(
+        head.last()
+            .is_some_and(|f| f.fields.contains(&(":status".into(), "200".into()))),
+        "{head:?}"
+    );
+    wait_for("the handler to return", || {
+        returned.load(Ordering::SeqCst) == 1
+    });
+    thread::sleep(Duration::from_millis(100));
+    let mut out = Vec::new();
+    frame::write_window_update(&mut out, 0, N as u32);
+    c.send(&out);
+    thread::sleep(Duration::from_millis(50));
+    out.clear();
+    frame::write_window_update(&mut out, 1, N as u32);
+    c.send(&out);
+    thread::sleep(Duration::from_millis(300));
+    let stopper = {
+        let server = server.clone();
+        thread::spawn(move || server.shutdown(Duration::from_secs(20)))
+    };
+    thread::sleep(Duration::from_millis(300));
+    c.read_slowly(Duration::from_millis(1));
+    let mut got = Vec::with_capacity(N);
+    let (mut ended, mut goaway) = (false, None);
+    while let Some(f) = c.next() {
+        if f.is(kind::DATA) && f.h.stream == 1 {
+            got.extend_from_slice(&f.p);
+            ended |= f.h.has(flag::END_STREAM);
+            if !f.p.is_empty() {
+                out.clear();
+                frame::write_window_update(&mut out, 0, f.p.len() as u32);
+                c.send(&out);
+            }
+        } else if f.is(kind::GOAWAY) {
+            goaway = Some(u32::from_be_bytes(f.p[4..8].try_into().unwrap()));
+        }
+    }
+    assert!(
+        ended && got[..] == body[..],
+        "{} bytes of {N}, the stream {}",
+        got.len(),
+        if ended { "ended" } else { "not ended" }
+    );
+    assert_eq!(goaway, Some(0), "GOAWAY with no error");
+    // the client ends the connection, which the server reads until it does (B-120)
+    drop(c);
+    stopper.join().unwrap();
+}
+
+#[test]
+fn a_shutdown_lets_a_tls_client_that_reads_slowly_have_all_of_a_response() {
+    // B-120 over TLS, with the crate's own HTTP/2 client, which gives window credit as it reads: the server's end is a
+    // close_notify, then the FIN, after the tail, and it reads on (records it cannot decrypt for a close_notify of the
+    // client's, or its FIN) until the client ends the connection. The shutdown begins once the handler has returned and
+    // the client has read the first of 12 MiB, which it then reads slowly.
+    const N: usize = 12 << 20;
+    let body: Arc<Vec<u8>> = Arc::new((0..N).map(|i| (i % 251) as u8).collect());
+    let returned = Arc::new(AtomicUsize::new(0));
+    let pki = TestPki::new(&["127.0.0.1"]).unwrap();
+    let server = {
+        let (body, returned) = (body.clone(), returned.clone());
+        Arc::new(
+            ServerBuilder::new(move |_req: Request| {
+                let r = Response::bytes(200, "application/octet-stream", body.to_vec());
+                returned.fetch_add(1, Ordering::SeqCst);
+                r
+            })
+            .tls(
+                "127.0.0.1:0",
+                Arc::new(ServerConfig::from_pki(&pki).with_alpn(&["h2"])),
+            )
+            .limits(Limits {
+                idle_timeout: Duration::from_secs(30),
+                write_timeout: Duration::from_secs(30),
+                ..Limits::default()
+            })
+            .start()
+            .unwrap(),
+        )
+    };
+    let client =
+        crate::http::Client::with_tls_config(crate::tls::ClientConfig::new(pki.trust_store()))
+            .http2(true)
+            .timeout(Duration::from_secs(30));
+    let mut s = client
+        .get_stream(&format!(
+            "https://127.0.0.1:{}/big",
+            server.local_addrs()[0].port()
+        ))
+        .unwrap();
+    let mut got = Vec::with_capacity(N);
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = s.read(&mut buf).unwrap();
+    got.extend_from_slice(&buf[..n]);
+    wait_for("the handler to return", || {
+        returned.load(Ordering::SeqCst) == 1
+    });
+    let t = Instant::now();
+    let stopper = {
+        let server = server.clone();
+        thread::spawn(move || server.shutdown(Duration::from_secs(20)))
+    };
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(e) => panic!("after {} bytes of {N}: {e}", got.len()),
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(got[..] == body[..], "{} bytes of {N}", got.len());
+    drop(s);
+    drop(client);
+    stopper.join().unwrap();
+    assert!(
+        t.elapsed() < Duration::from_secs(10),
+        "the shutdown waited for its grace: {:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn a_client_that_goes_on_sending_after_the_end_is_cut_at_the_grace_or_past_a_megabyte() {
+    // B-120: once its side of an HTTP/2 connection has ended (GOAWAY, close_notify, FIN), the server reads what the
+    // client still sends until the client ends the connection: but no longer than a shutdown's grace, and no more than a
+    // megabyte of it. The frames sent past the megabyte are ones no flood budget counts, GOAWAYs with 16 KiB of debug
+    // data each, so that nothing but that megabyte ends the connection before the grace does (frames of a kind nobody
+    // knows, which round 7 sent, use up the budget for PRIORITY frames at about 16 MiB: the review of round 7, its
+    // MEDIUM-1).
+    let ping = {
+        let mut out = Vec::new();
+        frame::write_ping(&mut out, false, *b"stillup!");
+        out
+    };
+    let goaway = {
+        let mut out = Vec::new();
+        frame::write_goaway(&mut out, 0, ErrorCode::NO_ERROR, &[0u8; 16_376]);
+        assert_eq!(out.len(), 9 + 16_384);
+        out
+    };
+    for (what, frame, grace) in [
+        ("PINGs, ten a second", ping, Duration::from_secs(1)),
+        (
+            "GOAWAYs with 16 KiB of debug data, which no budget counts",
+            goaway,
+            Duration::from_secs(10),
+        ),
+    ] {
+        let server = Arc::new(
+            ServerBuilder::new(app)
+                .plain("127.0.0.1:0")
+                .limits(Limits {
+                    idle_timeout: Duration::from_secs(30),
+                    ..quick()
+                })
+                .start()
+                .unwrap(),
+        );
+        let mut c = Raw::connect_to(server.local_addrs()[0], &[]);
+        c.get(1, "/");
+        assert_eq!(c.response(1).0, 200, "{what}");
+        let t = Instant::now();
+        let stopper = {
+            let server = server.clone();
+            thread::spawn(move || server.shutdown(grace))
+        };
+        // the end of what the server sends comes at once: GOAWAY, then its FIN
+        let frames = c.until(|f| f.is(kind::GOAWAY));
+        assert!(
+            frames.last().is_some_and(|f| f.is(kind::GOAWAY)),
+            "{what}: {frames:?}"
+        );
+        while let Some(f) = c.next() {
+            assert!(f.is(kind::PING), "{what}: {f:?}");
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "{what}: the server's end after {:?}",
+            t.elapsed()
+        );
+        // and the client goes on sending, until the server cuts the connection
+        let sender = {
+            let mut s = c.socket();
+            let pause = if frame.len() < 100 {
+                Duration::from_millis(100)
+            } else {
+                Duration::ZERO
+            };
+            thread::spawn(move || {
+                let give_up = Instant::now() + Duration::from_secs(20);
+                while Instant::now() < give_up {
+                    if s.write_all(&frame).is_err() {
+                        return true;
+                    }
+                    thread::sleep(pause);
+                }
+                false
+            })
+        };
+        stopper.join().unwrap();
+        let took = t.elapsed();
+        if grace == Duration::from_secs(1) {
+            assert!(
+                took >= Duration::from_millis(900) && took < Duration::from_secs(3),
+                "{what}: the shutdown took {took:?}, not its grace of {grace:?}"
+            );
+        } else {
+            assert!(
+                took < Duration::from_secs(5),
+                "{what}: the connection was not cut past a megabyte, the shutdown took {took:?}"
+            );
+        }
+        assert!(
+            sender.join().unwrap(),
+            "{what}: the client could still send after 20 s"
+        );
+    }
+}
+
+/// The review of round 7 of B-119's branch, its MEDIUM-2 (so on main too, on every system): the idle time of an HTTP/2
+/// connection began when the last frame of its last response was framed, while that frame and a few hundred kilobytes
+/// before it were still to be sent and the systems' buffers held a few megabytes more. A client still reading them when
+/// the idle time ran out had its connection closed, and the credit it gave as it read drew a reset that threw the rest
+/// away: with an idle timeout of 300 ms, 0.84 to 1.7 of 4 MiB arrived. The idle time now begins once everything framed
+/// is handed to the system; an idle connection ends as the others do (GOAWAY, then the end of what is sent); and once
+/// our side has ended the client has the idle time again from each credit it gives.
+///
+/// Here a 3 MiB response, all of it within the client's windows from the start, to a client that reads 64 KiB at a time
+/// with 100 ms between (640 KB a second, about five seconds in all) and gives credit for each DATA frame it reads; the
+/// idle timeout is 500 ms. `close`: the handler says `Connection: close`, so the connection ends with the response.
+/// After the end the connection is read for sixteen idle timeouts at most (the review of round 8, its LOW-2): 8 s, more
+/// than the whole response takes even where the systems' buffers take all of it at once (on Linux they take some 2 MB,
+/// and the client reads them in three and a half seconds after the end). Round 8 had 4 MiB and 300 ms, which 4.8 s
+/// would cut where the buffers take more than 3 MB.
+fn a_slow_reader_has_all_of_a_response_whatever_the_idle_timeout(close: bool) {
+    const N: usize = 3 << 20;
+    let body: Arc<Vec<u8>> = Arc::new((0..N).map(|i| (i % 251) as u8).collect());
+    let server = {
+        let body = body.clone();
+        let mut http = HttpConfig::default();
+        http.h2.stream_send_buffer = 16 << 20;
+        ServerBuilder::new(move |_req: Request| {
+            let r = Response::bytes(200, "application/octet-stream", body.to_vec());
+            if close {
+                r.with_header("connection", "close")
+            } else {
+                r
+            }
+        })
+        .plain("127.0.0.1:0")
+        .http_config(http)
+        .limits(Limits {
+            idle_timeout: Duration::from_millis(500),
+            write_timeout: Duration::from_secs(30),
+            ..Limits::default()
+        })
+        .start()
+        .unwrap()
+    };
+    let mut c = Raw::connect_to(
+        server.local_addrs()[0],
+        &[(setting::INITIAL_WINDOW_SIZE, 16 << 20)],
+    );
+    let mut out = Vec::new();
+    frame::write_window_update(&mut out, 0, 16 << 20);
+    c.send(&out);
+    c.get(1, "/big");
+    c.read_slowly(Duration::from_millis(100));
+    let mut got = Vec::with_capacity(N);
+    let (mut ended, mut goaway) = (false, None);
+    while let Some(f) = c.next() {
+        if f.is(kind::DATA) && f.h.stream == 1 {
+            got.extend_from_slice(&f.p);
+            ended |= f.h.has(flag::END_STREAM);
+            if !f.p.is_empty() {
+                out.clear();
+                frame::write_window_update(&mut out, 0, f.p.len() as u32);
+                c.send(&out);
+            }
+        } else if f.is(kind::GOAWAY) {
+            goaway = Some(u32::from_be_bytes(f.p[4..8].try_into().unwrap()));
+        }
+    }
+    assert!(
+        ended && got[..] == body[..],
+        "Connection: close {close}: {} bytes of {N}, the stream {}",
+        got.len(),
+        if ended { "ended" } else { "not ended" }
+    );
+    // the connection ended: with the response, or once it was idle, either way with a GOAWAY and no error
+    assert_eq!(goaway, Some(0), "Connection: close {close}");
+    drop(c);
+    server.shutdown(Duration::from_secs(1));
+}
+
+#[test]
+fn a_slow_reader_has_all_of_a_response_that_ends_the_connection_whatever_the_idle_timeout() {
+    a_slow_reader_has_all_of_a_response_whatever_the_idle_timeout(true);
+}
+
+#[test]
+fn a_slow_reader_has_all_of_a_response_whose_connection_then_idles_out() {
+    a_slow_reader_has_all_of_a_response_whatever_the_idle_timeout(false);
+}
+
+#[test]
+fn an_http2_client_that_never_reads_is_still_ended_by_the_write_timeout() {
+    // The idle time of an HTTP/2 connection now waits for its responses to be handed to the system (the review of round
+    // 7, its MEDIUM-2): a client that never reads, with windows that let the server send it all, must still have its
+    // connection ended, by the write timeout.
+    let server = plain(quick());
+    let before = server.stats().timed_out;
+    let mut c = Raw::connect_to(
+        server.local_addrs()[0],
+        &[(setting::INITIAL_WINDOW_SIZE, 1 << 30)],
+    );
+    let mut out = Vec::new();
+    frame::write_window_update(&mut out, 0, 1 << 30);
+    c.send(&out);
+    let t = Instant::now();
+    c.get(1, "/huge");
+    // 50 MiB that the client never reads: the server's writes wait, and give up after 400 ms
+    wait_for("the connection to time out", || {
+        server.stats().timed_out > before
+    });
+    wait_for("the connection to close", || server.stats().open == 0);
+    assert!(
+        t.elapsed() < Duration::from_secs(3),
+        "the connection lasted {:?}",
+        t.elapsed()
+    );
+    drop(c);
+    server.shutdown(Duration::from_secs(1));
+}
+
+#[test]
+fn an_http2_client_that_never_reads_and_pings_is_still_ended() {
+    // The review of round 8 (its MEDIUM-1): the idle time of a connection whose last stream has ended waits for all it
+    // framed to be handed to the system, unless the connection is dead (a write failed). Here a client that never reads
+    // sends a PING while the server's write of 50 MiB waits: the answer is framed behind that write, the write times out,
+    // and the answer is never sent, so nobody ever finds nothing left to send. The connection must still end.
+    let server = plain(quick());
+    let mut c = Raw::connect_to(
+        server.local_addrs()[0],
+        &[(setting::INITIAL_WINDOW_SIZE, 1 << 30)],
+    );
+    let mut out = Vec::new();
+    frame::write_window_update(&mut out, 0, 1 << 30);
+    c.send(&out);
+    let t = Instant::now();
+    c.get(1, "/huge");
+    thread::sleep(Duration::from_millis(150));
+    c.raw_frame(kind::PING, 0, 0, b"anybody?");
+    while server.stats().open > 0 {
+        assert!(
+            t.elapsed() < Duration::from_secs(8),
+            "the connection is still open after {:?}",
+            t.elapsed()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(c);
+    server.shutdown(Duration::from_secs(1));
+}
+
+#[test]
+fn a_client_that_gives_credit_and_reads_nothing_after_the_end_is_cut_at_sixteen_idle_timeouts() {
+    // The review of round 8 (its LOW-2): once our side has ended, the idle time runs again from each credit the client
+    // gives, as it does when it reads the tail; a client that gave credit just inside each idle time, and read nothing,
+    // held the connection until AFTER_END was used up (some 80,000 credits, 56 days at the default idle timeout). It is
+    // now cut sixteen idle timeouts after the end, however often credit comes; and only credit on the connection counts:
+    // credit on a stream, a closed one as in the review's probe, keeps nothing. The client here gives credit every
+    // quarter of an idle timeout (every half, as round 9 had it, left 140 ms for a stall of the client's thread: the
+    // review of round 9), from just after its response, for twenty-four idle timeouts; the connection's idle time runs
+    // out (credit before the end keeps nothing either) and it ends with a GOAWAY.
+    const IDLE: Duration = Duration::from_millis(300);
+    for stream in [0u32, 1] {
+        let server = plain(Limits {
+            idle_timeout: IDLE,
+            ..quick()
+        });
+        let mut c = Raw::connect_to(server.local_addrs()[0], &[]);
+        c.get(1, "/");
+        assert_eq!(c.response(1).0, 200, "credit on stream {stream}");
+        let sender = {
+            let mut s = c.socket();
+            thread::spawn(move || {
+                let mut up = Vec::new();
+                frame::write_window_update(&mut up, stream, 1024);
+                let until = Instant::now() + IDLE * 24;
+                while Instant::now() < until {
+                    if s.write_all(&up).is_err() {
+                        return;
+                    }
+                    thread::sleep(IDLE / 4);
+                }
+            })
+        };
+        let frames = c.until(|f| f.is(kind::GOAWAY));
+        assert!(
+            frames.last().is_some_and(|f| f.is(kind::GOAWAY)),
+            "credit on stream {stream}: {frames:?}"
+        );
+        let end = Instant::now();
+        assert!(
+            c.next().is_none(),
+            "credit on stream {stream}: the server's sending ends"
+        );
+        while server.stats().open > 0 {
+            assert!(
+                end.elapsed() < IDLE * 30,
+                "credit on stream {stream}: the connection is still open after {:?}",
+                end.elapsed()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let held = end.elapsed();
+        if stream == 0 {
+            assert!(
+                held >= IDLE * 13 && held < IDLE * 19,
+                "credit on the connection: read for {held:?} after the end, not sixteen idle timeouts of {IDLE:?}"
+            );
+        } else {
+            assert!(
+                held < IDLE * 3,
+                "credit on a closed stream: read for {held:?} after the end"
+            );
+        }
+        sender.join().unwrap();
+        drop(c);
+        server.shutdown(Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn a_connection_accepted_as_the_shutdown_begins_is_closed_not_served() {
+    // B-119: a connection accepted just before the shutdown began, and entered among the connections just after the
+    // shutdown had taken its list of those to close, was never asked to close: it was served as if nothing had happened,
+    // and cut at the end of the grace. The accept is held between its look at the shutdown and the entry while the
+    // shutdown runs (it has no connection to wait for, and is over at once).
+    let held = Arc::new((Mutex::new(true), Condvar::new()));
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let (held, arrived) = (held.clone(), arrived.clone());
+        ServerBuilder::new(app)
+            .plain("127.0.0.1:0")
+            .limits(Limits {
+                idle_timeout: Duration::from_secs(30),
+                ..quick()
+            })
+            .before_entry(move || {
+                if arrived.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let (lock, cv) = &*held;
+                    let mut h = lock.lock().unwrap();
+                    let give_up = Instant::now() + Duration::from_secs(10);
+                    while *h && Instant::now() < give_up {
+                        h = cv.wait_timeout(h, Duration::from_millis(50)).unwrap().0;
+                    }
+                }
+            })
+            .start()
+            .unwrap()
+    };
+    let addr = server.local_addrs()[0];
+    let mut s = connect(addr);
+    s.write_all(b"GET /late HTTP/1.1\r\nHost: a\r\n\r\n")
+        .unwrap();
+    wait_for("the accept to be held", || {
+        arrived.load(Ordering::SeqCst) == 1
+    });
+    let t = Instant::now();
+    server.handle().shutdown(Duration::from_secs(3));
+    assert!(
+        t.elapsed() < Duration::from_secs(2),
+        "the shutdown had a connection to wait for: {:?}",
+        t.elapsed()
+    );
+    *held.0.lock().unwrap() = false;
+    held.1.notify_all();
+    let (took, out) = until_closed(&mut s);
+    assert!(
+        out.is_empty() && took < Duration::from_secs(2),
+        "the connection was served ({} bytes) or kept open ({took:?})",
+        out.len()
+    );
+    server.shutdown(Duration::from_secs(1));
+    assert_eq!(server.stats().accepted, 0);
+}
+
+#[test]
+fn an_idle_http1_connection_the_shutdown_takes_is_stopped_and_answers_nothing_more() {
+    // B-119: the shutdown stops an idle HTTP/1.1 connection at once. A request that comes just as it does is not
+    // answered: the stop cancels on Windows a send under way, and the response would be cut short. (The connection's
+    // wait ends with the request as the shutdown takes the connection.)
+    let stops = Arc::new(AtomicUsize::new(0));
+    let ctl = {
+        let stops = stops.clone();
+        runtime::Ctl::detached_with_stop(move || {
+            stops.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let waited = ctl.idle_wait(|| {
+        ctl.begin_close();
+        "a request"
+    });
+    assert_eq!((waited, stops.load(Ordering::SeqCst)), (None, 1));
+    // a connection busy with a request when the shutdown begins is not stopped, and waits for no other
+    let stops = Arc::new(AtomicUsize::new(0));
+    let ctl = {
+        let stops = stops.clone();
+        runtime::Ctl::detached_with_stop(move || {
+            stops.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    assert_eq!(ctl.idle_wait(|| "a request"), Some("a request"));
+    ctl.begin_close();
+    assert_eq!(stops.load(Ordering::SeqCst), 0);
+    assert_eq!(ctl.idle_wait(|| "another"), None);
+}
+
+/// A socket whose first send is cancelled as the system reports one: Windows may have sent some of it, elsewhere a
+/// send that says Interrupted sent nothing.
+struct CancelledOnce {
+    sent: Arc<Mutex<Vec<u8>>>,
+    cancelled: bool,
+}
+
+impl Read for CancelledOnce {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        Ok(0)
+    }
+}
+
+impl Write for CancelledOnce {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !self.cancelled {
+            self.cancelled = true;
+            let partial = if cfg!(windows) { buf.len() / 2 } else { 0 };
+            self.sent.lock().unwrap().extend_from_slice(&buf[..partial]);
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        self.sent.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl crate::tls::Duplex for CancelledOnce {
+    fn duplicate(&self) -> std::io::Result<Self> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+impl crate::tls::Linger for CancelledOnce {}
+
+#[test]
+fn a_socket_that_lingers_stops_at_the_deadline_on_its_timer_if_that_comes_first() {
+    // a client that keeps sending a little, so that no read waits 200 ms for nothing: the linger ends at the deadline the
+    // timer had (300 ms away, the handshake's, say), not a second after it began
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (socket, _) = listener.accept().unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let trickle = {
+        let mut client = client.try_clone().unwrap();
+        let stop = stop.clone();
+        thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                if client.write_all(b"x").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+    let timer = runtime::Timer::new();
+    timer.until(Instant::now() + Duration::from_millis(300));
+    let mut timed = runtime::Timed::new(socket, timer, Duration::from_secs(5)).unwrap();
+    let start = Instant::now();
+    crate::tls::Linger::linger(&mut timed);
+    let took = start.elapsed();
+    stop.store(true, Ordering::SeqCst);
+    trickle.join().unwrap();
+    assert!(
+        took < Duration::from_millis(700),
+        "lingering took {took:?}, with the deadline on the timer 300 ms away and a client that sends a byte every 20 ms"
+    );
+}
+
+#[test]
+fn a_socket_that_lingers_waits_for_quiet_and_not_for_the_deadline_on_its_timer() {
+    // after a fatal alert in the handshake (B-119) the connection lingers with the handshake's deadline still on its
+    // timer: its reads wait 200 ms for more, not until that deadline, and the client is told that nothing more comes
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (socket, _) = listener.accept().unwrap();
+    let timer = runtime::Timer::new();
+    timer.until(Instant::now() + Duration::from_secs(10));
+    let mut timed = runtime::Timed::new(socket, timer, Duration::from_secs(5)).unwrap();
+    let start = Instant::now();
+    crate::tls::Linger::linger(&mut timed);
+    let took = start.elapsed();
+    assert!(
+        took < Duration::from_secs(2),
+        "lingering took {took:?}, with a client that sends nothing and stays"
+    );
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut buf = [0u8; 8];
+    assert_eq!((&client).read(&mut buf).map_err(|e| e.to_string()), Ok(0));
+}
+
+impl Socket for CancelledOnce {
+    fn set_read_timeout(&self, _: Option<Duration>) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn set_write_timeout(&self, _: Option<Duration>) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn shutdown(&self) {}
+    fn shutdown_write(&self) {}
+}
+
+#[test]
+fn a_send_that_was_cancelled_is_not_sent_again() {
+    // B-119: on Windows a send that the stop of a connection cancelled fails with no count of what it sent, which may
+    // be some of it; `write_all` sends again after Interrupted, and the client would read those bytes twice. The
+    // server's writes end the connection instead. (Elsewhere Interrupted means that nothing was sent: it is sent again.)
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let socket = CancelledOnce {
+        sent: sent.clone(),
+        cancelled: false,
+    };
+    let mut timed =
+        runtime::Timed::new(socket, runtime::Timer::new(), Duration::from_secs(1)).unwrap();
+    let result = timed.write_all(b"0123456789").map_err(|e| e.kind());
+    let sent = sent.lock().unwrap().clone();
+    if cfg!(windows) {
+        assert_eq!(
+            (result, &sent[..]),
+            (Err(std::io::ErrorKind::ConnectionAborted), &b"01234"[..])
+        );
+    } else {
+        assert_eq!((result, &sent[..]), (Ok(()), &b"0123456789"[..]));
+    }
 }
 
 #[test]
