@@ -280,7 +280,14 @@ shared by the CLI and the MCP server. In order it:
    JSON or else as the Python literal gyp reads, `ast.literal_eval` on the
    engine's Python parser); `core.load_manifest` keeps the data the
    registry's and `--deps`' decisions read (the npm package asks the engine,
-   `manifest_data`);
+   `manifest_data`). A manifest's path is the walk's, root-relative with
+   os.sep: on Windows the walk gives `scan_manifest` `windows` (core's
+   `_WINDOWS_PATHS`, collect.js `WINDOWS`), so a backslash separates its
+   folders there and a dependency's `node_modules\dep\test\package.json` is
+   no package's root manifest (WIN-DEP-PATHS: `--deps` read the fixture's
+   dependencies as the package's, SC-DEP-URL on Windows alone); elsewhere,
+   and in a registry's members ('/'-separated on every system), a backslash
+   is a file name's, as core reads a path on POSIX;
 4. **runs `--deps` checks** (`dependency_checks`) — what dependencies run at
    install and import time (install hooks followed to the files they run,
    import-time received-code, and the cross-file follower); the decisions are

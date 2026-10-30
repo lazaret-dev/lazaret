@@ -2983,7 +2983,7 @@ def _script_key_lines(text, section="scripts"):
     return _native.call("manifest_check", {"check": "key_lines", "section": section}, text)
 
 
-def scan_manifest(path, content, registry=False, hooks=None):
+def scan_manifest(path, content, registry=False, hooks=None, windows=False):
     """Check package.json install hooks — the primary supply-chain attack
     vector — and its dependencies from an insecure source. The engine's
     (BR-7 step 3 b: rust/crates/lazaret-engine/src/manifest/, the
@@ -3015,12 +3015,20 @@ def scan_manifest(path, content, registry=False, hooks=None):
     a package's root manifest counts in a registry or --deps scan, and none
     whose `hooks` are not npm's. MAJOR (WARN in the registry). `registry`
     None: a manifest under a dependency folder (DEP_MARKERS) is a
-    dependency's (the engine's: collect.rs)."""
+    dependency's (the engine's: collect.rs).
+
+    `windows`: `path` is the walk's on Windows (os.sep, _WINDOWS_PATHS:
+    _scan_manifest_entry), where a backslash separates its folders too, so
+    a dependency's node_modules\\dep\\test\\package.json is no package's
+    root manifest (WIN-DEP-PATHS). Otherwise a backslash is a file name's,
+    as on POSIX; a registry's member paths are '/'-separated on every
+    system and pass none."""
     if not isinstance(content, str):
         return load_manifest(path, content)[1]
     args = engine._budget({"path": path, "registry": None if registry is None else bool(registry),
                            "redact": bool(REDACT_SECRETS),
-                           "hooks": list(hooks) if hooks is not None else None})
+                           "hooks": list(hooks) if hooks is not None else None,
+                           "windows": bool(windows)})
     try:
         return engine._issues(path, _native.call("scan_manifest", args, content)["issues"])
     except _native.NativeError as exc:
@@ -4716,10 +4724,11 @@ def collect_files(root, extra_excludes, include_deps=False):
 def _scan_manifest_entry(mf):
     """binding.gyp and every other .gyp / .gypi file -> scan_gyp (G11);
     package.json -> scan_manifest. A manifest inside a detected dependency
-    tree gets the registry hook set."""
+    tree gets the registry hook set. Its path is the walk's: os.sep-separated
+    (`windows` on Windows, WIN-DEP-PATHS)."""
     if os.path.splitext(mf["path"])[1].lower() in GYP_EXTS:
         return scan_gyp(mf["path"], mf["content"])
-    return scan_manifest(mf["path"], mf["content"], registry=mf.get("dep"))
+    return scan_manifest(mf["path"], mf["content"], registry=mf.get("dep"), windows=_WINDOWS_PATHS)
 
 
 # ---------------- --deps: what a dependency runs ----------------

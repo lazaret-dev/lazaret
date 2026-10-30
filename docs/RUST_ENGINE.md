@@ -368,7 +368,9 @@ rust/
                              scan_gyp, and supplychain.js, pyjson.js and pycompat.js until then):
                              mod.rs (load: SC-MANIFEST-DEPTH and -UNPARSEABLE; a package.json's
                              install hooks, SC-INSTALL-HOOK, where its keys are, and its
-                             dependencies from an insecure source, SC-DEP-URL), gyp.rs (a
+                             dependencies from an insecure source, SC-DEP-URL, read from a
+                             package's root manifest only: `windows`, a Windows walk's path,
+                             whose backslashes separate folders, WIN-DEP-PATHS), gyp.rs (a
                              binding.gyp's actions and command expansions, the walk's bounds),
                              pyjson.rs (json.loads as CPython's C scanner reads a str, with core's
                              parse_int), pylit.rs (ast.literal_eval on pyparse's tree, mode="eval"),
