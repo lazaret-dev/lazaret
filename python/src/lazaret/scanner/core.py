@@ -4632,11 +4632,11 @@ def _walk_tree(tree, excludes, include_deps, col):
             if _stat.S_ISLNK(mode) or (_stat.S_ISDIR(mode) and _is_reparse_point(st)):
                 listed.append([name, "link", _readlink((tree, parts + (e.name,)))])
             elif _stat.S_ISDIR(mode):
-                # (a loop is a folder met again by its identity, where it is opened beneath its parent; where the
-                # tree is read by path (Windows) no link is followed and NTFS has no hard-linked folders, and a file
-                # ID there (_Root.listdir's) need not tell folders apart: 3.10's and 3.11's 64-bit one of ReFS's
-                # 128-bit IDs is not unique, so none is used)
-                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino and _ANCHORED_OPEN else None
+                # (a loop is a folder met again by its identity, as before on POSIX, however the tree is read; on
+                # Windows no link is followed and NTFS has no hard-linked folders, and a file ID there (_Root.listdir's)
+                # need not tell folders apart: 3.10's and 3.11's 64-bit one of ReFS's 128-bit IDs is not unique, so
+                # none is used)
+                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino and os.name != "nt" else None
                 listed.append([name, "dir", key, key in seen_dirs])
             elif not _stat.S_ISREG(mode):
                 listed.append([name, "special", next((c for test, c in _SPECIAL_CODES if test(mode)), "other")])

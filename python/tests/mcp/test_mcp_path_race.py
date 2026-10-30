@@ -445,6 +445,24 @@ class _DirectoryCase(unittest.TestCase):
         self.assertFalse([d for d in self.reads if MARKER.encode() in d], "a file outside the root was read")
         self.assertNotIn("outside_only.py", self.listed, "a folder outside the root was listed")
 
+    def assertLoopAsBefore(self):
+        """sub/, listed by the walk as the root met again (a bind mount's or a hard-linked folder's identity), is a
+        filesystem loop and not entered on POSIX, however the tree is read (the review of round 3, L2: the loop check
+        was the anchored walk's alone); on Windows no file ID tells a loop (none is followed there), and it is read."""
+        inside, _outside = self.tree()
+        real, root = lazaret._Root.listdir, os.lstat(inside)
+
+        def listdir(tree, parts=(), **kwargs):
+            got = real(tree, parts, **kwargs)
+            if tuple(parts) == () and kwargs.get("identify", True):
+                return [lazaret._Entry(e.name, root) if e.name == "sub" else e for e in got]
+            return got
+        with mock.patch.object(lazaret._Root, "listdir", listdir), self.watching():
+            out = server.tool_scan_directory({"path": inside})
+        loops = [i["file"] for i in out["issues"] if "filesystem loop" in i["msg"]]
+        self.assertEqual(loops, [] if os.name == "nt" else ["sub"], out["issues"])
+        self.assertEqual(self.reads.count(INSIDE.encode()), 2 if os.name == "nt" else 1)     # (a.py; sub/c.py)
+
     def assertNotRead(self, name, out, rel, why=CHANGED):
         self.assertEqual(out["qualityGate"], "FAILED")
         self.assertTrue(out.get("incomplete"), out)
@@ -457,6 +475,9 @@ class _DirectoryCase(unittest.TestCase):
 
 
 class DirectorySwapTests(_DirectoryCase):
+    def test_a_folder_met_again_is_a_loop_as_before(self):
+        self.assertLoopAsBefore()
+
     def test_a_folder_swapped_for_a_link_during_the_walk_is_not_read(self):
         for name, tool in TOOLS:
             with self.subTest(tool=name):
@@ -605,6 +626,9 @@ class DirectoryWithoutAnAnchoredOpenTests(_DirectoryCase):
                       mock.patch.object(lazaret, "_OPEN_FLAGS", lazaret._OPEN_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))):
             patch.start()
             self.addCleanup(patch.stop)
+
+    def test_a_folder_met_again_is_a_loop_as_before(self):
+        self.assertLoopAsBefore()
 
     def test_swaps_during_the_walk_are_not_read(self):
         for name, tool in TOOLS:
