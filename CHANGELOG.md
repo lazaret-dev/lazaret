@@ -7,7 +7,7 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [0.1.9] — 2026-10-10
+## [0.1.9] — 2026-10-30
 
 RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and Rust models and reads shell deletion commands. Removing a home directory or its personal files, a filesystem/drive root, or repositories selected through recursive `.git` globs adds “deletes the user's files”: CRITICAL at install/build/import, MAJOR when found only in use-time code. Relative build/dist/fixture cleanup, created temporary directories and named application-cache subtrees are excluded. Unknown paths alone are not evidence of deletion of user files. The check is static; no target path is accessed.
 
