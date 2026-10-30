@@ -15,8 +15,15 @@ opened is not read (SC-TRUNCATED at it, the call incomplete), and nothing outsid
 The swaps are made at a fixed point (after the check, after the walk lists the root, after the walk), as the report's
 repro makes its swap after the stat. Only what follows the read (decoding, the rules) is stubbed where a test watches
 what reached the scanner (scan_files); the directory tests run the real scanner and watch what is listed and read.
-Fixtures are inert text files in temporary directories; where links cannot be made (Windows without the privilege)
-the tests skip."""
+Fixtures are inert text files in temporary directories, written as bytes ("\\n", on Windows too); where links cannot
+be made (Windows without the privilege) the tests skip.
+
+Windows has no such anchored open (core._ANCHORED_OPEN: no dir_fd, no O_NOFOLLOW): a file is opened by its path, links
+followed, and kept only when the final path of what was opened is under the root (core._open_verified), and a tree
+is read by path, each folder checked so (core._Root). Where a test checks what the anchored open says, it checks what
+Windows' says there: of a file that leads outside the root now (it is outside the root), of a folder (Windows will not
+open one as a file: permission denied), of a path through a folder that is a file now (no such path: as a file gone).
+Nothing is read in any of them."""
 
 import contextlib
 import os
@@ -29,10 +36,25 @@ from unittest import mock
 
 from lazaret.mcp import server
 from lazaret.scanner import core as lazaret
-from tests._folding_disk import folding_disk, tells_names_apart
+from tests._folding_disk import apfs_fold, folding_disk, tells_names_apart
 
 INSIDE = "x = 1\n"
 MARKER = "OUTSIDE_ROOT_MARKER = 'read-across-the-boundary'\n"
+#: what scan_files says of a file whose path leads outside the root now, where it is opened by its path and its
+#: handle's final path checked (Windows: core._open_verified), not beneath the root a directory at a time
+OPENED_OUTSIDE = "not read: the file opened is outside the allowed root: its path changed after it was checked"
+
+
+def _write(folder, rel, text):
+    """`rel` ('/'-separated) under `folder`, its text's bytes as they are (no "\\r\\n" on Windows)."""
+    with open(os.path.join(folder, *rel.split("/")), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def _changed(anchored):
+    """What scan_files says of a file a part of whose path was swapped for a link to outside after the check: the
+    anchored open's own words (`anchored`), else where its handle is (OPENED_OUTSIDE)."""
+    return anchored if lazaret._ANCHORED_OPEN else OPENED_OUTSIDE
 
 
 def _can_link():
@@ -78,8 +100,7 @@ class _Case(unittest.TestCase):
         self.seen = []
 
     def write(self, folder, rel, text):
-        with open(os.path.join(folder, *rel.split("/")), "w", encoding="utf-8") as fh:
-            fh.write(text)
+        _write(folder, rel, text)
 
     def roots(self, *roots):
         patch = mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": os.pathsep.join(roots)})
@@ -167,7 +188,7 @@ class FileSwapTests(_Case):
             self.link(os.path.join(self.outside, "b.py"), path)
         with self.watching(), self.swapped_after_the_check(swap):
             out = self.scan(path)
-        self.assertNotRead(out, path, "it is a symbolic link now: it changed after the path was checked")
+        self.assertNotRead(out, path, _changed("it is a symbolic link now: it changed after the path was checked"))
         self.assertEqual(self.seen, [])
 
     def test_a_directory_on_the_path_swapped_for_a_link_is_not_read(self):
@@ -179,7 +200,7 @@ class FileSwapTests(_Case):
             self.link(os.path.join(self.outside, "sub"), sub)
         with self.watching(), self.swapped_after_the_check(swap):
             out = self.scan(path)
-        self.assertNotRead(out, path, "sub on its path is a symbolic link or no directory now")
+        self.assertNotRead(out, path, _changed("sub on its path is a symbolic link or no directory now"))
         self.assertEqual(self.seen, [])
 
     def test_a_directory_on_the_path_swapped_for_a_file_is_not_read(self):
@@ -191,8 +212,14 @@ class FileSwapTests(_Case):
             self.write(self.inside, "sub", MARKER)
         with self.watching(), self.swapped_after_the_check(swap):
             out = self.scan(path)
-        self.assertNotRead(out, path, "is a symbolic link or no directory now")
+        if lazaret._ANCHORED_OPEN:
+            self.assertNotRead(out, path, "is a symbolic link or no directory now")
+        else:       # (opened by its path, which names nothing now, sub being a file: as a file gone after the check)
+            self.assertEqual(out["files"][path], {"error": "File not found"})
+        self.assertEqual(self.seen, [])
 
+    @unittest.skipUnless(lazaret._ANCHORED_OPEN, "the anchored open walks down the path; where a file is opened by its "
+                                                 "path (Windows), what it reaches is checked: WithoutAnAnchoredOpen*")
     def test_a_swap_while_the_path_is_walked_is_not_read(self):
         # the swap made between two opens of the walk: after the root's, before sub's
         path = os.path.join(self.inside, "sub", "c.py")
@@ -229,7 +256,7 @@ class FileSwapTests(_Case):
         with self.watching(), self.swapped_after_the_check(swap, paths=2):
             out = self.scan(good, bad)
         self.assertEqual(out["files"][good], {"issueCount": 0, "issues": []})
-        self.assertNotRead(out, bad, "symbolic link now")
+        self.assertNotRead(out, bad, _changed("symbolic link now"))
         self.assertIn("1 of 2 file(s) could not be read", out["incompleteReason"])
 
 
@@ -266,7 +293,9 @@ class LegitimateLinkTests(_Case):
         folder = os.path.join(self.inside, "pkg.py")
         os.mkdir(folder)
         out = self.scan(folder)
-        self.assertNotRead(out, folder, "it is a directory, not a regular file")
+        # (Windows will not open a folder as a file: permission denied, which is what it says there)
+        self.assertNotRead(out, folder, "it is a directory, not a regular file" if lazaret._ANCHORED_OPEN
+                           else "cannot read the file (Permission denied)")
         if hasattr(os, "mkfifo"):
             fifo = os.path.join(self.inside, "pipe.py")
             os.mkfifo(fifo)
@@ -361,8 +390,7 @@ class _DirectoryCase(unittest.TestCase):
         return inside, outside
 
     def write(self, folder, rel, text):
-        with open(os.path.join(folder, *rel.split("/")), "w", encoding="utf-8") as fh:
-            fh.write(text)
+        _write(folder, rel, text)
 
     def roots(self, *roots):
         patch = mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": os.pathsep.join(roots)})
@@ -570,12 +598,9 @@ class DirectoryWithoutAnAnchoredOpenTests(_DirectoryCase):
 
     def setUp(self):
         super().setUp()
-        probe = os.open(self.base, os.O_RDONLY)
-        try:
-            if lazaret._opened_path(probe) is None:
-                self.skipTest("this platform cannot say where an opened folder is")
-        finally:
-            os.close(probe)
+        # (as the walk asks it: Windows opens a folder with CreateFileW, as os.open cannot)
+        if lazaret._folder_final_path(self.base) is None:
+            self.skipTest("this platform cannot say where an opened folder is")
         for patch in (mock.patch.object(lazaret, "_ANCHORED_OPEN", False),
                       mock.patch.object(lazaret, "_OPEN_FLAGS", lazaret._OPEN_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))):
             patch.start()
@@ -764,7 +789,17 @@ class ReviewTests(_SwapCase):
 
     @staticmethod
     def comb(where, depth):
-        """where/d/d/…/d (`depth` folders) with a folder z holding b.py beside every d: 2 × depth folders."""
+        """where/d/d/…/d (`depth` folders) with a folder z holding b.py beside every d: 2 × depth folders. Made
+        beneath each folder's descriptor (a path that long may be longer than the system takes), or by path where
+        there is none (Windows)."""
+        if not (os.mkdir in os.supports_dir_fd and os.open in os.supports_dir_fd):
+            for _ in range(depth):
+                os.mkdir(os.path.join(where, "d"))
+                os.mkdir(os.path.join(where, "z"))
+                with open(os.path.join(where, "z", "b.py"), "wb") as fh:
+                    fh.write(b"x = 1\n")
+                where = os.path.join(where, "d")
+            return
         fd = os.open(where, os.O_RDONLY)
         try:
             for _ in range(depth):
@@ -817,18 +852,24 @@ class ReviewTests(_SwapCase):
         self.assertEqual(len(os.listdir("/proc/self/fd")), before)
 
     def test_a_tree_deeper_than_the_cap_is_incomplete(self):
-        inside, _outside = self.tree()
-        self.comb(os.path.join(inside, "sub"), lazaret.MAX_WALK_DEPTH)       # (sub/d…: 513 deep at its bottom)
-        for name, tool in TOOLS:
-            with self.subTest(tool=name):
-                out = tool({"path": inside, "max_issues": 2000})
-                self.assertEqual(out["qualityGate"], "FAILED")
-                self.assertTrue(out["incomplete"])
-                self.assertIn("2 folders nested deeper than 512 folders were not read", out["incompleteReason"])
-                if name == "scan_directory":
-                    deep = os.path.join("sub", *["d"] * (lazaret.MAX_WALK_DEPTH - 1))
-                    self.assertEqual(sorted(i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"),
-                                     [os.path.join(deep, "d"), os.path.join(deep, "z")])
+        # (where the tree is read by path (Windows), each folder is lstat'ed along its path, a path as long as the
+        # folder is deep: a comb as deep as the cap costs some 10^6 lstats of paths of some 600 characters (and paths
+        # longer than Windows takes without its long paths), so the cap is lowered there; the walk is the same)
+        cap = lazaret.MAX_WALK_DEPTH if lazaret._ANCHORED_OPEN else 24
+        with mock.patch.object(lazaret, "MAX_WALK_DEPTH", cap):
+            inside, _outside = self.tree()
+            self.comb(os.path.join(inside, "sub"), cap)                     # (sub/d…: cap + 1 deep at its bottom)
+            for name, tool in TOOLS:
+                with self.subTest(tool=name):
+                    out = tool({"path": inside, "max_issues": 2000})
+                    self.assertEqual(out["qualityGate"], "FAILED")
+                    self.assertTrue(out["incomplete"])
+                    self.assertIn(f"2 folders nested deeper than {cap} folders were not read",
+                                  out["incompleteReason"])
+                    if name == "scan_directory":
+                        deep = os.path.join("sub", *["d"] * (cap - 1))
+                        self.assertEqual(sorted(i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"),
+                                         [os.path.join(deep, "d"), os.path.join(deep, "z")])
 
     def test_the_target_is_checked_by_its_open_beneath_the_root(self):
         # (a link swapped in after the check: the same answer whether what it names outside exists or not; a file and
@@ -869,11 +910,22 @@ class FoldingDiskTests(_SwapCase):
     Windows' NTFS by default), a package's text can name a file the walk listed by another spelling, which the disk
     opens. The after-walk check found the walk's record by the exact name, so a file a hook runs named `LIB/RUN.DAT`
     (on disk lib/run.dat), swapped after the walk, was read as it was then or taken for absent: its CRITICAL lost, the
-    call complete. Here the disk is the project's macOS stand-in (tests/_folding_disk.py; the real disk on a Mac)."""
+    call complete. Here the disk is the project's macOS stand-in (tests/_folding_disk.py; the real disk on a Mac).
+
+    On Windows the disk is the real one: the tools read the tree by its real path in its normcase form (lower case),
+    which the stand-in's roots, as given, are not. NTFS takes names differing in case for one (its upcase table), but
+    not names differing in Unicode form alone: a hook's NFD spelling of an NFC name names nothing there, as on a disk
+    that tells names apart (`_one_name`)."""
 
     SPELLINGS = (("lib/run.dat", "LIB/RUN.DAT", "LIB"),                    # (the file on disk, the hook's name,
                  ("lib/" + RESUME_NFC, "lib/" + RESUME_NFD, "lib"),         # what a swap of lib is reported at)
                  ("lib/" + RESUME_NFC, "LIB/" + RESUME_NFC.upper(), "LIB"))
+
+    @staticmethod
+    def _one_name(a, b):
+        """Does the disk these tests read take the paths `a` and `b` for one? The stand-in, and macOS's disk, when
+        they fold as one in case and Unicode form; Windows' when they are one in upper case, whatever their forms."""
+        return a.upper() == b.upper() if os.name == "nt" else apfs_fold(a) == apfs_fold(b)
 
     def hooked(self, inside, hook, rel):
         pkg = '{"name": "x", "version": "1.0.0", "scripts": {"postinstall": "node %s"}}\n' % hook
@@ -881,6 +933,7 @@ class FoldingDiskTests(_SwapCase):
 
     def test_a_file_a_hook_names_by_another_spelling_swapped_after_the_walk_is_not_read(self):
         for rel, hook, folder in self.SPELLINGS:
+            reaches = self._one_name(rel, hook)         # (Windows' disk: not the NFD spelling)
             for name, tool in TOOLS:
                 inside, _outside = self.tree()
                 self.hooked(inside, hook, rel)
@@ -888,8 +941,9 @@ class FoldingDiskTests(_SwapCase):
                     out = tool({"path": inside})
                 self.assertEqual(out["qualityGate"], "FAILED")
                 self.assertFalse(out.get("incomplete"), out)
-                if name == "scan_directory":
-                    self.assertIn(("SC-INSTALL-HOOK", "CRITICAL"), self.rules(out, "package.json"))
+                if name == "scan_directory":           # (a hook that runs a file not there: MAJOR, as before N1)
+                    self.assertIn(("SC-INSTALL-HOOK", "CRITICAL" if reaches else "MAJOR"),
+                                  self.rules(out, "package.json"))
                 for how in self.SWAPS + ("its folder for a link",):
                     with self.subTest(file=rel, hook=hook, tool=name, swap=how):
                         inside, outside = self.tree()
@@ -905,7 +959,11 @@ class FoldingDiskTests(_SwapCase):
                         with folding_disk(inside), self.watching(swap, when="walked"):
                             out = tool({"path": inside})
                         at = folder if how == "its folder for a link" else hook
-                        self.assertNotRead(name, out, os.path.join(*at.split("/")))
+                        if reaches:
+                            self.assertNotRead(name, out, os.path.join(*at.split("/")))
+                        else:                   # (it names nothing, swapped or not: nothing outside is read)
+                            self.assertEqual(out["qualityGate"], "FAILED")
+                            self.assertNothingOutside()
 
     def test_a_vendored_header_by_another_spelling_swapped_after_the_walk_is_not_read(self):
         vendor = dict(GO_VENDOR, **{"vendor/modules.txt": "# example.com/v v1.0.0\n## explicit\nexample.com/V\n"})
@@ -1027,13 +1085,13 @@ class RewrittenFileTests(_SwapCase):
             self.write(os.path.dirname(at), os.path.basename(at), INSIDE)
 
         def written_in_place(at):
-            with open(at, "r+", encoding="utf-8") as fh:
+            with open(at, "r+", encoding="utf-8", newline="\n") as fh:
                 fh.truncate(0)
                 fh.write(INSIDE)
 
-        def same_size_new_time(at):
+        def same_size_new_time(at):                 # (newline: "\n" alone, as the file was written, its size kept)
             st = os.stat(at)
-            with open(at, "r+", encoding="utf-8") as fh:
+            with open(at, "r+", encoding="utf-8", newline="\n") as fh:
                 fh.write("/" * len(RISKY_JS.rstrip("\n")) + "\n")
             os.utime(at, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
         for name, tool in TOOLS:

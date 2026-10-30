@@ -115,6 +115,14 @@ def runnable(script):
     return launcher
 
 
+def native_rel(rel):
+    """A root-relative path the tests write with '/' as the Python package reports a file of a tree it read from the
+    disk: os.sep-separated, a backslash on Windows (core._collect: "Paths are root-relative (os.sep separators)"). An
+    archive member's path stays '/'-separated: only the scan of a folder on the disk (a project scan, a repository's
+    checkout) reports this form."""
+    return rel.replace("/", os.sep)
+
+
 def unix_newlines(data: bytes) -> bytes:
     """Windows text-mode output ends lines with CRLF. Normalize it so checks for
     a stray carriage return (a terminal-spoofing byte) only see real ones."""

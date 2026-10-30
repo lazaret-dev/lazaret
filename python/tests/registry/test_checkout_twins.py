@@ -30,6 +30,7 @@ from unittest import mock
 from lazaret.registry import ghdiscover, sources, sourcescan
 from lazaret.scanner import engine
 from tests._folding_disk import apfs_fold, folding_disk, tells_names_apart
+from tests._support import native_rel
 from tests.registry.test_sources import Net, gh_answers
 
 SPEC = "github:o/r@v1"
@@ -142,8 +143,11 @@ class FoundAtTheirPaths(unittest.TestCase):
     def check(self, name):
         """Each disk: what `want` names is found at its path, and nothing at a path the commit does not have. On a
         disk that holds two paths as one: not read whole (the CLI's --ci fails on it, the registry says INCOMPLETE,
-        or SUSPICIOUS where this disk's scan is), and nothing this machine's disk finds is missed."""
+        or SUSPICIOUS where this disk's scan is), and nothing this machine's disk finds is missed. (A finding's path
+        is the checkout's file's, as a project scan reports it: os.sep-separated, the commit's '/' a backslash on
+        Windows.)"""
         files, want = CASES[name]
+        want = {(rule, native_rel(path)) for rule, path in want}
         got = {}
         for disk, fold in DISKS.items():
             with self.subTest(disk=disk):
@@ -153,7 +157,7 @@ class FoundAtTheirPaths(unittest.TestCase):
                 self.assertLessEqual(want, {(r, f) for r, _, f, _ in cli}, said)
                 self.assertLessEqual(want, {(r, f) for r, _, f, _ in reg}, res["verdictReason"])
                 # every finding at a path of the commit: none at a twin tree's, none at a merged folder's
-                self.assertLessEqual({f for _, _, f, _ in cli | reg}, set(files))
+                self.assertLessEqual({f for _, _, f, _ in cli | reg}, {native_rel(f) for f in files})
                 self.assertEqual(code, 1, said)                     # the finding fails the gate
                 got[disk] = cli, reg, res["verdict"], report["metrics"]
                 if fold is None and self.apart:
