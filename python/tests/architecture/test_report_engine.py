@@ -576,7 +576,7 @@ NODE_FORMS = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const r = await import(pathToFileURL(process.argv[1]).href);
-const results = JSON.parse(readFileSync(0, "utf8"));
+const results = JSON.parse(readFileSync(0).toString("utf8"));
 const lines = (res, opts) => { const got = []; r.printReport(res, { out: (l) => got.push(l), ...opts }); return got.join("\\n") + "\\n"; };
 process.stdout.write(JSON.stringify(results.map((res) => ({
   json: r.jsonRenderer(res), html: r.htmlRenderer(res), sarif: r.sarifRenderer(res, res.project),

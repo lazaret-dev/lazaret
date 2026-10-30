@@ -212,7 +212,6 @@ class LargeCheckpoints(unittest.TestCase):
     --deps."""
 
     def test_a_200_mb_checkpoint_is_judged(self):
-        import resource
         import time
         sp = ".venv/lib/python3.12/site-packages"
         root = tempfile.mkdtemp(prefix="lz-model-big-")
@@ -243,11 +242,11 @@ class LargeCheckpoints(unittest.TestCase):
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(data)
-            before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            before = mf.peak_kib()
             t = time.monotonic()
             res = core.scan_project(root, include_deps=True)
             took = time.monotonic() - t
-            grew = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before      # (KiB on Linux)
+            grew = mf.peak_kib() - before                                            # (KiB)
         finally:
             shutil.rmtree(root, ignore_errors=True)
         got = found(res)

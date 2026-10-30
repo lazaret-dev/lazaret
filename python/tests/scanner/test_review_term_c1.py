@@ -58,7 +58,7 @@ class SanitizeTermC1Bidi(unittest.TestCase):
 _NODE_SCRIPT = r"""
 import { sanitizeTerm, safeExcerpt } from %s;
 import { readFileSync } from "node:fs";
-const cps = JSON.parse(readFileSync(0, "utf8"));   // stdin: 12k code points overflow a Windows command line
+const cps = JSON.parse(readFileSync(0).toString("utf8"));   // stdin: 12k code points overflow a Windows command line
 const out = { term: [], excerpt: [] };
 for (const n of cps) {
   const s = "a" + String.fromCodePoint(n) + "b";

@@ -598,7 +598,7 @@ NODE_APPLY = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const b = await import(pathToFileURL(process.argv[1]).href);
-const cases = JSON.parse(readFileSync(0, "utf8"));
+const cases = JSON.parse(readFileSync(0).toString("utf8"));
 process.stdout.write(JSON.stringify(cases.map(([path, root, key, res]) => {
   const warnings = [];
   b.applyBaseline(res, path, { root, warn: (l) => warnings.push(l), env: key === null ? {} : { LAZARET_BASELINE_KEY: key } });

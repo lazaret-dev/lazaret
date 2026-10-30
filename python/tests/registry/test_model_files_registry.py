@@ -7,7 +7,6 @@ for its pickles as the archive's stream passes (John's decision of Oct 21: a che
 built in the test (tests/_model_files.py), inert.
 """
 import io
-import resource
 import shutil
 import tarfile
 import time
@@ -185,14 +184,16 @@ class Releases(unittest.TestCase):
                                                (late, "SUSPICIOUS", "weights.pth", "SC-PTH-EXEC")):
                 data = make(parts, name)
                 self.assertLess(len(data), 5_000_000)
-                before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                before = mf.peak_kib()
                 t = time.monotonic()
                 res = scan_bytes(data, **kw)
                 took = time.monotonic() - t
-                grew = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before     # (KiB on Linux)
+                grew = mf.peak_kib() - before                                           # (KiB)
                 self.assertEqual(res["verdict"], verdict, (make.__name__, name, res["verdictReason"], sc(res)))
                 self.assertLess(took, 15, took)
-                self.assertLess(grew, 150_000, f"{grew} KiB more")
+                # (the checkpoint whole is 200 MB, 195,312 KiB: the first scan grows the peak by about 55,000 KiB on
+                # Linux and 152,600 on macOS, John's Mac, Oct 29)
+                self.assertLess(grew, 180_000, f"{grew} KiB more")
                 if rule:
                     self.assertIn((f"x/{name}", rule, "CRITICAL"), sc(res))
 

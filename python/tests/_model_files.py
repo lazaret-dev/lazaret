@@ -455,3 +455,11 @@ def hostile():
         "eval.pkl": b"\x80\x02c__builtin__\neval\n\x8c\x061+1 ;x\x85R.",
         "runpy.pkl": b"\x80\x04\x8c\x05runpy\x8c\t_run_code\x93\x8c\x02x=\x85R.",
     }
+
+
+def peak_kib():
+    """The process's peak resident memory in KiB: getrusage gives KiB on Linux and bytes on macOS (where the
+    200 MB checkpoint tests read 156,270,592 as KiB, Oct 29)."""
+    import resource
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak // 1024 if sys.platform == "darwin" else peak

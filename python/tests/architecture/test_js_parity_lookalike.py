@@ -119,7 +119,7 @@ NPM_FILES = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const { scanFile } = await import(pathToFileURL(process.argv[1]).href);
-const files = JSON.parse(readFileSync(0, "utf8"));
+const files = JSON.parse(readFileSync(0).toString("utf8"));
 process.stdout.write(JSON.stringify(files.map(([path, lang, content]) => scanFile({ path, content, lang })
   .filter((i) => i.rule === "SC-HOMOGLYPH").map((i) => [i.sev, i.line, i.msg]))));
 """

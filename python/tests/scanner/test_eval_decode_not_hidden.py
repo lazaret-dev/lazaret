@@ -255,7 +255,7 @@ class RoundTripTests(unittest.TestCase):
 # External review acceptance tests. Sources are scanned as text, never executed.
 import json
 from pathlib import Path
-REVIEW_CASES = json.loads((Path(__file__).resolve().parents[3] / "rust/crates/lazaret-engine/tests/data/decode-review.json").read_text())
+REVIEW_CASES = json.loads((Path(__file__).resolve().parents[3] / "rust/crates/lazaret-engine/tests/data/decode-review.json").read_text(encoding="utf-8"))
 def review_source(case):
     source = text(case["source"])
     if "size" in case:

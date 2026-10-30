@@ -26,7 +26,7 @@ def main():
     rows = json.loads(MATRIX.read_text(encoding="utf-8"))
     node_rows = [r for r in rows if r["api"].startswith("node.")]
     program = """const fs=require('fs'),p=require('path');
-const rows=JSON.parse(fs.readFileSync(0,'utf8'));
+const rows=JSON.parse(fs.readFileSync(0).toString('utf8'));
 process.stdout.write(JSON.stringify(rows.map(r=>{const [,f,op]=r.api.split('.');return p[f][op](...r.parts)})));"""
     node = json.loads(subprocess.run(["node", "-e", program], input=json.dumps(node_rows),
                                     text=True, encoding="utf-8", capture_output=True,

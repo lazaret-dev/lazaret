@@ -521,7 +521,10 @@ class DamageTests(Base):
         """The file cannot be opened, or opens and fails its check: it never answers."""
         try:
             b = self.open(data)
-            b.verify()
+            try:
+                b.verify()
+            finally:
+                b.close()           # (one damaged file per byte: macOS allows 256 open files, Oct 29)
         except ValueError:
             return True
         self.fail("%s was read" % what)
@@ -547,10 +550,15 @@ class DamageTests(Base):
         for i in range(0, len(self.data), 7):
             changed = bytearray(self.data)
             changed[i] ^= 0x40
+            b = None
             try:
-                got = self.lookups(self.open(bytes(changed)))
+                b = self.open(bytes(changed))
+                got = self.lookups(b)
             except ValueError:
                 continue
+            finally:
+                if b is not None:
+                    b.close()       # (one file per changed byte: macOS allows 256 open files, Oct 29)
             self.assertEqual(got, want, i)
 
     def test_a_format_it_does_not_know(self):

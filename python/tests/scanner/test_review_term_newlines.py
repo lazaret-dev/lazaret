@@ -82,7 +82,7 @@ class CliTests(unittest.TestCase):
 _NODE_SCRIPT = r"""
 import { sanitizeTermLine } from %s;
 import { readFileSync } from "node:fs";
-const cps = JSON.parse(readFileSync(0, "utf8"));
+const cps = JSON.parse(readFileSync(0).toString("utf8"));
 process.stdout.write(JSON.stringify(cps.map((n) => sanitizeTermLine("a" + String.fromCodePoint(n) + "b"))));
 """
 

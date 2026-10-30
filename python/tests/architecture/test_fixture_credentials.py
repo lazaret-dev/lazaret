@@ -9,6 +9,7 @@ pratique's sources (rust/crates/pratique) are upstream's, synced byte for byte, 
 
 import os
 import re
+import subprocess
 import unittest
 
 from tests import _support
@@ -30,24 +31,38 @@ SKIP_DIRS = {".git", "node_modules", "target", "__pycache__"}
 VENDORED = ("rust/crates/pratique/",)
 
 
+def _files(root):
+    """The repository's files, from its root: in a git checkout, what git tracks or would add (git's ignore rules
+    applied, so a working tree's ignored folders, `Claude outputs/` and build output, are not read: on a Mac with
+    half a GB of them this test ran past 45 seconds, Oct 29); elsewhere, every file under the root."""
+    try:
+        out = subprocess.run(["git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                             capture_output=True, check=True, timeout=30).stdout
+        rels = sorted(set(os.fsdecode(p) for p in out.split(b"\0") if p))
+        return [r for r in rels if not any(part in SKIP_DIRS for part in r.split("/")[:-1])]
+    except (OSError, subprocess.SubprocessError):
+        found = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            found += [os.path.relpath(os.path.join(dirpath, n), root).replace(os.sep, "/") for n in sorted(filenames)]
+        return found
+
+
 def _texts():
     """(path from the repository's root, text) of every text file of the repository, pratique's aside."""
     root = _support.REPO_ROOT
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
-        for name in sorted(filenames):
-            path = os.path.join(dirpath, name)
-            rel = os.path.relpath(path, root).replace(os.sep, "/")
-            if rel.startswith(VENDORED) or os.path.islink(path):
-                continue
-            with open(path, "rb") as fh:
-                data = fh.read()
-            if b"\0" in data[:8192]:
-                continue
-            try:
-                yield rel, data.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
+    for rel in _files(root):
+        path = os.path.join(root, *rel.split("/"))
+        if rel.startswith(VENDORED) or os.path.islink(path) or not os.path.isfile(path):
+            continue
+        with open(path, "rb") as fh:
+            data = fh.read()
+        if b"\0" in data[:8192]:
+            continue
+        try:
+            yield rel, data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
 
 
 def found_in(text):

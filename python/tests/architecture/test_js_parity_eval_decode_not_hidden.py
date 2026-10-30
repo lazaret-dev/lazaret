@@ -64,7 +64,7 @@ def _review_parity(cases):
                 for rel in (f"src/c{n}.js", f"node_modules/p/c{n}.js"):
                     path = shapes.Path(root) / rel
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(shapes.review_source(case))
+                    path.write_text(shapes.review_source(case), encoding="utf-8")
             js, py = parity.both(root, deps=True)
             self.assert_same(js, py, label="external review")
     return test
