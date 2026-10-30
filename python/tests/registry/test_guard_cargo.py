@@ -27,12 +27,15 @@ from unittest import mock
 
 from lazaret.registry import cargosrc, guard, pmsettings, prior, repo
 from lazaret.scanner import _native
+from tests import _support
 from tests.registry import _cargo_support as cs
 from tests.registry import _guard_support as gs
 from tests.registry.test_guard import options
 
 HEX = "ab" * 32
 OLD_LOCK = "version = 4\n"
+#: what the name of a program cargo install builds ends with
+EXE = ".exe" if os.name == "nt" else ""
 
 
 class CrateScanner:
@@ -1557,16 +1560,27 @@ class RealCargoTests(TmpCase):
         build.rustc-wrapper, build.rustc-workspace-wrapper and build.rustc; under --plan it runs none of them. Without
         --plan the command runs as the project configures it, and cargo runs them."""
         marker = os.path.join(self.tmp, "ran.log")
-        script = os.path.join(self.tmp, "wrap.sh")
-        with open(script, "w", encoding="utf-8") as f:
-            f.write(f'#!/bin/sh\necho "$*" >> "{marker}"\nif [ "$1" = "-vV" ]; then exec rustc "$@"; fi\nexec "$@"\n')
-        os.chmod(script, 0o755)
+        if os.name == "nt":
+            # (Windows runs no shell script: the same wrapper in Python, run by a .cmd, which cargo runs through cmd.exe)
+            script = os.path.join(self.tmp, "wrap.py")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(f"import subprocess, sys\nwith open({marker!r}, 'a', encoding='utf-8') as f:\n"
+                        "    f.write(' '.join(sys.argv[1:]) + '\\n')\n"
+                        "argv = ['rustc'] + sys.argv[1:] if sys.argv[1:2] == ['-vV'] else sys.argv[1:]\n"
+                        "sys.exit(subprocess.call(argv))\n")
+            script = _support.runnable(script)
+        else:
+            script = os.path.join(self.tmp, "wrap.sh")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(f'#!/bin/sh\necho "$*" >> "{marker}"\nif [ "$1" = "-vV" ]; then exec rustc "$@"; fi\nexec "$@"\n')
+            os.chmod(script, 0o755)
         os.makedirs(os.path.join(self.dir, ".cargo"))
         # (cargo 1.95 asks the compiler when it updates a lock that exists)
         lock = 'version = 4\n\n[[package]]\nname = "app"\nversion = "0.1.0"\n'
         for k, key in enumerate(("rustc-wrapper", "rustc-workspace-wrapper", "rustc")):
             with self.subTest(key=key):
-                self.write(".cargo/config.toml", f'[build]\n{key} = "{script}"\n')
+                # (a TOML string: a Windows path's backslashes escaped, as in JSON)
+                self.write(".cargo/config.toml", f'[build]\n{key} = {json.dumps(script)}\n')
                 self.write("Cargo.lock", lock)
                 # (each run with a target folder of its own: cargo keeps what the compiler said there)
                 self.env["CARGO_TARGET_DIR"] = os.path.join(self.tmp, f"target-{k}")
@@ -1622,7 +1636,7 @@ class RealCargoTests(TmpCase):
         code, out = self.guard("cargo", "install", "--root", root, "tool")
         self.assertEqual(code, 0, out)
         self.assertIn("lazaret guard: checked 2 OK", out)
-        self.assertTrue(os.path.exists(os.path.join(root, "bin", "tool")))
+        self.assertTrue(os.path.exists(os.path.join(root, "bin", "tool" + EXE)))
 
     def test_cargo_install_of_a_tool_with_a_hostile_dependency_installs_nothing(self):
         root = os.path.join(self.tmp, "root")
@@ -1694,7 +1708,7 @@ class RealCargoTests(TmpCase):
         asked = self.reg.requests[before:]
         self.assertIn("/dl/pleaf/pleaf-1.0.0.crate", asked)
         self.assertNotIn("/dl/pleaf/pleaf-1.0.1.crate", asked)
-        self.assertTrue(os.path.exists(os.path.join(root, "bin", "pinned")))
+        self.assertTrue(os.path.exists(os.path.join(root, "bin", "pinned" + EXE)))
 
 B64_BLOB = base64.b64encode(bytes(range(256)) * 2).decode()
 INDEX = "https://index.crates.io/"
