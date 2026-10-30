@@ -97,6 +97,24 @@ def skip_on_windows(reason):
     return unittest.skipIf(sys.platform == "win32", reason)
 
 
+def runnable(script):
+    """The path that runs `script`, a Python file with a #! line (a test's
+    fake tool): the script itself, elsewhere than on Windows. Windows runs no
+    #! line, and a program on PATH is found only under one of PATHEXT's
+    extensions (lazaret.scanner.programs.find), so there it is a `.cmd`
+    written beside the script that runs it with this Python and its
+    arguments, and passes its exit code on (as tests/registry/
+    test_guard_editor.py's fake editor is run)."""
+    import sys
+    if sys.platform != "win32":
+        return script
+    launcher = script + ".cmd"
+    with open(launcher, "w", encoding="utf-8", newline="") as f:
+        # (`%` doubled: a batch file expands `%name%` even in quotes)
+        f.write('@echo off\r\n"{}" "{}" %*\r\n'.format(sys.executable.replace("%", "%%"), script.replace("%", "%%")))
+    return launcher
+
+
 def unix_newlines(data: bytes) -> bytes:
     """Windows text-mode output ends lines with CRLF. Normalize it so checks for
     a stray carriage return (a terminal-spoofing byte) only see real ones."""
