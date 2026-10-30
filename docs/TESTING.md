@@ -83,7 +83,7 @@ PYTHONPATH=src:. python3 -m unittest tests.scanner.test_review_received_code
 # one small subsystem via discover (mcp, safexml, build, pg are quick)
 PYTHONPATH=src:. python3 -m unittest discover -s tests/mcp -t .
 
-# a big subsystem in chunks — the scanner suite (~90 files) will NOT finish in
+# a big subsystem in chunks — the scanner suite (~150 files) will NOT finish in
 # 45 s as one run, so batch it:
 mods=$(ls tests/scanner/test_*.py | sed 's#/#.#g;s#\.py$##' | sed -n '1,23p' | tr '\n' ' ')
 PYTHONPATH=src:. python3 -m unittest $mods
@@ -590,8 +590,8 @@ Before tagging, run **every** subsystem green, individually (§2):
 `mcp`, `pg`, `safexml`, `build`, and the whole `js/test/`. This "lock-it-in"
 pass is what catches ripple from a change in a widely-imported module like
 `core.py` — it has caught a real regression that per-area tests missed (a
-`--deps` stop-budget accounting bug). Budget for it; it's ~2,400 Python tests +
-~350 JS tests, but each batch is seconds. The Python batches run on the
+`--deps` stop-budget accounting bug). Budget for it; it's ~6,800 Python tests +
+~600 JS tests, but each batch is seconds. The Python batches run on the
 native library (build it first, §2).
 
 Then the release gates themselves: `sh scripts/check-versions.sh HEAD` (the
