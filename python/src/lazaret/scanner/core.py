@@ -6327,10 +6327,11 @@ def scan_twins(twins, exclude=(), include_deps=False, redact_secrets=True, shown
     with more beside it, and merge_findings keeps it once. -> (the trees' findings, merged, at their paths in the
     commit; {path: the tree its own file is in}; why a scan was not whole, [str]; how many trees held something to
     read; what the trees hold of their own for the metrics, {"files": [file], "configs": how many config files}). A
-    tree holding nothing Lazaret reads adds nothing."""
+    tree holding nothing Lazaret reads adds nothing. (`overlaid` holds the commit's paths, '/'-separated; they are
+    compared with the scan's in the scan's form, os.sep-separated as _fs_display shows them.)"""
     issues, where, why, read, own = [], {}, [], 0, {"files": [], "configs": 0}
     for twin in twins:
-        given, collected = (overlaid or {}).get(twin, set()), {}
+        given, collected = {_fs_display(p.replace("/", os.sep)) for p in (overlaid or {}).get(twin, ())}, {}
         try:
             got = scan_project(twin, exclude, include_deps=include_deps, redact_secrets=redact_secrets, shown=shown,
                                collected=collected)
