@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-48UMzTpNUKEALworFHf6/dJ0oGxboMz883nSLGWl9uA=' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-B/Pj+vlynP9QLDyBovtyeWrCAMnU+a/hq93RcN745zQ=' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -41072,7 +41072,22 @@ function call(name, args = {}, text = "") {
     bytes.set(argBytes, req + 8 + nameBytes.length);
     const at = req + 8 + nameBytes.length + argBytes.length;
     if (direct) {
-      if (utf8.encodeInto(one, bytes.subarray(at, at + textLength)).written !== textLength) throw new Error("the text's length");
+      // (Node 26.10's TextEncoder.encodeInto writes a character short when the room is exactly the text's UTF-8
+      // length and the text holds a character of more than one byte, 1,408 of the parity tests' texts, Oct 29:
+      // where Node's Buffer is, its own writer; elsewhere encodeInto; either one checked, and a text not written
+      // whole is copied in instead)
+      let whole;
+      if (typeof Buffer !== "undefined") {
+        whole = Buffer.from(e.memory.buffer, at, textLength).write(one, 0, textLength, "utf8") === textLength;
+      } else {
+        const r = utf8.encodeInto(one, bytes.subarray(at, at + textLength));
+        whole = r.read === one.length && r.written === textLength;
+      }
+      if (!whole) {
+        const copy = typeof Buffer !== "undefined" ? Buffer.from(one, "utf8") : utf8.encode(one);
+        if (copy.length !== textLength) throw new Error("the text's length");
+        bytes.set(copy, at);
+      }
     } else {
       bytes.set(textBytes, at);
     }

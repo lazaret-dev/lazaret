@@ -224,7 +224,22 @@ export function call(name, args = {}, text = "") {
     bytes.set(argBytes, req + 8 + nameBytes.length);
     const at = req + 8 + nameBytes.length + argBytes.length;
     if (direct) {
-      if (utf8.encodeInto(one, bytes.subarray(at, at + textLength)).written !== textLength) throw new Error("the text's length");
+      // (Node 26.10's TextEncoder.encodeInto writes a character short when the room is exactly the text's UTF-8
+      // length and the text holds a character of more than one byte, 1,408 of the parity tests' texts, Oct 29:
+      // where Node's Buffer is, its own writer; elsewhere encodeInto; either one checked, and a text not written
+      // whole is copied in instead)
+      let whole;
+      if (typeof Buffer !== "undefined") {
+        whole = Buffer.from(e.memory.buffer, at, textLength).write(one, 0, textLength, "utf8") === textLength;
+      } else {
+        const r = utf8.encodeInto(one, bytes.subarray(at, at + textLength));
+        whole = r.read === one.length && r.written === textLength;
+      }
+      if (!whole) {
+        const copy = typeof Buffer !== "undefined" ? Buffer.from(one, "utf8") : utf8.encode(one);
+        if (copy.length !== textLength) throw new Error("the text's length");
+        bytes.set(copy, at);
+      }
     } else {
       bytes.set(textBytes, at);
     }
