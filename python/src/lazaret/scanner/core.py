@@ -3417,28 +3417,53 @@ class _TooDeep(OSError):
     """_Root: a folder nested deeper than MAX_WALK_DEPTH below the root is not opened."""
 
 
+#: Windows' stat calls: the third time the walk holds a file to is its creation time there, not its change time
+#: (_held_time).
+_WINDOWS_TIMES = os.name == "nt"
+
+
+def _held_time(st):
+    """The time the walk holds a file to beside its size and modification time (_file_record, _unwritten), the same
+    whichever stat call gave `st`. On POSIX its change time (st_ctime_ns), which only the system sets. On Windows its
+    creation time, the one time every stat call there fills alike: from Python 3.12, os.lstat and os.stat give
+    st_ctime the creation time (posixmodule.c's win32_xstat copies st_birthtime into it, as DirEntry_from_find_data
+    does for the listing's) but os.fstat gives it the change time (fileutils.c's _Py_fstat_noraise:
+    FILE_BASIC_INFO.ChangeTime), so the walk's lstat and a read's fstat of one file never agreed on it once the file
+    was written after it was made; st_birthtime_ns is the creation time in all of them (FILE_BASIC_INFO's, or
+    FILE_STAT_BASIC_INFORMATION's, CreationTime; the listing's ftCreationTime). Python 3.10 and 3.11 have no
+    st_birthtime there and give st_ctime the creation time in all of them (BY_HANDLE_FILE_INFORMATION's
+    ftCreationTime). Windows' change time would hold a file to nothing more: its writer can set it, as every time
+    NTFS keeps (SetFileInformationByHandle)."""
+    if not _WINDOWS_TIMES:
+        return st.st_ctime_ns
+    born = getattr(st, "st_birthtime_ns", None)
+    return st.st_ctime_ns if born is None else born
+
+
 def _file_record(st):
-    """What the walk keeps of a regular file it listed (`st`, its lstat): (st_dev, st_ino, st_size, st_mtime_ns,
-    st_ctime_ns). The size and times tell a file deleted and made again under its name, which can reuse its inode (ext4
-    does), or written in place, from the file the walk listed (LZ-03's re-check 2, N5)."""
-    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+    """What the walk keeps of a regular file it listed (`st`, its lstat): (st_dev, st_ino, st_size, st_mtime_ns, its
+    change time: _held_time, Windows' creation time). The size and times tell a file deleted and made again under its
+    name, which can reuse its inode (ext4 does), or written in place, from the file the walk listed (LZ-03's re-check
+    2, N5)."""
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, _held_time(st)
 
 
 def _unwritten(st, then, inode_known):
-    """Is `st` unwritten since `then` (st_size, st_mtime_ns, st_ctime_ns, or () where none was kept)? Its change time
-    is compared only where both have an inode: a listing without one (a disk that keeps no file IDs) has a change time
-    of its own making, which an fstat need not share."""
+    """Is `st` unwritten since `then` (st_size, st_mtime_ns, _held_time, or () where none was kept)? The held time is
+    compared only where both have an inode: a listing without one (a disk that keeps no file IDs) has times of its own
+    making, which an fstat need not share."""
     if not then:
         return True
     size, mtime, ctime = then
-    return st.st_size == size and st.st_mtime_ns == mtime and (not inode_known or st.st_ctime_ns == ctime)
+    return st.st_size == size and st.st_mtime_ns == mtime and (not inode_known or _held_time(st) == ctime)
 
 
 def _same_file(st, expect):
     """Is `st` (an lstat or an fstat) the regular file `expect` (_file_record: as the walk's lstat gave it), unwritten
-    since? Its device and inode (a file ID on Windows: _Root.listdir) are compared, then its size and times. Where
-    neither has an inode (0: a disk that keeps no file IDs), its kind, size and modification time are; where one has
-    and the other has not, it is not told to be that file (fail closed)."""
+    since? Its device and inode (a file ID on Windows: _Root.listdir) are compared, then its size, modification time
+    and _held_time (Windows' creation time: an fstat there has another change time than the lstat). Where neither has
+    an inode (0: a disk that keeps no file IDs), its kind, size and modification time are; where one has and the other
+    has not, it is not told to be that file (fail closed)."""
     if not _stat.S_ISREG(st.st_mode):
         return False
     dev, ino = expect[:2]
@@ -3559,7 +3584,8 @@ class _Root:
     (_open_verified), so no file outside the root is read. A folder swapped between that check and its listing can
     still show its names there (not its files' contents): the gap docs/DESIGN.md states. Its listing gives no file
     IDs: each entry is lstat'ed by its exact path for its volume and file ID (`listdir`), which the walk holds what
-    it found to, as to a device and inode elsewhere."""
+    it found to, as to a device and inode elsewhere, with its size, modification time and creation time
+    (_held_time: Windows' fstat has another change time than its lstat)."""
 
     _KEEP = 16
     _STRIDE = 16

@@ -361,7 +361,8 @@ What the walk found is held to what it found (LZ-03's review, H1 and H2). A
 folder the walk found (`_Root.found`) that is a link, no folder or gone when
 it is opened again, by the walk or a reader after it, and a regular file the
 walk listed (`_Root.files`, `_file_record`: its device, inode, size and
-modification and change times) that is a link, another kind of file (a
+modification and change times; on Windows its creation time for the change
+time, below) that is a link, another kind of file (a
 folder, a FIFO, a socket), another file (another inode, or one written since:
 another size or time; a file deleted and made again under its name can get
 the freed inode, as ext4 gives it, LZ-03's re-check 2, N5) or
@@ -415,15 +416,22 @@ file ID (`_Root.listdir`), and holds every later lstat and fstat to them, as
 to an inode: a file replaced by another is a change there too, whatever its
 size and times (a copy made within one tick of the system's clock, some
 15.6 ms, has the same ones on NTFS, which stamps a file's times from it; the
-Windows runs of PR #17 met it by chance). An entry whose ID cannot be had (its
-lstat fails) keeps the listing's stat, and no lstat or fstat with an ID is
-taken for it; where neither has one (a disk that keeps no file IDs), a name
-is the entry it is one name with, by the identity both have now, and a
-regular file by its size and modification time. The counts and probes that
-hold nothing to the listing (the pruned trees', the MCP budget's, a
-dependency tree's probe) take the listing as it is, and the walk's loop
-check uses no Windows file ID (3.10's and 3.11's 64-bit one of ReFS's
-128-bit IDs is not unique; nothing is followed there to loop).
+Windows runs of PR #17 met it by chance). Beside its size and modification
+time, a file is held there to its creation time (`_held_time`), where POSIX
+holds it to its change time: from Python 3.12 Windows' `os.lstat` and
+`os.stat` give `st_ctime` the creation time (CPython's `win32_xstat` copies
+`st_birthtime` into it) and `os.fstat` the change time, so the walk's lstat
+and a read's fstat of a file written after it was made never agree on it;
+`st_birthtime_ns` is the creation time in both, and on 3.10 and 3.11, which
+have none, `st_ctime` is the creation time in both. An entry whose ID
+cannot be had (its lstat fails) keeps the listing's stat, and no lstat or
+fstat with an ID is taken for it; where neither has one (a disk that keeps
+no file IDs), a name is the entry it is one name with, by the identity both
+have now, and a regular file by its size and modification time. The counts
+and probes that hold nothing to the listing (the pruned trees', the MCP
+budget's, a dependency tree's probe) take the listing as it is, and the
+walk's loop check uses no Windows file ID (3.10's and 3.11's 64-bit one of
+ReFS's 128-bit IDs is not unique; nothing is followed there to loop).
 
 These checks keep what is read consistent with what the walk found while the
 tree is changed during a call (fail closed: SC-TRUNCATED and incomplete). The
@@ -443,7 +451,12 @@ LZ-03's re-check 2:
   written in place at the same size with its times set back is not told from
   the file the walk listed (POSIX's change time is the system's alone). A
   file replaced by another is told apart by its file ID; on Python 3.10 and
-  3.11 a ReFS file ID is cut to 64 bits, which need not be unique.
+  3.11 a ReFS file ID is cut to 64 bits, which need not be unique. On a disk
+  whose file IDs are 0 or can be reused (FAT and exFAT, which make a file's
+  ID from where its entry is on the disk; some network redirectors), the old
+  matching remains: a file is held to its size and modification time (and,
+  where it has an ID, its creation time), and another file with the same
+  ones is taken for it.
 - A disk that takes names for one some other way (another Unicode version's
   case folding), for a name that reaches nothing because the walk's entry it
   stood for is gone.
