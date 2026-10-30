@@ -9,7 +9,8 @@ workflow command at column 0, in both engines. Values printed inside one
 line now go through sanitize_term_line, which also maps LF, U+2028 and
 U+2029 (every other line break is a control character already): the npm
 engine's twin is sanitizeTermLine, and the two are compared code point by
-code point. sanitize_term itself is unchanged.
+code point where the npm engine is built and the library loaded (as
+test_review_term_c1). sanitize_term itself is unchanged.
 """
 import json
 import os
@@ -21,7 +22,9 @@ import tempfile
 import unittest
 
 from tests import _support
+from tests.architecture.test_js_parity import NPM_READY, NPM_SKIP
 
+from lazaret.scanner import _native
 from lazaret.scanner import core
 
 HOSTILE = "zz\n\n  Quality gate:  PASSED \n::notice::marker-from-a-file-name\n  x.py"
@@ -87,7 +90,8 @@ process.stdout.write(JSON.stringify(cps.map((n) => sanitizeTermLine("a" + String
 """
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class SameAsTheNpmEngine(unittest.TestCase):
     def test_sanitize_term_line_identical_up_to_u2fff(self):
         cps = [n for n in range(0x3000) if not 0xD800 <= n <= 0xDFFF]

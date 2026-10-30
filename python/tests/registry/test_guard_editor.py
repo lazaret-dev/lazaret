@@ -679,7 +679,8 @@ class InstallTests(EditorCase):
         self.assertEqual(self.installs(), [])
 
     def test_the_newest_version_for_this_editor_and_this_platform(self):
-        target = C.target_platform(sys.platform, "x64")
+        # (the guard's own reading of this machine: on Alpine, musllinux's wheels' runner, it is alpine-x64, Oct 29)
+        target = C.target_platform(sys.platform, "x64", E._os_release() if sys.platform.startswith("linux") else None)
         other = "darwin-arm64" if target != "darwin-arm64" else "linux-x64"
         self.gallery.add("a.b", "1.0.0")
         self.gallery.add("a.b", "1.1.0", platforms=(other,))

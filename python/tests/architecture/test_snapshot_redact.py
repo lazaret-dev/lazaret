@@ -65,10 +65,14 @@ def line(rnd, lits):
     if r < 0.5:
         return f"u = '{c(['https', 'ftp', 'postgres'])}://{c(['bob', 'x'])}:{c(PASSES)}@host.invalid/x'"
     if r < 0.56:
-        return (f"{c(['k = \"', '', '  '])}-----BEGIN {c(PEM_NAMES)}PRIVATE KEY-----"
-                f"{c(['', 'MIIE' + literal(rnd), '\\\\nMIIE' + literal(rnd) + '\\\\n-----END PRIVATE KEY-----'])}")
+        # (each choice made in the order it was, outside the f-string: Python 3.10 and 3.11 refuse a backslash there)
+        lead = c(['k = "', '', '  '])
+        pem = c(PEM_NAMES)
+        tail = c(['', 'MIIE' + literal(rnd), '\\\\nMIIE' + literal(rnd) + '\\\\n-----END PRIVATE KEY-----'])
+        return f"{lead}-----BEGIN {pem}PRIVATE KEY-----{tail}"
     if r < 0.6:
-        return f"-----END {c(PEM_NAMES)}PRIVATE KEY-----{c(['', '\";', ' tail'])}"
+        pem = c(PEM_NAMES)
+        return f"-----END {pem}PRIVATE KEY-----" + c(['', '";', ' tail'])
     if r < 0.65:
         return "x = " + "".join(c(["a", "b", " ", c(ODD), c(PIECES), "try{}catch(e){}", c(lits)])
                                 for _ in range(rnd.randint(50, 700)))

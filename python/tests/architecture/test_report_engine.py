@@ -314,9 +314,19 @@ LAZARET_INFORMATION_URI = "https://lazaret.dev"
 SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 
 
+def _isabs(p):
+    """os.path.isabs as Python 3.13 reads it, the rule the engine follows (report.rs is_abs): on Windows a path rooted
+    without a drive ("\\x") is not absolute. 3.10 to 3.12's ntpath said it was, and as_uri() then refused it (CI's
+    python-unit, Oct 29)."""
+    if PATH is not ntpath:
+        return PATH.isabs(p)
+    s = p[:3].replace("/", "\\")
+    return s.startswith(":\\", 1) or s.startswith("\\\\")
+
+
 def sarif_uri(path):
     p = _safe_text(path)
-    if PATH.isabs(p):
+    if _isabs(p):
         return PURE(p).as_uri(), None
     if PATH.sep != "/":
         p = p.replace(PATH.sep, "/")

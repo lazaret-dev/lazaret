@@ -208,6 +208,8 @@ test("a 200 MB checkpoint is read by range (a .pth one's lines in chunks): quiet
       assert.deepEqual(got.filter(([g]) => g === f).map(([, rule, sev]) => [rule, sev]).sort(), want, f);
     }
     assert.ok(issues.some((i) => i.rule === "SC-PICKLE-CODE" && i.msg.includes("archive/constants.pkl")));
-    assert.ok(took < 20_000, `${took} ms (exit ${code})`);
+    // (Windows' runners are slower at this scan of 1.2 GB of checkpoints: 23.8 s on CI's js (windows-latest, 24),
+    // PR #17, Oct 29, every answer right; the bound there is 60 s)
+    assert.ok(took < (process.platform === "win32" ? 60_000 : 20_000), `${took} ms (exit ${code})`);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

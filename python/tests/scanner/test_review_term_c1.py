@@ -7,8 +7,11 @@ bidi controls U+202A-U+202E, U+2066-U+2069, so a hostile file name or
 message could still drive a terminal through the Python CLI and the
 registry/print paths. sanitize_term (and flow.py's local twin) now map the
 same set, and safe_excerpt names the bidi controls explicitly as the JS
-twin does. Where Node is installed, the two engines' sanitizers are
-compared over every code point up to U+2FFF.
+twin does. Where the npm engine is built (node, and js/native/lazaret.wasm)
+and the library is loaded, the two engines' sanitizers are compared over
+every code point up to U+2FFF (CI: the WebAssembly job runs them; without
+the module the npm CLI's sanitizers are its no-engine fallback, which maps
+every character but printable ASCII, so a comparison would be with that).
 """
 import json
 import os
@@ -18,7 +21,9 @@ import subprocess
 import unittest
 
 from tests import _support
+from tests.architecture.test_js_parity import NPM_READY, NPM_SKIP
 
+from lazaret.scanner import _native
 from lazaret.scanner import core
 from lazaret.scanner import flow
 
@@ -69,7 +74,8 @@ process.stdout.write(JSON.stringify(out));
 """
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class SameAsTheNpmEngine(unittest.TestCase):
     def _js(self, cps):
         url = pathlib.Path(REPORT_JS).resolve().as_uri()   # file:///C:/... on Windows

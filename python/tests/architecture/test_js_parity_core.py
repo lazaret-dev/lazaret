@@ -376,8 +376,6 @@ def _deep_tree(root, depth, name="d"):
     os.close(top)
 
 
-@unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
-@unittest.skipUnless(hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd, "folders made beneath a descriptor")
 def _remove_tree(root):
     """Empties `root` however deep its folders go, with two descriptors open at a time and no path longer than a
     name or two: each folder's subfolders are moved up into `root` before it is removed. (TemporaryDirectory's
@@ -407,6 +405,10 @@ def _remove_tree(root):
         os.close(top)
 
 
+# (the gates were on _remove_tree, where they skipped nothing: CI's python-unit, which builds no npm engine,
+# ran the class, Oct 29)
+@unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
+@unittest.skipUnless(hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd, "folders made beneath a descriptor")
 class DepthCapParityTests(unittest.TestCase):
     """LZ-03's review: the walk enters no folder deeper than MAX_WALK_DEPTH (512) below the root, core's walk and the
     npm package's alike (js/src/lib/collect.js): one nested deeper (a folder to walk, a __pycache__, a vendor folder

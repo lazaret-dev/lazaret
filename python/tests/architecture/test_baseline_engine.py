@@ -379,6 +379,15 @@ class Scenarios:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+def reason_cut(text, path):
+    """`text` with a "could not read baseline" line cut after its path. The engine words json's and int's errors as
+    Python 3.13 does, and 3.10 to 3.12 word two otherwise: an int past 4,300 digits ("Exceeds the limit (4300)" on
+    3.10), and a string a bad \\u escape ends ("Invalid \\uXXXX escape" where 3.13 says "Unterminated string"; CI's
+    python-unit, Oct 29). On those, that the baseline is refused is compared, and on 3.13 and later its words too."""
+    head = f"warning: could not read baseline {path}: "
+    return "\n".join(line[:len(head)] if line.startswith(head) else line for line in text.split("\n"))
+
+
 class ApplyTests(unittest.TestCase):
     def test_the_engines_baseline_is_cores(self):
         cases = Scenarios(4, 500)
@@ -386,7 +395,10 @@ class ApplyTests(unittest.TestCase):
             for k, (path, root, key, res) in enumerate(cases.cases):
                 with self.subTest(k, key=key, path=os.path.basename(path)):
                     mine, theirs = copy.deepcopy(res), copy.deepcopy(res)
-                    self.assertEqual(run_engine(mine, path, root, key), run_ref(theirs, path, root, key))
+                    got, want = run_engine(mine, path, root, key), run_ref(theirs, path, root, key)
+                    if sys.version_info < (3, 13):
+                        got, want = reason_cut(got, path), reason_cut(want, path)
+                    self.assertEqual(got, want)
                     self.assertEqual(mine, theirs)
         finally:
             cases.close()
