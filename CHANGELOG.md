@@ -1551,21 +1551,25 @@ aggregate):
   Tests: `test_review_project_hooks` (8) and `review-project-hooks.test.js`, on inert stand-ins (an "obfuscated" file
   that only names five `_0x` variables, `.invalid` hosts), and `test_js_parity_project_hooks` (the two CLIs, with and
   without `--deps`).
-- **pratique's B-119 and B-120, `b4d3364c`: its server shuts down cleanly on macOS and Windows, and the HTTP/2
-  client's reader thread no longer keeps an upload waiting (NET-1).** `rust/crates/pratique` is pratique's `xos` at
-  `b4d3364c`: 49 commits on `57c22cb0`, each round reviewed (twelve) or checked, run on Linux, macOS and Windows
-  runners, and pratique's `main` fast-forwarded to it. For Lazaret's client: the HTTP/2 reader thread no longer steps
-  aside while a caller that cannot read the socket (an upload waiting for window credit) is asleep, where that upload
-  woke 25 ms late (85 to 204 times under load); a socket call that a shutdown should end is woken on Windows too, and
-  a look at an idle socket puts it back to blocking. Everything else is pratique's server, which only Lazaret's tests
-  use: a shutdown closes an idle connection at once, not when the shutdown is over; a graceful end shuts only the
-  sending side and reads on, so a response's tail reaches the client (B-120), with an idle clock driven by the
-  client's credit on the connection and at most sixteen idle timeouts after the end; after a fatal TLS alert the
-  server shuts its sending side and drains for at most a second, so that a Windows client reads why (`tls::Linger`, a
-  public trait with an empty default). CI runs three of pratique's four timed unit tests again (the coarse-clock one
-  stays out), and the three that failed on PR #17's macOS runner
-  (`shutdown_finishes_what_is_under_way_and_closes_the_rest`, `the_limit_ends_the_race`,
+- **pratique's B-119, B-120 and B-126, `38bef0ec`: its server shuts down cleanly on macOS and Windows, a connection it
+  closes after a response is not reset on Windows, and the HTTP/2 client's reader thread no longer keeps an upload
+  waiting (NET-1).** `rust/crates/pratique` is pratique's `xos` at `38bef0ec`: 55 commits on `57c22cb0`, each round
+  reviewed (twelve) or checked, run on Linux, macOS and Windows runners, and pratique's `main` fast-forwarded to it.
+  For Lazaret's client: the HTTP/2 reader thread no longer steps aside while a caller that cannot read the socket (an
+  upload waiting for window credit) is asleep, where that upload woke 25 ms late (85 to 204 times under load); a
+  socket call that a shutdown should end is woken on Windows too, and a look at an idle socket puts it back to
+  blocking. Everything else is pratique's server, which only Lazaret's tests use: a shutdown closes an idle connection
+  at once, not when the shutdown is over; a graceful end shuts only the sending side and reads on, so a response's
+  tail reaches the client (B-120), with an idle clock driven by the client's credit on the connection and at most
+  sixteen idle timeouts after the end; after a fatal TLS alert the server shuts its sending side and drains for at
+  most a second, so that a Windows client reads why (`tls::Linger`, a public trait with an empty default). CI runs
+  three of pratique's four timed unit tests again (the coarse-clock one stays out), and the three that failed on PR
+  #17's macOS runner (`shutdown_finishes_what_is_under_way_and_closes_the_rest`, `the_limit_ends_the_race`,
   `a_download_that_pauses_does_not_hold_up_a_request_that_waits_for_the_reader_thread`) now wait for what they time.
+  On PR #17's `windows-latest` run the HTTP/1.1 server's pipelining test failed: a connection the server closed after
+  a response (`connection: close`, HTTP/1.0) was closed with the client's next request unread, Windows reset it, and
+  the client lost the response; the server now stops writing and reads what the client still sends, a little, before
+  it closes (B-126), as it did for a request it refuses.
 - **pratique's main of Oct 27, 57c22cb0: certificate-policy extensions no longer ignored (LZ-01), Lazaret's host rule
   the library's default, and a company's own CA still trusted (NET-1).** `rust/crates/pratique` is pratique's `main` at
   `57c22cb0`, the merge of its pull request #1 (its tree is the branch's `fa1e6304`): the two commits John pushed on Oct
