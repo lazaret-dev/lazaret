@@ -1,0 +1,37 @@
+# the modules that failed on Windows in PR #17's Wheels run (Oct 29)
+tests.architecture.test_baseline_engine
+tests.architecture.test_fuzz_scripts
+tests.architecture.test_js_parity_core
+tests.architecture.test_popular_script
+tests.architecture.test_profile_scripts
+tests.architecture.test_report_engine
+tests.architecture.test_rsparse_scripts
+tests.mcp.test_mcp_path_race
+tests.registry.test_cargosrc
+tests.registry.test_checkout_twins
+tests.registry.test_fetch_deadline
+tests.registry.test_ghdiscover_at_eight
+tests.registry.test_ghdiscover_graphql
+tests.registry.test_ghdiscover_hygiene
+tests.registry.test_gradle_wrapper_registry
+tests.registry.test_guard_cargo
+tests.registry.test_guard_from_plan
+tests.registry.test_guard_go
+tests.registry.test_guard_redirect_addresses
+tests.registry.test_model_files_registry
+tests.registry.test_npm_tar_readers
+tests.registry.test_opaque_media_registry
+tests.registry.test_scanpool
+tests.registry.test_sources
+tests.scanner.test_dashboard
+tests.scanner.test_review_dashboard_parity
+tests.scanner.test_review_gradle_wrapper
+tests.scanner.test_review_model_files
+tests.scanner.test_review_term_c1
+tests.scanner.test_review_term_newlines
+tests.scanner.test_secretverify_http
+tests.scanner.test_verifyscan
+tests.scanner.test_review_walk
+# round 3c: the real-disk test of a file's times (LZ-03 on Windows, the review's HIGH), and WIN-DEP-PATHS' test
+tests.mcp.test_mcp_file_times
+tests.scanner.test_dep_url

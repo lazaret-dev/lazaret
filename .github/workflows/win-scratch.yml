@@ -1,0 +1,48 @@
+# Throwaway, on the win-scratch branch only (never merged): the Python suite's modules that failed on Windows in
+# PR #17's CI and Wheels runs (Oct 29), on Windows only, so each round of fixes is checked in minutes rather than a
+# whole CI run. The modules are listed in python/tests/win-scratch-modules.txt.
+name: Windows scratch
+
+on:
+  push:
+    branches: [win-scratch]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-windows:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        python: ["3.10", "3.12", "3.14"]
+        include:
+          - os: windows-11-arm
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: The native engine
+        working-directory: rust
+        run: cargo build --release --offline --locked
+      - name: The modules that failed on Windows
+        working-directory: python
+        shell: bash
+        run: |
+          LAZARET_NATIVE_LIB=$(PYTHONPATH=src python -c 'import os; from lazaret.scanner import _native; print(os.path.abspath(os.path.join("..", "rust", "target", "release", _native.library_name())))')
+          export LAZARET_NATIVE_LIB
+          PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
+          python -m unittest $(grep -v '^#' tests/win-scratch-modules.txt) 2>&1 | tee ../win-scratch.log | grep -E "^(FAIL|ERROR):|^Ran |^OK|^FAILED"
+          tail -1 ../win-scratch.log | grep -q "^OK"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: win-scratch-${{ matrix.os }}-${{ matrix.python }}
+          path: win-scratch.log
