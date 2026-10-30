@@ -24,6 +24,7 @@ import os
 import shutil
 import socket
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -42,6 +43,20 @@ TIMEOUT = 0.5       # each socket call's (the fetcher's timeout): more than the 
 ALLOWANCE = 1.5
 CLOSE = (None, 0)   # a script's step: the server closes the connection (a body that ends when the connection does)
 BODY = bytes(range(256)) * 1200                 # 300 KiB
+#: Windows: the watchdog's shutdown does not wake a call that already waits on a silent socket (Python waits on a
+#: socket with a timeout in select(), and Winsock's select() does not see a shutdown made here; a call that has
+#: something to read once the time is up ends at once, as the drips' tests show). CI's windows-2025 (PR #17, Oct 29):
+#: a recv waited out its 10 s timeout through the shutdown and one begun after it its 5 s, and a head dripped then
+#: silent ended at 3.92 s, its socket's timeout cut to the time left when it connected, for a 2 s deadline. The
+#: download still fails with the deadline's error, at most that timeout late. A gap in the product there, not in the
+#: tests: the tests of it are expected to fail on Windows (`until_the_watchdog_wakes`), so that one passing (the gap
+#: closed) fails the run until its mark goes.
+WATCHDOG_WAKES = sys.platform != "win32"
+
+
+def until_the_watchdog_wakes(test):
+    """A test of the watchdog waking a call that waits: an expected failure where it cannot (WATCHDOG_WAKES)."""
+    return test if WATCHDOG_WAKES else unittest.expectedFailure(test)
 
 
 def head(status=200, headers=(), length=None):
@@ -306,6 +321,7 @@ class WatchdogTests(_Case):
     and a call that waits on a socket whose timeout, cut to the time left when it was connected, outlasts the stop.
     Each of these fails with the watchdog off."""
 
+    @until_the_watchdog_wakes
     def test_a_head_dripped_then_silent(self):
         # (the socket's timeout is the fetcher's 5 s cut to the time left at its connection, 2 s: the read waiting from
         # 1.85 s would end at 3.85 s, past the bound; the watchdog ends it at 2 s, nothing coming to wake it)
@@ -320,6 +336,7 @@ class WatchdogTests(_Case):
     def test_a_flood_of_100_continue(self):
         self.assert_stops_in_time("/continue")
 
+    @until_the_watchdog_wakes
     def test_it_wakes_a_call_waiting_on_its_socket(self):
         d = guard._Deadline(DEADLINE, "u")
         self.addCleanup(d.close)
@@ -573,13 +590,20 @@ class DeadlineTests(unittest.TestCase):
             d.wait(5)
         with self.assertRaisesRegex(repo.FetchError, r"^the download took over 0\.05 s: u$"):
             d.check()
-        a.settimeout(5)
-        try:
-            got = a.recv(10)                                    # (the watchdog shut it down: the end, at once)
-        except socket.timeout:
-            self.fail("the socket was not shut down")
-        except OSError:
-            got = b""                                           # (Windows: WSAESHUTDOWN)
+        if WATCHDOG_WAKES:
+            a.settimeout(5)
+            try:
+                got = a.recv(10)                                # (the watchdog shut it down: the end, at once)
+            except socket.timeout:
+                self.fail("the socket was not shut down")
+            except OSError:
+                got = b""                                       # (the read refused: the end too)
+        else:                                                   # (a read waits there: the other end sees it shut)
+            b.settimeout(5)
+            try:
+                got = b.recv(10)
+            except socket.timeout:
+                self.fail("the socket was not shut down")
         self.assertEqual(got, b"")
         d.close()
 

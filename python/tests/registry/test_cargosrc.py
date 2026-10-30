@@ -13,8 +13,10 @@ HEX = "ab" * 32
 
 
 def write(path, text):
+    """The text as given, on every system (newline="\\n": in Windows' text mode each line ended in two bytes, and
+    the file of exactly MAX_CONFIG_BYTES was two bytes over it)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
 
 

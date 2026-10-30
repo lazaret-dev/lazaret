@@ -13,6 +13,7 @@ Every file is built in the test (tests/_model_files.py: stand-in modules, nothin
 """
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -260,7 +261,10 @@ class LargeCheckpoints(unittest.TestCase):
         self.assertEqual(got[f"{sp}/dep/w.pt"], {CODE})
         self.assertEqual(got["w/zip64.pt"], {CODE, NESTED})
         self.assertTrue(any("archive/constants.pkl" in m for m in msgs(res, "SC-PICKLE-CODE")))
-        self.assertLess(took, 30, took)
+        # (Windows' runners are slower at reading these files: the npm twin's scan of its 1.2 GB of checkpoints took
+        # 23.8 s on CI's windows-latest, PR #17, Oct 29, where its bound is 20 s elsewhere; this tree has a third .pth
+        # read in chunks and the 5 GB zip64 checkpoint more, so 90 s there, three times the bound, as the twin's is)
+        self.assertLess(took, 90 if sys.platform == "win32" else 30, took)
         self.assertLess(grew, 100_000, f"{grew} KiB more")
 
 
