@@ -263,9 +263,10 @@ class _Case(unittest.TestCase):
         yield "fetch", lambda: f.fetch(url, max_bytes, timeout=timeout)
         yield "fetch_to_file", lambda: f.fetch_to_file(url, path, max_bytes, timeout=timeout)
 
-    def assert_stops_in_time(self, path, deadline=DEADLINE, timeout=TIMEOUT, host=None, names=None, hosts=()):
+    def assert_stops_in_time(self, path, deadline=DEADLINE, timeout=TIMEOUT, host=None, names=None, hosts=(), late=0.0):
         """fetch and fetch_to_file of path (on `host`, the server's by default; `names`: only these calls), on both
-        paths, end with the deadline's error within ALLOWANCE of it."""
+        paths, end with the deadline's error within ALLOWANCE of it (and `late` more: what a call that waits may
+        outlast it by where the watchdog cannot wake it, WATCHDOG_WAKES)."""
         host = host or self.server.host
         url = f"{self.server.url.split(':', 1)[0]}://{host}{path}"
         for keepalive, label in self.PATHS:
@@ -281,7 +282,7 @@ class _Case(unittest.TestCase):
                         call()
                     took = time.monotonic() - started
                     self.assertEqual(str(caught.exception), f"the download took over {deadline} s: {url}")
-                    self.assertLess(took, deadline + ALLOWANCE, f"{took:.3f} s for a {deadline} s deadline")
+                    self.assertLess(took, deadline + late + ALLOWANCE, f"{took:.3f} s for a {deadline} s deadline")
                     self.assertGreaterEqual(took, deadline * 0.9)
 
 
@@ -321,11 +322,14 @@ class WatchdogTests(_Case):
     and a call that waits on a socket whose timeout, cut to the time left when it was connected, outlasts the stop.
     Each of these fails with the watchdog off."""
 
-    @until_the_watchdog_wakes
     def test_a_head_dripped_then_silent(self):
         # (the socket's timeout is the fetcher's 5 s cut to the time left at its connection, 2 s: the read waiting from
-        # 1.85 s would end at 3.85 s, past the bound; the watchdog ends it at 2 s, nothing coming to wake it)
-        self.assert_stops_in_time("/head-then-silence", deadline=2.0, timeout=5.0, names=("fetch",))
+        # 1.85 s would end at 3.85 s, past the bound; the watchdog ends it at 2 s, nothing coming to wake it. Where it
+        # cannot wake it (Windows) the read ends at its own timeout, at most that 2 s late, with the deadline's error
+        # all the same: the bound that holds there, held. An expected failure there passed now and then, as a read
+        # that began a little later ended in time: round 2 of the Windows check, Oct 30)
+        self.assert_stops_in_time("/head-then-silence", deadline=2.0, timeout=5.0, names=("fetch",),
+                                  late=0.0 if WATCHDOG_WAKES else 2.0)
 
     def test_a_chunk_size_line_dripped(self):
         self.assert_stops_in_time("/chunk-ext")
