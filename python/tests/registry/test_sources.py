@@ -528,14 +528,17 @@ class CheckoutGitHub(Tmp):
     def test_a_file_whose_name_is_a_folders_on_a_disk_that_denies_it_is_kept_apart(self):
         # (Windows' disk answers a file `A` where a folder `a/` is with "access denied", not EEXIST: such a file was
         # not written at all; it is kept apart in a twin tree, as on a Mac)
+        real_open = builtins.open
+
         def denying(file, mode="r", *args, **kwargs):
             if "x" in mode and os.path.isdir(file):
                 raise PermissionError(13, "Access is denied", file)
-            return builtins.open(file, mode, *args, **kwargs)
+            return real_open(file, mode, *args, **kwargs)
         with mock.patch.object(sources, "open", denying, create=True):
             ck, trees = self.kept({"a/b.js": b"under", "A": b"file"}, fold=apfs_fold)
         self.assertEqual(trees, [{"a/b.js": b"under"}, {"A": b"file"}])
         self.assertEqual(self.cases(ck), [("A", "one name on this disk with a/: kept apart and read at its own path")])
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(1, "A"))])
         self.assertEqual(ck.skipped, [])
 
     def test_folders_that_differ_only_in_case_are_not_one_folder(self):
