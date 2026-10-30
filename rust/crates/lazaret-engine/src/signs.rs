@@ -3259,8 +3259,32 @@ fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
 }
 
 /// A text's decoded view and the line of the string array it reads.
-/// (the view, the string array's line, JS-Confuser's string concealing's line: D-11)
-type Reading = (PyStr, Option<usize>, Option<usize>);
+/// (the view, None when it is the text; the string array's line, JS-Confuser's string concealing's line: D-11)
+/// (BIG-BUNDLE-TAIL, memory: a 16,000,000-character bundle's view, the text itself, is not copied for each who asks)
+type Reading = (Option<std::rc::Rc<PyStr>>, Option<usize>, Option<usize>);
+
+/// The text a kept reading was of: the call's own, shared (api::call_text_shared), or a copy.
+enum DvKey {
+    Shared(std::sync::Arc<[u32]>),
+    Copy(PyStr),
+}
+
+impl DvKey {
+    fn of(text: &[u32]) -> DvKey {
+        match crate::api::call_text_shared(text) {
+            Some(t) => DvKey::Shared(t),
+            None => DvKey::Copy(text.to_vec()),
+        }
+    }
+
+    fn is(&self, text: &[u32]) -> bool {
+        let k: &[u32] = match self {
+            DvKey::Shared(t) => t,
+            DvKey::Copy(t) => t,
+        };
+        k == text
+    }
+}
 
 /// The language a decoded view reads its literals in: JavaScript or Python
 /// (with the lexers), else none (the patterns: a shell script, a command).
@@ -3276,7 +3300,24 @@ thread_local! {
     // the last text decoded_view read (in its language), its view and its
     // string array's line (core's _DV_MEMO): the install-script test, the
     // import-time test and the spawned-script follower read the same file
-    static DV_MEMO: std::cell::RefCell<Option<(PyStr, Option<&'static str>, Reading)>> = const { std::cell::RefCell::new(None) };
+    static DV_MEMO: std::cell::RefCell<Option<(DvKey, Option<&'static str>, Reading)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// EVAL-LITERAL: the decoded view's last reading, kept aside while the strings a text hands an eval call are read as
+/// texts of their own, and given back when the guard is dropped (as jsflow::supply::keep_last).
+struct DvKept(Option<(DvKey, Option<&'static str>, Reading)>);
+
+impl DvKept {
+    fn take() -> DvKept {
+        DvKept(DV_MEMO.with(|m| m.borrow_mut().take()))
+    }
+}
+
+impl Drop for DvKept {
+    fn drop(&mut self) {
+        let kept = self.0.take();
+        DV_MEMO.with(|m| *m.borrow_mut() = kept);
+    }
 }
 
 /// core._dv_reading: decoded_view's reading of `text` and the line of the
@@ -3284,7 +3325,7 @@ thread_local! {
 fn dv_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> Reading {
     let lang = dv_lang(lang);
     if let Some(r) = DV_MEMO
-        .with(|m| m.borrow().as_ref().filter(|(t, l, _)| *l == lang && t.as_slice() == text).map(|(_, _, r)| r.clone()))
+        .with(|m| m.borrow().as_ref().filter(|(t, l, _)| *l == lang && t.is(text)).map(|(_, _, r)| r.clone()))
     {
         return r;
     }
@@ -3292,7 +3333,7 @@ fn dv_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> Reading {
     // (a reading the work budget cut short is no answer: the call fails,
     // and a later call must not be given it)
     if !crate::budget::exhausted() {
-        DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), lang, r.clone())));
+        DV_MEMO.with(|m| *m.borrow_mut() = Some((DvKey::of(text), lang, r.clone())));
     }
     r
 }
@@ -3301,6 +3342,14 @@ fn dv_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> Reading {
 /// strings it decodes as it runs written as their text; `text` itself when
 /// it decodes none.
 pub fn decoded_view(p: &Pack, text: &[u32], lang: Option<&str>) -> PyStr {
+    match dv_reading(p, text, lang).0 {
+        Some(view) => view.to_vec(),
+        None => text.to_vec(),
+    }
+}
+
+/// decoded_view() when it is not `text` itself (shared with the reading kept), else None.
+fn dv_view(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<std::rc::Rc<PyStr>> {
     dv_reading(p, text, lang).0
 }
 
@@ -3332,7 +3381,7 @@ fn dv_plain(v: &[u32]) -> bool {
 /// on. The line breaks a run spans follow it on its line, so that the
 /// lines after it keep their numbers. (view, whether a code escape was
 /// read: joins alone decode nothing.)
-fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
+fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (Option<PyStr>, bool) {
     // (a run's value is never longer than its text: the view never grows)
     let max = p.usize("_DV_MAX_CHARS");
     let found = if lang == "py" {
@@ -3346,7 +3395,8 @@ fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
             plain.into_iter().filter(|r| jsx.contains(r)).collect()
         }
     };
-    let mut out: PyStr = Vec::with_capacity(text.len());
+    // (the view, None while it is the text: made at the first literal it writes)
+    let mut out: PyStr = Vec::new();
     let mut pos = 0usize;
     let mut pending = 0usize; // line breaks to write at the next one
     let mut decoded = false;
@@ -3366,6 +3416,9 @@ fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
         if r.start < pos || !dv_plain(&r.value.chars) {
             continue;
         }
+        if pos == 0 {
+            out.reserve_exact(text.len());
+        }
         copy(&mut out, &text[pos..r.start], &mut pending);
         if r.value.bytes {
             out.push(c('b'));
@@ -3381,11 +3434,11 @@ fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
         pos = r.end;
     }
     if pos == 0 {
-        return (text.to_vec(), false);
+        return (None, false);
     }
     copy(&mut out, &text[pos..], &mut pending);
     out.extend(std::iter::repeat(c('\n')).take(pending));
-    (out, decoded)
+    (if out == text { None } else { Some(out) }, decoded)
 }
 
 /// core._dv_unescape: `text` with its string literals written wholly in
@@ -3425,20 +3478,21 @@ fn dv_unescape(p: &Pack, text: &[u32]) -> Option<PyStr> {
 /// read with the lexers first (dv_literals); in another language (or none
 /// known) literals written wholly in \\x and \\u escapes are (dv_unescape).
 fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Reading {
-    let (source, unescaped): (PyStr, bool) = match lang {
+    // (the literals read as written; None when they are the text)
+    let (source, unescaped): (Option<PyStr>, bool) = match lang {
         Some(l) => dv_literals(p, text, l),
         None => match dv_unescape(p, text) {
-            Some(v) => (v, true),
-            None => (text.to_vec(), false),
+            Some(v) => (Some(v), true),
+            None => (None, false),
         },
     };
     // (P-1: the reading's searches ask a gate, as the text's do: the text's own, which the call keeps open, when the
     // literals read as written are the text, else one opened for them)
-    let src: &[u32] = if source == text { text } else { &source };
-    let _gate = if source == text { None } else { crate::textgate::open(&source) };
+    let src: &[u32] = source.as_deref().unwrap_or(text);
+    let _gate = if source.is_none() { None } else { crate::textgate::open(src) };
     let (arrays, line) = match crate::strarr::sa_read(p, src) {
         // (unescaping and joining keep the rows)
-        Some((view, at)) => (Some(view), Some(1 + source[..at.min(source.len())].iter().filter(|&&ch| ch == c('\n')).count())),
+        Some((view, at)) => (Some(view), Some(1 + src[..at.min(src.len())].iter().filter(|&&ch| ch == c('\n')).count())),
         None => (None, None),
     };
     // (JS-Confuser's concealed strings, D-11: in what the string arrays leave, which keeps the rows; its decoder's line)
@@ -3454,35 +3508,38 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
     };
     let arrays = concealed.or(arrays);
     let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(src));
-    let base: PyStr = match (proxies, arrays) {
-        (Some(x), _) => x,
-        (None, Some(a)) => a,
-        (None, None) => source.clone(),
+    // (what the string arrays and proxy objects leave; the literals read as written when they read none)
+    let base: Option<PyStr> = match (proxies, arrays) {
+        (Some(x), _) => Some(x),
+        (None, Some(a)) => Some(a),
+        (None, None) => None,
     };
+    let base: &[u32] = base.as_deref().unwrap_or(src);
     // (an escape read, a string array or a proxy object read)
-    let read_any = unescaped || base != source;
+    let read_any = unescaped || base != src;
     let max = p.usize("_DV_MAX_CHARS");
     if !read_any && (text.len() > max || !any_in(text, p.needles("_DV_NEEDLES"))) {
-        return (text.to_vec(), None, None);
+        return (None, None, None);
     }
     let joined: PyStr = match lang {
         // (the literals a string array or a proxy object was read as, joined)
-        Some(l) if base != source => dv_literals(p, &base, l).0,
-        Some(_) => base.clone(),
-        None if base.contains(&c('+')) => p.re("_DV_JOIN_RE").sub(&base, &[], 0),
-        None => base.clone(),
+        Some(l) if base != src => dv_literals(p, base, l).0.unwrap_or_else(|| base.to_vec()),
+        Some(_) => base.to_vec(),
+        None if base.contains(&c('+')) => p.re("_DV_JOIN_RE").sub(base, &[], 0),
+        None => base.to_vec(),
     };
     let mut view = joined.clone();
     // (a longer text with a string array: its strings only)
-    let base_in: &[u32] = if base.as_slice() == src { src } else { &base };
+    let base_in: &[u32] = if base == src { src } else { base };
     if base.len() <= max && any_in(base_in, p.needles("_DV_NEEDLES")) {
         let gated = (view.as_slice() == src).then_some(src);
         view = dv_decoders(p, view, gated);
     }
     if view == joined && !read_any {
-        return (text.to_vec(), None, None);
+        return (None, None, None);
     }
-    (dv_arrays_and_members(p, view), line, jc_line)
+    let view = dv_arrays_and_members(p, view);
+    (if view == text { None } else { Some(std::rc::Rc::new(view)) }, line, jc_line)
 }
 
 /// core._dv_decoders: the decoders' calls on literals read as their text. `gated` (P-1): a text with an open gate that
@@ -3804,8 +3861,8 @@ pub fn spawned_scripts(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<(&'sta
     let mut out = spawned_scripts_of(p, text);
     let max = p.usize("_SPAWN_MAX_TARGETS");
     if out.len() < max {
-        let view = decoded_view(p, text, lang);
-        if view != text {
+        if let Some(view) = dv_view(p, text, lang) {
+            let view: &[u32] = &view;
             for target in spawned_scripts_of(p, &view) {
                 if !out.contains(&target) {
                     out.push(target);
@@ -4105,8 +4162,8 @@ fn install_script_risk_text(p: &Pack, text: &[u32], shell: bool, command: bool, 
     for (_, r) in rewrite_reasons(p, text, lang) {
         push_new(&mut reasons, r);
     }
-    let view = decoded_view(p, text, lang);
-    if view != text {
+    if let Some(view) = dv_view(p, text, lang) {
+        let view: &[u32] = &view;
         let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
         for r in install_script_risk_of(p, &view, shell, command, lang, None) {
@@ -4130,6 +4187,11 @@ fn install_script_risk_text(p: &Pack, text: &[u32], shell: bool, command: bool, 
     }
     if concealed_strings_line(p, text, lang).is_some() {
         reasons.push(p.text("_JC_TECHNIQUE_REASON"));
+    }
+    // EVAL-LITERAL: the code the script hands an eval call as a string, read by this test as a script of its own (in
+    // the script's language: no shell reads it)
+    for (_, r) in eval_literal_reasons(p, text, lang, &reasons, &mut |code: &[u32]| install_script_risk_with(p, code, false, false, lang)) {
+        push_new(&mut reasons, r);
     }
     reasons
 }
@@ -4240,8 +4302,8 @@ pub struct ModelFacts {
 /// and the model's facts, then the text's decoded view on its text alone.
 pub fn install_script_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> Vec<PyStr> {
     let mut reasons = install_script_risk_of(p, text, false, false, None, Some(m));
-    let view = decoded_view(p, text, None);
-    if view != text {
+    if let Some(view) = dv_view(p, text, None) {
+        let view: &[u32] = &view;
         let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
         for r in install_script_risk_of(p, &view, false, false, None, None) {
@@ -4257,8 +4319,8 @@ pub fn install_script_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> Vec<
 /// line of the first sign).
 pub fn import_time_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> (Vec<PyStr>, Option<usize>) {
     let (mut reasons, mut line) = import_time_risk_of(p, text, None, Some(m));
-    let view = decoded_view(p, text, None);
-    if view != text {
+    if let Some(view) = dv_view(p, text, None) {
+        let view: &[u32] = &view;
         let _gate = crate::textgate::open(&view);
         let (more, at) = import_time_risk_of(p, &view, None, None);
         let note = p.text("_DV_NOTE");
@@ -4294,7 +4356,36 @@ pub(crate) fn local_data_sent(p: &Pack, text: &[u32], lang: Option<&str>) -> Opt
         crate::jsflow::supply::Answer::Nothing => return None,
         crate::jsflow::supply::Answer::Unread => {}
     }
-    crate::flow::local_data_sent_at(p, text)
+    let found = crate::flow::local_data_sent_at(p, text);
+    // BIG-BUNDLE-TAIL (the review of Oct 20, HIGH 3): a text the tree did not read whole for a reason a runtime does
+    // not share (the parser refused code V8 compiles, the pass stopped at its budget) is not read whole: the text
+    // follower, which answered for it, may not see a flow the tree follows (a helper's return sent a megabyte on). The
+    // call says so (budget::cut: the file is SC-TRUNCATED, beside what the follower found), whatever the follower
+    // found; a limit the follower met itself is said first.
+    let why = match lang {
+        Some("js") => crate::jsflow::supply::unread_why(text),
+        Some("py") => crate::pyflow::supply::unread_why(text),
+        _ => None,
+    };
+    if let Some(why) = why {
+        crate::budget::cut(&format!("{TREE_UNREAD}{}; its text alone was read for what it sends", note_words(&why)));
+    }
+    found
+}
+
+/// BIG-BUNDLE-TAIL: how the call words a text the supply-chain tree did not read whole (local_data_sent); the hosts
+/// tell it from a limit of the text follower's by these words (a file of code that may never run keeps its answer).
+pub const TREE_UNREAD: &str = "the supply-chain tree did not read it whole: ";
+
+/// A pass's note as a clause: "The JavaScript cross-file pass stopped … nodes); flows through the rest of the code may
+/// be missing." -> "the JavaScript cross-file pass stopped … nodes)".
+fn note_words(why: &str) -> String {
+    let head = why.split("; flows").next().unwrap_or(why).trim_end_matches('.');
+    let mut chars = head.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// Received code: data a text receives over the network run as code, a
@@ -4659,8 +4750,8 @@ pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declare
         let mut found = undeclared_installs(p, text, declared, lang);
         let mut note: PyStr = Vec::new();
         if found.is_none() {
-            let view = decoded_view(p, text, lang);
-            if view != text {
+            if let Some(view) = dv_view(p, text, lang) {
+                let view: &[u32] = &view;
                 let _gate = crate::textgate::open(&view);
                 found = undeclared_installs(p, &view, declared, lang);
                 note = p.text("_DV_NOTE");
@@ -4672,8 +4763,8 @@ pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declare
             line = line.or(Some(at));
         }
     }
-    let view = decoded_view(p, text, lang);
-    if view != text {
+    if let Some(view) = dv_view(p, text, lang) {
+        let view: &[u32] = &view;
         let _gate = crate::textgate::open(&view);
         let (more, at) = import_time_reading(p, &view, lang);
         let note = p.text("_DV_NOTE");
@@ -4692,7 +4783,132 @@ pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declare
         reasons.push(p.text("_JC_TECHNIQUE_REASON"));
         line = line.or(Some(jc));
     }
+    // EVAL-LITERAL: the code the text hands an eval call as a string, read by this test as a text of its own
+    for (at, r) in eval_literal_reasons(p, text, lang, &reasons, &mut |code: &[u32]| import_time_risk_with(p, code, lang, declared).0) {
+        if !reasons.contains(&r) {
+            reasons.push(r);
+            line = line.or(Some(at));
+        }
+    }
     (reasons, line)
+}
+
+thread_local! {
+    /// EVAL-LITERAL: how deep in strings eval calls run the text being read lies (0: a file's own text).
+    static EVAL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One string deeper while it lives (and back when it is dropped, a panic's unwinding included).
+struct EvalDeeper;
+
+impl EvalDeeper {
+    fn enter() -> EvalDeeper {
+        EVAL_DEPTH.with(|d| d.set(d.get() + 1));
+        EvalDeeper
+    }
+}
+
+impl Drop for EvalDeeper {
+    fn drop(&mut self) {
+        EVAL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+/// EVAL-LITERAL: the steps each string read as a text of its own is charged on top of its length, in JavaScript and in
+/// Python (F-2, the gates of Oct 27). A reading runs the whole test, its trees, text followers and decoded view: some
+/// 35 to 75 µs for a short JavaScript string and 130 to 200 µs for a Python one, which a step a character did not
+/// cover (2 MB of Python's `exec('aN = N')` read on for 15 s a test). Charged at about the rate of the budget's other
+/// steps, DEFAULT_STEPS (4,000,000,000 steps) covers 80,000 short JavaScript strings or 20,000 Python ones, and a text
+/// that hands more runs out rather than on (SC-TRUNCATED). The bound is that step budget, not a time: a string costs
+/// this and its length, so the time a text takes to spend the budget grows with its strings' lengths (the external
+/// review of Oct 28: 100,000 different payloads, 9 MB, ran out in some 30 s on a debug build). The most a benign text
+/// of the corpora hands is 150, a webpack eval-devtool bundle's modules (13 in Python), each text within a 160th of the
+/// budget.
+pub(crate) const EVAL_STRING_STEPS_JS: u64 = 50_000;
+pub(crate) const EVAL_STRING_STEPS_PY: u64 = 200_000;
+
+/// The 1-based line of each offset of `codes` (evalcode::codes': in order) in `text`, each line counted once from the
+/// last (F-1, the gates of Oct 27: counted from the start for each, a text of 40,000 calls took 8 s, not 0.3).
+fn lines_in_order(text: &[u32], codes: Vec<(usize, PyStr)>) -> Vec<(usize, PyStr)> {
+    let (mut line, mut from) = (1, 0);
+    codes
+        .into_iter()
+        .map(|(at, code)| {
+            line = if at >= from { line + pystr::count_char(text, c('\n'), from, at) } else { line_of(text, at) };
+            from = at;
+            (line, code)
+        })
+        .collect()
+}
+
+/// EVAL-LITERAL (0.1.9; found and first fixed by the external review agent, card 609dd639, Oct 21–22): what a test
+/// finds in the code a JavaScript or Python text (or its decoded view: `globalThis[_0x1f(3)](_0x1f(4))`) hands an
+/// eval call as a string (evalcode::codes), read by `read` (the test's own reading of a text) as a text of its own:
+/// (the 1-based line of the call, each reason with `_EVAL_NOTE`, a view's with `_DV_NOTE` too), each once, and none the
+/// text gives itself (`have`: a reason one of them begins with, a reverse shell's in `exec("bash -i …")`). Each
+/// string read is charged to the call's budget before it is read, a step a character and `EVAL_STRING_STEPS_*` for the
+/// reading itself, so a text of many strings runs out rather than on. Strings in strings are read `_EVAL_DEPTH` deep:
+/// a text that nests them deeper is not read whole, which the call says (budget::cut: the file is SC-TRUNCATED, beside
+/// what was found), never an answer of nothing.
+fn eval_literal_reasons(
+    p: &Pack,
+    text: &[u32],
+    lang: Option<&str>,
+    have: &[PyStr],
+    read: &mut dyn FnMut(&[u32]) -> Vec<PyStr>,
+) -> Vec<(usize, PyStr)> {
+    let Some(lang) = lang.filter(|l| *l == "js" || *l == "py") else {
+        return Vec::new();
+    };
+    // (line, string, whether only the decoded view hands it)
+    let mut found: Vec<(usize, PyStr, bool)> =
+        lines_in_order(text, crate::evalcode::codes(p, text, lang)).into_iter().map(|(line, code)| (line, code, false)).collect();
+    if let Some(view) = dv_view(p, text, Some(lang)) {
+        let view: &[u32] = &view;
+        let _gate = crate::textgate::open(view);
+        // (each string once: the text's found already, in a set; codes gives the view's each once)
+        let known: HashSet<&[u32]> = found.iter().map(|(_, s, _)| s.as_slice()).collect();
+        let more: Vec<(usize, PyStr)> =
+            lines_in_order(view, crate::evalcode::codes(p, view, lang)).into_iter().filter(|(_, s)| !known.contains(s.as_slice())).collect();
+        found.extend(more.into_iter().map(|(line, code)| (line, code, true)));
+    }
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let deep = p.usize("_EVAL_DEPTH");
+    if EVAL_DEPTH.with(|d| d.get()) >= deep {
+        crate::budget::cut(&format!(
+            "the strings eval calls run as code are read {deep} deep (_EVAL_DEPTH), and this text nests them deeper"
+        ));
+        return Vec::new();
+    }
+    let (note, dv) = (p.text("_EVAL_NOTE"), p.text("_DV_NOTE"));
+    let reading = if lang == "py" { EVAL_STRING_STEPS_PY } else { EVAL_STRING_STEPS_JS };
+    let mut out: Vec<(usize, PyStr)> = Vec::new();
+    // (the text's own readings, its trees' and its decoded view's, kept aside while its strings are read and given
+    // back after: the text's next test reads none of them again)
+    let _kept = (crate::jsflow::supply::keep_last(), crate::pyflow::supply::keep_last(), DvKept::take());
+    for (at, code, in_view) in found {
+        if !crate::budget::spend(code.len() as u64 + reading) {
+            break;
+        }
+        let _deeper = EvalDeeper::enter();
+        let _gate = crate::textgate::open(&code);
+        for r in read(&code) {
+            if have.iter().any(|h| h.starts_with(&r)) {
+                continue;
+            }
+            // (a reason of a string in the string: noted already)
+            let mut r = if pystr::find(&r, &note, 0).is_some() { r } else { cat(&[&r, &note]) };
+            if in_view && pystr::find(&r, &dv, 0).is_none() {
+                r = cat(&[&r, &dv]);
+            }
+            if !out.iter().any(|(_, x)| *x == r) {
+                out.push((at, r));
+            }
+        }
+    }
+    out
 }
 
 /// The packages a package manager is asked to install in the command lines a text hands an exec call (a command

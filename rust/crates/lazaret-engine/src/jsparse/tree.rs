@@ -96,8 +96,8 @@ pub const L_BOOLEAN: u8 = 3;
 pub const L_NULL: u8 = 4;
 pub const L_REGEX: u8 = 5;
 
-/// One node: its kind, line and span, and four field slots whose meaning
-/// the kind gives (`fields`). 32 bytes.
+/// One node: its kind and span, and four field slots whose meaning the
+/// kind gives (`fields`). 28 bytes (its line is its start's: Tree::line).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Node {
     pub kind: Kind,
@@ -105,15 +105,17 @@ pub struct Node {
     pub op: u8,
     /// Boolean fields (COMPUTED, OPTIONAL, …).
     pub flags: u16,
-    /// The line the node starts on (1-based), as jsparse.py gives it.
-    pub line: u32,
-    /// The code-point offset where the token the line is taken from starts.
+    /// The code-point offset where the token the node's line is taken from
+    /// starts (its line: Tree::line, as jsparse.py gives it).
     pub start: u32,
     /// The code-point offset just past the node's last token.
     pub end: u32,
     /// The field slots A, B, C, D: node ids, list ids or string ids.
     pub f: [u32; 4],
 }
+
+/// line_blocks' block: 4,096 code points.
+const LINE_BLOCK_BITS: u32 = 12;
 
 pub const A: u8 = 0;
 pub const B: u8 = 1;
@@ -411,6 +413,14 @@ pub struct Tree {
     pub lists: Vec<u32>,
     pub strings: Strings,
     pub root: NodeId,
+    /// Where each line ends (_LINE_RE: `\r\n` at its `\r`, or one of `\n`
+    /// `\r` U+2028 U+2029), ascending: a node's line is the count before its
+    /// start, plus one (BIG-BUNDLE-TAIL, memory: not kept in each node, 14 MB
+    /// of a 16,000,000-character bundle's 3,600,000).
+    pub line_ends: Vec<u32>,
+    /// How many line ends are before each block of LINE_BLOCK code points: a line's search is within its block's
+    /// (`index_lines`; a model asks a node's line at each call it reads)
+    pub line_blocks: Vec<u32>,
     /// The JavaScript reading took an HTML-like `<!--` for a comment after
     /// the program's first token (F-12): V8 reads a script so, but tsc reads
     /// `<` `!` `--` there, which may be code it runs (parser.rs, skip()).
@@ -419,7 +429,47 @@ pub struct Tree {
 
 impl Tree {
     pub fn new() -> Tree {
-        Tree { nodes: Vec::new(), lists: vec![0], strings: Strings::with_literals(), root: NONE, html_after_code: false }
+        Tree {
+            nodes: Vec::new(),
+            lists: vec![0],
+            strings: Strings::with_literals(),
+            root: NONE,
+            line_ends: Vec::new(),
+            line_blocks: Vec::new(),
+            html_after_code: false,
+        }
+    }
+
+    /// The line (1-based) of node `id`: of the token it starts at.
+    #[inline]
+    pub fn line(&self, id: NodeId) -> u32 {
+        self.line_at(self.nodes[id as usize].start)
+    }
+
+    /// The line (1-based) of offset `pos`: the line ends before it, plus one.
+    #[inline]
+    pub fn line_at(&self, pos: u32) -> u32 {
+        let b = (pos >> LINE_BLOCK_BITS) as usize;
+        if let (Some(&lo), Some(&hi)) = (self.line_blocks.get(b), self.line_blocks.get(b + 1)) {
+            let (lo, hi) = (lo as usize, hi as usize);
+            return (lo + self.line_ends[lo..hi].partition_point(|&x| x < pos)) as u32 + 1;
+        }
+        self.line_ends.partition_point(|&x| x < pos) as u32 + 1
+    }
+
+    /// line_blocks, for a text of `len` code points.
+    pub fn index_lines(&mut self, len: usize) {
+        let blocks = (len >> LINE_BLOCK_BITS) + 2;
+        let mut out = Vec::with_capacity(blocks);
+        let mut k = 0usize;
+        for b in 0..blocks {
+            let start = (b << LINE_BLOCK_BITS) as u64;
+            while k < self.line_ends.len() && (self.line_ends[k] as u64) < start {
+                k += 1;
+            }
+            out.push(k as u32);
+        }
+        self.line_blocks = out;
     }
 
     /// The node `id`.
@@ -436,23 +486,7 @@ impl Tree {
     /// The items of list `id` (empty for NONE).
     #[inline]
     pub fn list(&self, id: u32) -> &[u32] {
-        if id == NONE {
-            return &[];
-        }
-        // (an id that is no list — a node's id read from a slot that holds no list — is a reader's mistake: a
-        // debug build stops on it, a release build reads no items rather than panic on a package's file)
-        let i = id as usize;
-        let Some(&n) = self.lists.get(i) else {
-            debug_assert!(false, "list id {} past the tree's {} list slots", id, self.lists.len());
-            return &[];
-        };
-        match self.lists.get(i + 1..i + 1 + n as usize) {
-            Some(items) => items,
-            None => {
-                debug_assert!(false, "list {} of {} items past the tree's {} list slots", id, n, self.lists.len());
-                &[]
-            }
-        }
+        list_in(&self.lists, id)
     }
 
     /// The string `id`.
@@ -538,52 +572,84 @@ impl Tree {
     /// order (pre-order: a node before its children, children in field
     /// order): what parsing built and left behind (a speculative read's or
     /// a cover grammar's nodes, the expressions inside types) is dropped.
+    /// The nodes are moved in place (a big bundle's tree is not held twice).
     pub fn compact(mut self) -> Tree {
         let root = self.root;
-        let strings = std::mem::take(&mut self.strings);
-        let html_after_code = self.html_after_code;
         if root == NONE {
-            return Tree { nodes: Vec::new(), lists: vec![0], strings, root: NONE, html_after_code };
+            let strings = std::mem::take(&mut self.strings);
+            let line_ends = std::mem::take(&mut self.line_ends);
+            let line_blocks = std::mem::take(&mut self.line_blocks);
+            return Tree { nodes: Vec::new(), lists: vec![0], strings, root: NONE, line_ends, line_blocks, html_after_code: self.html_after_code };
         }
-        let mut out =
-            Tree { nodes: Vec::with_capacity(self.nodes.len()), lists: vec![0], strings, root: NONE, html_after_code };
         // pass 1: pre-order ids, with an explicit stack (trees may be deep)
+        let len = self.nodes.len();
+        let mut new_id: Vec<u32> = vec![NONE; len];
         let mut stack: Vec<NodeId> = vec![root];
-        let mut order: Vec<NodeId> = Vec::with_capacity(self.nodes.len());
         let mut kids: Vec<NodeId> = Vec::new();
+        let mut count = 0u32;
         while let Some(id) = stack.pop() {
-            order.push(id);
+            if new_id[id as usize] != NONE {
+                // a node reached twice would be copied twice: give each visit its own id
+                let strings = std::mem::take(&mut self.strings);
+                let line_ends = std::mem::take(&mut self.line_ends);
+                let line_blocks = std::mem::take(&mut self.line_blocks);
+                return self.compact_by_copy(root, strings, line_ends, line_blocks);
+            }
+            new_id[id as usize] = count;
+            count += 1;
             kids.clear();
             self.each_child(id, |c| kids.push(c));
             for &c in kids.iter().rev() {
                 stack.push(c);
             }
         }
-        // a node reached twice would be copied twice: give each visit its own id
-        let mut new_id: Vec<u32> = vec![NONE; self.nodes.len()];
-        let mut seen_twice = false;
-        for (k, &id) in order.iter().enumerate() {
-            if new_id[id as usize] != NONE {
-                seen_twice = true;
+        drop(stack);
+        // what was left behind goes past the end, in its order
+        let mut tail = count;
+        for slot in new_id.iter_mut() {
+            if *slot == NONE {
+                *slot = tail;
+                tail += 1;
             }
-            new_id[id as usize] = k as u32;
         }
-        if seen_twice {
-            let strings = std::mem::take(&mut out.strings);
-            return self.compact_by_copy(root, strings);
+        // pass 2: each node to its place, following the permutation's cycles
+        let mut done = vec![0u64; len.div_ceil(64)];
+        for start in 0..len {
+            if done[start / 64] >> (start % 64) & 1 != 0 {
+                continue;
+            }
+            let mut carried = self.nodes[start];
+            let mut at = start;
+            loop {
+                done[at / 64] |= 1 << (at % 64);
+                let to = new_id[at] as usize;
+                if to == start {
+                    self.nodes[start] = carried;
+                    break;
+                }
+                // (`to` holds the node whose old id is `to`: carry it on)
+                let next = std::mem::replace(&mut self.nodes[to], carried);
+                carried = next;
+                at = to;
+            }
         }
-        for &id in &order {
-            let mut n = *self.node(id);
+        drop(done);
+        self.nodes.truncate(count as usize);
+        self.nodes.shrink_to_fit();
+        // pass 3: the slots to the new ids, the lists copied in document order
+        let old_lists = std::mem::replace(&mut self.lists, vec![0]);
+        for k in 0..count as usize {
+            let mut n = self.nodes[k];
             for fd in fields(n.kind) {
                 match fd.ty {
                     Node(s) | Opt(s) => {
                         let c = n.f[s as usize];
                         n.f[s as usize] = if c == NONE { NONE } else { new_id[c as usize] };
                     }
-                    List(s) | Holes(s) => n.f[s as usize] = out.copy_list(self.list(n.f[s as usize]), &new_id),
+                    List(s) | Holes(s) => n.f[s as usize] = self.copy_list(list_in(&old_lists, n.f[s as usize]), &new_id),
                     Decorators => {
                         let d = n.f[D as usize];
-                        n.f[D as usize] = if d == NONE { NONE } else { out.copy_list(self.list(d), &new_id) };
+                        n.f[D as usize] = if d == NONE { NONE } else { self.copy_list(list_in(&old_lists, d), &new_id) };
                     }
                     _ => {}
                 }
@@ -591,10 +657,12 @@ impl Tree {
             if n.kind == Kind::Property {
                 n.f[C as usize] = NONE; // (the cover initializer: never in a finished tree)
             }
-            out.nodes.push(n);
+            self.nodes[k] = n;
         }
-        out.root = 0;
-        out
+        drop(old_lists);
+        self.lists.shrink_to_fit();
+        self.root = 0;
+        self
     }
 
     fn copy_list(&mut self, items: &[u32], new_id: &[u32]) -> u32 {
@@ -610,8 +678,9 @@ impl Tree {
     }
 
     /// compact() for a tree that holds a node twice: each place gets a copy.
-    fn compact_by_copy(&self, root: NodeId, strings: Strings) -> Tree {
-        let mut out = Tree { nodes: Vec::new(), lists: vec![0], strings, root: NONE, html_after_code: self.html_after_code };
+    pub(super) fn compact_by_copy(&self, root: NodeId, strings: Strings, line_ends: Vec<u32>, line_blocks: Vec<u32>) -> Tree {
+        let mut out =
+            Tree { nodes: Vec::new(), lists: vec![0], strings, root: NONE, line_ends, line_blocks, html_after_code: self.html_after_code };
         // (old id, the slot in `out` to point at it: (node index, slot) or a list position)
         enum At {
             Root,
@@ -670,6 +739,28 @@ impl Tree {
             }
         }
         out
+    }
+}
+
+/// The items of list `id` in `lists` (Tree::list()).
+#[inline]
+fn list_in(lists: &[u32], id: u32) -> &[u32] {
+    if id == NONE {
+        return &[];
+    }
+    // (an id that is no list — a node's id read from a slot that holds no list — is a reader's mistake: a
+    // debug build stops on it, a release build reads no items rather than panic on a package's file)
+    let i = id as usize;
+    let Some(&n) = lists.get(i) else {
+        debug_assert!(false, "list id {} past the tree's {} list slots", id, lists.len());
+        return &[];
+    };
+    match lists.get(i + 1..i + 1 + n as usize) {
+        Some(items) => items,
+        None => {
+            debug_assert!(false, "list {} of {} items past the tree's {} list slots", id, n, lists.len());
+            &[]
+        }
     }
 }
 

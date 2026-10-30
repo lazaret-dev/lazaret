@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.100.0",
+ "rule_set": "2.114.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -26,106 +26,6 @@
   "B64_BLOB_RE": {
    "flags": "",
    "re": "[\\\"'][A-Za-z0-9+/]{200,}={0,2}[\\\"']"
-  },
-  "BENIGN_MAGIC": {
-   "list": [
-    {
-     "value": "\u0089PNG"
-    },
-    {
-     "value": "\u00ff\u00d8\u00ff"
-    },
-    {
-     "value": "GIF8"
-    },
-    {
-     "value": "RIFF"
-    },
-    {
-     "value": "OggS"
-    },
-    {
-     "value": "BM"
-    },
-    {
-     "value": "\u0000\u0000\u0001\u0000"
-    },
-    {
-     "value": "wOFF"
-    },
-    {
-     "value": "wOF2"
-    },
-    {
-     "value": "ID3"
-    },
-    {
-     "value": "%PDF"
-    },
-    {
-     "value": "II*\u0000"
-    },
-    {
-     "value": "MM\u0000*"
-    },
-    {
-     "value": "\u001aE\u00df\u00a3"
-    },
-    {
-     "value": "ftyp"
-    },
-    {
-     "value": "\u00ffO\u00ffQ"
-    },
-    {
-     "value": "\u0000\u0000\u0000\fjP  "
-    },
-    {
-     "value": "8BPS"
-    },
-    {
-     "value": "icns"
-    },
-    {
-     "value": "DDS "
-    },
-    {
-     "value": "OTTO"
-    },
-    {
-     "value": "ttcf"
-    },
-    {
-     "value": "%!PS"
-    },
-    {
-     "value": "\u00c5\u00d0\u00d3\u00c6"
-    },
-    {
-     "value": "gimp xcf"
-    },
-    {
-     "value": "\u0001\u00da"
-    },
-    {
-     "value": "Y\u00a6j\u0095"
-    },
-    {
-     "value": "SIMPLE  ="
-    },
-    {
-     "value": "qoif"
-    },
-    {
-     "value": "#?RADIANCE"
-    },
-    {
-     "value": "fLaC"
-    },
-    {
-     "value": "\u0000\u0000\u0002\u0000"
-    }
-   ]
   },
   "CAP_PER_RULE": {
    "value": 200
@@ -196,11 +96,13 @@
   "COMPILED_EXTS": {
    "set": [
     ".a",
+    ".apk",
     ".class",
     ".dex",
     ".dll",
     ".dmg",
     ".dylib",
+    ".ear",
     ".exe",
     ".jar",
     ".jsc",
@@ -213,7 +115,18 @@
     ".pyd",
     ".pyo",
     ".so",
+    ".war",
     ".wasm"
+   ]
+  },
+  "COMPILED_TEXT_MAGIC": {
+   "list": [
+    {
+     "value": "!<arch>\n"
+    },
+    {
+     "value": "!<thin>\n"
+    }
    ]
   },
   "CONFIG_EXTS": {
@@ -312,6 +225,12 @@
     ".vsdx",
     ".xlsx",
     ".xmind"
+   ]
+  },
+  "CONTAINER_GZIP_EXTS": {
+   "set": [
+    ".dia",
+    ".svgz"
    ]
   },
   "COVERAGE_RULES": {
@@ -612,17 +531,1195 @@
   "FN_LEN_LIMIT": {
    "value": 60
   },
-  "FONT_EXTS": {
+  "GRADLE_PROPERTIES_MAX_BYTES": {
+   "value": 65536
+  },
+  "GRADLE_WRAPPER_CHECKSUMS": {
+   "map": {
+    "1.0": {
+     "value": "87e50531ca7aab675f5bb65755ef78328afd64cf0877e37ad876047a8a014055"
+    },
+    "1.1": {
+     "value": "22c56a9780daeee00e5bf31621f991b68e73eff6fe8afca628a1fe2c50c6038e"
+    },
+    "1.10": {
+     "value": "6a6c15e222a0458aa33985b87f67954f4222410b43b1e26866197d0a77d93cbc"
+    },
+    "1.11": {
+     "value": "a14b54dd3790f5ce1dc08ebbf4b5bcc05f76c4554b43accb84696c970f29aba0"
+    },
+    "1.12": {
+     "value": "dea5ceba47b58df0b7f69a65b24357527c1927ccc72b6d4ed90658d39e461b29"
+    },
+    "1.2": {
+     "value": "5c91fa893665f3051eae14578fac2df14e737423387e75ffbeccd35f335a3d8b"
+    },
+    "1.3": {
+     "value": "95513eccca99e1ae1aeadc4f69cabd0e7fb64821d3f26c46a489df844c8a7353"
+    },
+    "1.4": {
+     "value": "c95985b7b5684e133c5d45044fd90faaf6c8f7cd2493d61a11c2b8c5b71ef514"
+    },
+    "1.5": {
+     "value": "9598ffdf7ee26949d8b861ece267c70c802f21f7fc52596693834792d155195a"
+    },
+    "1.6": {
+     "value": "66dbcc9f0bc33789ea0bdb4d49c8ea037047bda5647ef696c47bdca65f785159"
+    },
+    "1.7": {
+     "value": "7af529cc3331d38b3d8f8344ddd9b2d3744542b55b68318abd8bb1a6f3812a1c"
+    },
+    "1.8": {
+     "value": "13f23a24252ddca0a0fabef212e3c854f5895b081c09d015c91587a5df9bf9f7"
+    },
+    "1.9": {
+     "value": "134337ea7c13221f9d1a1c14288a5cf8af9f6060167b903b724b115cf5a0cf73"
+    },
+    "2.0": {
+     "value": "80a33ca14e3bca3116bc8749550397f739f126190c82bb6399fdc8d10f49661f"
+    },
+    "2.1": {
+     "value": "5e27c39c2336c25748f279d8b105162d14b1a39eb7839d0b658432282d0ce79f"
+    },
+    "2.10": {
+     "value": "16caeaf66d57a0d1d2087fef6a97efa62de8da69afa5b908f40db35afc4342da"
+    },
+    "2.11": {
+     "value": "0bc7b16a0a3fa52af674de44d1fea48abc4dee3431f3d4829cd9ea329836e596"
+    },
+    "2.12": {
+     "value": "4894520b03c007bf38e983bf933320c483a9790010d997029fa8985dc6128559"
+    },
+    "2.13": {
+     "value": "0c3c576e28b44eddcab6b8b4854f484363dfbcd047657d41654e839835da2c53"
+    },
+    "2.14": {
+     "value": "b5ca811c057b3eb4164c78f4155d667c6092ff98ba91a4c90d29e127426f37a7"
+    },
+    "2.14.1": {
+     "value": "8e47da0b2656354d059609cae9d44b196d4f9b14512e688ffee4e0eb7e723ae9"
+    },
+    "2.2": {
+     "value": "fa9b4294d47cf8db7039cb9b2435de3dd1accb0d3d67926705775a0579dfa397"
+    },
+    "2.2.1": {
+     "value": "5f73d431fd1c5dcc2cf11555b8e486c43249c1099f678ccc6088b05be600a2e1"
+    },
+    "2.3": {
+     "value": "b18a1114ebe81fb7502d40ad9a4f86cef82fff244a865ad45533b4d5e7ff0cc8"
+    },
+    "2.4": {
+     "value": "98420079ffe3e24b1013180d9b9bc2e2ee6a9d867ee232004b75a961d9c18e27"
+    },
+    "2.5": {
+     "value": "718d7b25ea60b357fc4cb2212ce10b3f03dfd0e6fe5f23f565b15553ec46bb7e"
+    },
+    "2.6": {
+     "value": "695089a2b306f55f0bd63140fbcc5ead8c383819018188ce484cd5a055bec6e4"
+    },
+    "2.7": {
+     "value": "d7e1975ccf2dc079d4f0b1010febdad466506d1565c5aa8017c88ebc5e471604"
+    },
+    "2.8": {
+     "value": "198159fcd7d29533c0d37423d66c44729982d5280c9e2c7c5f4b7bc6a9317f6b"
+    },
+    "2.9": {
+     "value": "b92386e36a96da6be89e91f71087d1394a26c0450231ba0b22e28ee1ee8fa14b"
+    },
+    "3.0": {
+     "value": "42d7a2f636983aa09d21dfeb6e90d21d7a8dad905351390643ce60cc82c8f8a9"
+    },
+    "3.1": {
+     "value": "0f49043be582d7a39b671f924c66bd9337b92fa88ff5951225acc60560053067"
+    },
+    "3.2": {
+     "value": "d2d3abae74e89cc4200f48d4a08a7e5960363c33ee62272ef5ffbb39f4c7f83e"
+    },
+    "3.2.1": {
+     "value": "020ef0245a07b33ca48b12f59415e7e5083cf701ef02690464a8cc2ab3984608"
+    },
+    "4.1": {
+     "value": "f4d953f31fbf6c38a8c330d19171c8ba6e0d1ff59d4d5c5c2d3ed821c9f3d5a3"
+    },
+    "4.10": {
+     "value": "778e7f46bd67eaea2de5bcbdbb40878c6614656014ba59a72ce8648eaf43a925"
+    },
+    "4.10.1": {
+     "value": "d8a69ca8efe271d8de080c42a2ea4b08fc9e85c41aa2d163255c70d9da239db0"
+    },
+    "4.10.2": {
+     "value": "ad63ba21fb91e490e0f6fd0ca7d4049241f0f68a454b0b3075c041c4554e611c"
+    },
+    "4.10.3": {
+     "value": "660ab018b8e319e9ae779fdb1b7ac47d0321bde953bf0eb4545f14952cfdcaa3"
+    },
+    "4.2": {
+     "value": "53aa048fef3c06a8442c6a44df5edd2e8c791ee883e42ded6189c7eed112095d"
+    },
+    "4.2.1": {
+     "value": "c536e519e65a4bb787e071c6a90d23bd219c9d409a2123db649d3684acbf3ae7"
+    },
+    "4.3": {
+     "value": "ba496e7e0e03ffa432eaf715bb1466fac2ffc8491a71e7164a5438c48c79d8ea"
+    },
+    "4.3.1": {
+     "value": "383f4efa709b52632a520708e8a07353961970941ab3867ab8ac182132ce1c54"
+    },
+    "4.4": {
+     "value": "88b5b31f390a268ab3773df580d83fd1e388f49c2b685f78a16600577bd72fe2"
+    },
+    "4.4.1": {
+     "value": "4e318d74d06aa7b998091345c397a3c7c4b291b59da31e6f9c772a596711acac"
+    },
+    "4.5": {
+     "value": "d283a04caee0e97b666b09e50ab394834934bee6225c2e9cd4650afdeac43828"
+    },
+    "4.5.1": {
+     "value": "3bf04e39ed259ff0a1217a875199a11775855d2a29207b98318ac79178249de8"
+    },
+    "4.6": {
+     "value": "381dff8aa434499aa93bc25572b049c8c586a67faff2c02f375e4f23e17e49de"
+    },
+    "4.7": {
+     "value": "7d6fe0a055f133226409de2457fb0e887d1f6b096f36c8d5fd76fb7a9357cd45"
+    },
+    "4.8": {
+     "value": "4160d5a6d8d6efc6af336582bbbba8194e4d7a742835f7b0fd3964cbd419c994"
+    },
+    "4.8.1": {
+     "value": "080e30657661539701b66827b96eb0043191e0a7a73090e8a57bd6735e5af5c5"
+    },
+    "4.9": {
+     "value": "e55e7e47a79e04c26363805b31e2f40b7a9cc89ea12113be7de750a3b2cede85"
+    },
+    "5.0": {
+     "value": "f1a597a1f2b23089deec11d5b924d074f9e4ed810f2093be7021ded01c8073ad"
+    },
+    "5.1": {
+     "value": "76b12da7f4a7cdd025e5996811a2e49bf5df0fb62d72554ab555c0e434b63aae"
+    },
+    "5.1-milestone-1": {
+     "value": "8ff6bee43c55efc0cce9e1147860a76fc970398fbef587e64b6e7a5a7e0291df"
+    },
+    "5.1-rc-1": {
+     "value": "76b12da7f4a7cdd025e5996811a2e49bf5df0fb62d72554ab555c0e434b63aae"
+    },
+    "5.1-rc-2": {
+     "value": "76b12da7f4a7cdd025e5996811a2e49bf5df0fb62d72554ab555c0e434b63aae"
+    },
+    "5.1-rc-3": {
+     "value": "76b12da7f4a7cdd025e5996811a2e49bf5df0fb62d72554ab555c0e434b63aae"
+    },
+    "5.1.1": {
+     "value": "76b12da7f4a7cdd025e5996811a2e49bf5df0fb62d72554ab555c0e434b63aae"
+    },
+    "5.2": {
+     "value": "76b12da7f4a7cdd025e5996811a2e49bf5df0fb62d72554ab555c0e434b63aae"
+    },
+    "5.2-rc-1": {
+     "value": "76b12da7f4a7cdd025e5996811a2e49bf5df0fb62d72554ab555c0e434b63aae"
+    },
+    "5.2.1": {
+     "value": "76b12da7f4a7cdd025e5996811a2e49bf5df0fb62d72554ab555c0e434b63aae"
+    },
+    "5.3": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.3-rc-1": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.3-rc-2": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.3-rc-3": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.3.1": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.4": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.4-rc-1": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.4.1": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.5": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.5-rc-1": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.5-rc-2": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.5-rc-3": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.5-rc-4": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.5.1": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.6": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.6-rc-1": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.6-rc-2": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.6.1": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.6.2": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.6.3": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "5.6.4": {
+     "value": "3dc39ad650d40f6c029bd8ff605c6d95865d657dbfdeacdb079db0ddfffedf9f"
+    },
+    "6.0": {
+     "value": "28b330c20a9a73881dfe9702df78d4d78bf72368e8906c70080ab6932462fe9e"
+    },
+    "6.0-rc-1": {
+     "value": "28b330c20a9a73881dfe9702df78d4d78bf72368e8906c70080ab6932462fe9e"
+    },
+    "6.0-rc-2": {
+     "value": "28b330c20a9a73881dfe9702df78d4d78bf72368e8906c70080ab6932462fe9e"
+    },
+    "6.0-rc-3": {
+     "value": "28b330c20a9a73881dfe9702df78d4d78bf72368e8906c70080ab6932462fe9e"
+    },
+    "6.0.1": {
+     "value": "28b330c20a9a73881dfe9702df78d4d78bf72368e8906c70080ab6932462fe9e"
+    },
+    "6.1": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.1-milestone-1": {
+     "value": "3888c76faa032ea8394b8a54e04ce2227ab1f4be64f65d450f8509fe112d38ce"
+    },
+    "6.1-milestone-2": {
+     "value": "3888c76faa032ea8394b8a54e04ce2227ab1f4be64f65d450f8509fe112d38ce"
+    },
+    "6.1-milestone-3": {
+     "value": "3888c76faa032ea8394b8a54e04ce2227ab1f4be64f65d450f8509fe112d38ce"
+    },
+    "6.1-rc-1": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.1-rc-2": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.1-rc-3": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.1.1": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.2": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.2-rc-1": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.2-rc-2": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.2-rc-3": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.2.1": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.2.2": {
+     "value": "96f793a18e056c23ffeec67c1f3bb8eccff5a4a407fc9ceac183527e7eedf4b6"
+    },
+    "6.3": {
+     "value": "1cef53de8dc192036e7b0cc47584449b0cf570a00d560bfaa6c9eabe06e1fc06"
+    },
+    "6.3-rc-1": {
+     "value": "1cef53de8dc192036e7b0cc47584449b0cf570a00d560bfaa6c9eabe06e1fc06"
+    },
+    "6.3-rc-2": {
+     "value": "1cef53de8dc192036e7b0cc47584449b0cf570a00d560bfaa6c9eabe06e1fc06"
+    },
+    "6.3-rc-3": {
+     "value": "1cef53de8dc192036e7b0cc47584449b0cf570a00d560bfaa6c9eabe06e1fc06"
+    },
+    "6.3-rc-4": {
+     "value": "1cef53de8dc192036e7b0cc47584449b0cf570a00d560bfaa6c9eabe06e1fc06"
+    },
+    "6.4": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.4-rc-1": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.4-rc-2": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.4-rc-3": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.4-rc-4": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.4.1": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.5": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.5-milestone-1": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.5-milestone-2": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.5-rc-1": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.5.1": {
+     "value": "70239e6ca1f0d5e3b2808ef6d82390cf9ad58d3a3a0d271677a51d1b89475857"
+    },
+    "6.6": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-milestone-1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-milestone-2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-milestone-3": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-rc-1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-rc-2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-rc-3": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-rc-4": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-rc-5": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6-rc-6": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.6.1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.7": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.7-rc-1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.7-rc-2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.7-rc-3": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.7-rc-4": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.7-rc-5": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.7.1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8-milestone-1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8-milestone-2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8-milestone-3": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8-rc-1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8-rc-3": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8-rc-4": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8-rc-5": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8.1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8.2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.8.3": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.9": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.9-rc-1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.9-rc-2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.9.1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.9.2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.9.3": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "6.9.4": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.0": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.0-milestone-1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.0-milestone-2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.0-milestone-3": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.0-rc-1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.0-rc-2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.0.1": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.0.2": {
+     "value": "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637"
+    },
+    "7.1": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.1-rc-1": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.1-rc-2": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.1.1": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.2": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.2-rc-1": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.2-rc-2": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.2-rc-3": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3-rc-1": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3-rc-2": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3-rc-3": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3-rc-4": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3-rc-5": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3.1": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3.2": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3.3": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.3.3-rc-1": {
+     "value": "33ad4583fd7ee156f533778736fa1b4940bd83b433934d1cc4e9f608e99a6a89"
+    },
+    "7.4": {
+     "value": "575098db54a998ff1c6770b352c3b16766c09848bee7555dab09afc34e8cf590"
+    },
+    "7.4-rc-1": {
+     "value": "575098db54a998ff1c6770b352c3b16766c09848bee7555dab09afc34e8cf590"
+    },
+    "7.4-rc-2": {
+     "value": "575098db54a998ff1c6770b352c3b16766c09848bee7555dab09afc34e8cf590"
+    },
+    "7.4.1": {
+     "value": "575098db54a998ff1c6770b352c3b16766c09848bee7555dab09afc34e8cf590"
+    },
+    "7.4.2": {
+     "value": "575098db54a998ff1c6770b352c3b16766c09848bee7555dab09afc34e8cf590"
+    },
+    "7.5": {
+     "value": "91a239400bb638f36a1795d8fdf7939d532cdc7d794d1119b7261aac158b1e60"
+    },
+    "7.5-rc-1": {
+     "value": "91a239400bb638f36a1795d8fdf7939d532cdc7d794d1119b7261aac158b1e60"
+    },
+    "7.5-rc-2": {
+     "value": "91a239400bb638f36a1795d8fdf7939d532cdc7d794d1119b7261aac158b1e60"
+    },
+    "7.5-rc-3": {
+     "value": "91a239400bb638f36a1795d8fdf7939d532cdc7d794d1119b7261aac158b1e60"
+    },
+    "7.5-rc-4": {
+     "value": "91a239400bb638f36a1795d8fdf7939d532cdc7d794d1119b7261aac158b1e60"
+    },
+    "7.5-rc-5": {
+     "value": "91a239400bb638f36a1795d8fdf7939d532cdc7d794d1119b7261aac158b1e60"
+    },
+    "7.5.1": {
+     "value": "91a239400bb638f36a1795d8fdf7939d532cdc7d794d1119b7261aac158b1e60"
+    },
+    "7.6": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "7.6-milestone-1": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "7.6-rc-1": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "7.6-rc-2": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "7.6-rc-3": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "7.6-rc-4": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "7.6.1": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "7.6.2": {
+     "value": "14dfa961b6704bb3decdea06502781edaa796a82e6da41cd2e1962b14fbe21a3"
+    },
+    "7.6.3": {
+     "value": "14dfa961b6704bb3decdea06502781edaa796a82e6da41cd2e1962b14fbe21a3"
+    },
+    "7.6.4": {
+     "value": "14dfa961b6704bb3decdea06502781edaa796a82e6da41cd2e1962b14fbe21a3"
+    },
+    "7.6.5": {
+     "value": "14dfa961b6704bb3decdea06502781edaa796a82e6da41cd2e1962b14fbe21a3"
+    },
+    "7.6.6": {
+     "value": "14dfa961b6704bb3decdea06502781edaa796a82e6da41cd2e1962b14fbe21a3"
+    },
+    "8.0": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0-milestone-1": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "8.0-milestone-2": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "8.0-milestone-3": {
+     "value": "c5a643cf80162e665cc228f7b16f343fef868e47d3a4836f62e18b7e17ac018a"
+    },
+    "8.0-milestone-4": {
+     "value": "577b2de036000db2e0f04f2ec842a4f1e648c8b6f9c87f29a8d896acb1732538"
+    },
+    "8.0-milestone-5": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0-milestone-6": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0-rc-1": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0-rc-2": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0-rc-3": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0-rc-4": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0-rc-5": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0.1": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.0.2": {
+     "value": "91941f522fbfd4431cf57e445fc3d5200c85f957bda2de5251353cf11174f4b5"
+    },
+    "8.1": {
+     "value": "ed2c26eba7cfb93cc2b7785d05e534f07b5b48b5e7fc941921cd098628abca58"
+    },
+    "8.1-rc-1": {
+     "value": "ed2c26eba7cfb93cc2b7785d05e534f07b5b48b5e7fc941921cd098628abca58"
+    },
+    "8.1-rc-2": {
+     "value": "ed2c26eba7cfb93cc2b7785d05e534f07b5b48b5e7fc941921cd098628abca58"
+    },
+    "8.1-rc-3": {
+     "value": "ed2c26eba7cfb93cc2b7785d05e534f07b5b48b5e7fc941921cd098628abca58"
+    },
+    "8.1-rc-4": {
+     "value": "ed2c26eba7cfb93cc2b7785d05e534f07b5b48b5e7fc941921cd098628abca58"
+    },
+    "8.1.1": {
+     "value": "ed2c26eba7cfb93cc2b7785d05e534f07b5b48b5e7fc941921cd098628abca58"
+    },
+    "8.10": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.10-rc-1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.10.1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.10.2": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.10.2-milestone-1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.11": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.11-milestone-1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.11-rc-1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.11-rc-2": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.11-rc-3": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.11.1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.12": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.12-rc-1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.12-rc-2": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.12.1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.12.1-milestone-1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.13": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.13-milestone-1": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.13-milestone-2": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.13-milestone-3": {
+     "value": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+    },
+    "8.13-rc-1": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.13-rc-2": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.14": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14-milestone-1": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.14-milestone-2": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.14-milestone-3": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.14-milestone-4": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.14-milestone-5": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.14-milestone-7": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.14-milestone-8": {
+     "value": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
+    },
+    "8.14-rc-1": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14-rc-2": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14-rc-3": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14.1": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14.2": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14.3": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14.4": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14.5": {
+     "value": "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172"
+    },
+    "8.14.6": {
+     "value": "ad16bca46cb71bb5887c546860d93992aeee35c1fdaf4a242b0a612375d937e0"
+    },
+    "8.2": {
+     "value": "a8451eeda314d0568b5340498b36edf147a8f0d692c5ff58082d477abe9146e4"
+    },
+    "8.2-milestone-1": {
+     "value": "55e949185c26ba3ddcd2c6a4217d043bfa0ce3cc002bbbb52b709a181a513e81"
+    },
+    "8.2-rc-1": {
+     "value": "55e949185c26ba3ddcd2c6a4217d043bfa0ce3cc002bbbb52b709a181a513e81"
+    },
+    "8.2-rc-2": {
+     "value": "5c9a1a6f50b4f8c0264b1ac69013bef9f8363733275fafa56c70c84be3276bb8"
+    },
+    "8.2-rc-3": {
+     "value": "a8451eeda314d0568b5340498b36edf147a8f0d692c5ff58082d477abe9146e4"
+    },
+    "8.2.1": {
+     "value": "a8451eeda314d0568b5340498b36edf147a8f0d692c5ff58082d477abe9146e4"
+    },
+    "8.3": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.3-rc-1": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.3-rc-2": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.3-rc-3": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.3-rc-4": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.4": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.4-rc-1": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.4-rc-2": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.4-rc-3": {
+     "value": "0336f591bc0ec9aa0c9988929b93ecc916b3c1d52aed202c7381db144aa0ef15"
+    },
+    "8.5": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.5-rc-1": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.5-rc-2": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.5-rc-3": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.5-rc-4": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.6": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.6-milestone-1": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.6-rc-1": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.6-rc-2": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.6-rc-3": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.6-rc-4": {
+     "value": "d3b261c2820e9e3d8d639ed084900f11f4a86050a8f83342ade7b6bc9b0d2bdd"
+    },
+    "8.7": {
+     "value": "cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8"
+    },
+    "8.7-rc-1": {
+     "value": "cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8"
+    },
+    "8.7-rc-2": {
+     "value": "cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8"
+    },
+    "8.7-rc-3": {
+     "value": "cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8"
+    },
+    "8.7-rc-4": {
+     "value": "cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8"
+    },
+    "8.8": {
+     "value": "cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8"
+    },
+    "8.8-rc-1": {
+     "value": "cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8"
+    },
+    "8.8-rc-2": {
+     "value": "cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8"
+    },
+    "8.9": {
+     "value": "498495120a03b9a6ab5d155f5de3c8f0d986a449153702fb80fc80e134484f17"
+    },
+    "8.9-rc-1": {
+     "value": "498495120a03b9a6ab5d155f5de3c8f0d986a449153702fb80fc80e134484f17"
+    },
+    "8.9-rc-2": {
+     "value": "498495120a03b9a6ab5d155f5de3c8f0d986a449153702fb80fc80e134484f17"
+    },
+    "9.0-milestone-1": {
+     "value": "9687bf4e8beb2c293cfd1393cbf2854ef68f921757302116033f476289abf7b0"
+    },
+    "9.0-milestone-2": {
+     "value": "c605ee1b011c0da3bc468735530c1d43ea3ede0fb8ce978b5479c7f688343ef5"
+    },
+    "9.0-milestone-3": {
+     "value": "c605ee1b011c0da3bc468735530c1d43ea3ede0fb8ce978b5479c7f688343ef5"
+    },
+    "9.0-milestone-4": {
+     "value": "c605ee1b011c0da3bc468735530c1d43ea3ede0fb8ce978b5479c7f688343ef5"
+    },
+    "9.0-milestone-5": {
+     "value": "c605ee1b011c0da3bc468735530c1d43ea3ede0fb8ce978b5479c7f688343ef5"
+    },
+    "9.0-milestone-6": {
+     "value": "f98ed44dd3f067fa699b5c34661be67c7f0097ea58b0017255141a08d2eb5f87"
+    },
+    "9.0-milestone-7": {
+     "value": "f98ed44dd3f067fa699b5c34661be67c7f0097ea58b0017255141a08d2eb5f87"
+    },
+    "9.0.0": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.0.0-milestone-10": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.0.0-milestone-8": {
+     "value": "f98ed44dd3f067fa699b5c34661be67c7f0097ea58b0017255141a08d2eb5f87"
+    },
+    "9.0.0-milestone-9": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.0.0-rc-1": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.0.0-rc-2": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.0.0-rc-3": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.0.0-rc-4": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.1.0": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.1.0-rc-1": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.1.0-rc-2": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.1.0-rc-3": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.1.0-rc-4": {
+     "value": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    "9.2.0": {
+     "value": "423cb469ccc0ecc31f0e4e1c309976198ccb734cdcbb7029d4bda0f18f57e8d9"
+    },
+    "9.2.0-milestone-1": {
+     "value": "423cb469ccc0ecc31f0e4e1c309976198ccb734cdcbb7029d4bda0f18f57e8d9"
+    },
+    "9.2.0-milestone-2": {
+     "value": "423cb469ccc0ecc31f0e4e1c309976198ccb734cdcbb7029d4bda0f18f57e8d9"
+    },
+    "9.2.0-rc-1": {
+     "value": "423cb469ccc0ecc31f0e4e1c309976198ccb734cdcbb7029d4bda0f18f57e8d9"
+    },
+    "9.2.0-rc-2": {
+     "value": "423cb469ccc0ecc31f0e4e1c309976198ccb734cdcbb7029d4bda0f18f57e8d9"
+    },
+    "9.2.0-rc-3": {
+     "value": "423cb469ccc0ecc31f0e4e1c309976198ccb734cdcbb7029d4bda0f18f57e8d9"
+    },
+    "9.2.1": {
+     "value": "423cb469ccc0ecc31f0e4e1c309976198ccb734cdcbb7029d4bda0f18f57e8d9"
+    },
+    "9.3.0": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.3.0-milestone-1": {
+     "value": "d652a0436e78e0cd4d00f52057fcf2179163762a71a02370ec7623ab8f84c334"
+    },
+    "9.3.0-milestone-2": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.3.0-rc-1": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.3.0-rc-2": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.3.0-rc-3": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.3.1": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.4.0": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.4.0-milestone-1": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.4.0-milestone-2": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.4.0-milestone-3": {
+     "value": "b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13"
+    },
+    "9.4.0-milestone-4": {
+     "value": "08f6dc44dc11cd44fdf485274f3262acd459acbcbc3c1160da2d530cecc9d1ad"
+    },
+    "9.4.0-milestone-5": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.4.0-rc-1": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.4.0-rc-2": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.4.1": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.5.0": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.5.0-milestone-1": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.5.0-milestone-2": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.5.0-milestone-3": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.5.0-milestone-4": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.5.0-milestone-5": {
+     "value": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+    },
+    "9.5.0-milestone-6": {
+     "value": "7ef3d73bd95c047814d76ec8324f72deefb96593eb9ce87aa06ecdcdaba7ffe8"
+    },
+    "9.5.0-milestone-7": {
+     "value": "7ef3d73bd95c047814d76ec8324f72deefb96593eb9ce87aa06ecdcdaba7ffe8"
+    },
+    "9.5.0-rc-1": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.5.0-rc-2": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.5.0-rc-3": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.5.0-rc-4": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.5.1": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.6.0": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.6.0-milestone-1": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.6.0-milestone-2": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.6.0-milestone-3": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.6.0-rc-1": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.6.0-rc-2": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.6.0-rc-3": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.6.1": {
+     "value": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+    },
+    "9.7.0": {
+     "value": "7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+    },
+    "9.7.0-milestone-1": {
+     "value": "8a23bf708fd4e02674e77fb34b0fa7c02f0d53c2ad377385ab507422313d26d1"
+    },
+    "9.7.0-milestone-2": {
+     "value": "7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+    },
+    "9.7.0-milestone-3": {
+     "value": "7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+    },
+    "9.7.0-rc-1": {
+     "value": "7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+    },
+    "9.7.0-rc-2": {
+     "value": "7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+    },
+    "9.7.0-rc-3": {
+     "value": "7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+    },
+    "9.7.1": {
+     "value": "7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+    },
+    "9.8.0": {
+     "value": "238e777fcddd7e34f9708186085def2abd6e08e658505b38718d79d74c21abd5"
+    },
+    "9.8.0-milestone-1": {
+     "value": "2b2e2cee3d8a8e5379b4f1c5902419404e83c1dba5ff55192ad5986e3f44cd6e"
+    },
+    "9.8.0-milestone-2": {
+     "value": "2b2e2cee3d8a8e5379b4f1c5902419404e83c1dba5ff55192ad5986e3f44cd6e"
+    },
+    "9.8.0-rc-1": {
+     "value": "238e777fcddd7e34f9708186085def2abd6e08e658505b38718d79d74c21abd5"
+    },
+    "9.8.0-rc-2": {
+     "value": "238e777fcddd7e34f9708186085def2abd6e08e658505b38718d79d74c21abd5"
+    },
+    "9.8.0-rc-3": {
+     "value": "238e777fcddd7e34f9708186085def2abd6e08e658505b38718d79d74c21abd5"
+    },
+    "9.8.1": {
+     "value": "3b8a25775a69158b5ad2b1d17a80a88dc7b40a352a73eb27d06c612a7ce68e98"
+    },
+    "9.8.2": {
+     "value": "3b8a25775a69158b5ad2b1d17a80a88dc7b40a352a73eb27d06c612a7ce68e98"
+    },
+    "9.9.0-milestone-1": {
+     "value": "238e777fcddd7e34f9708186085def2abd6e08e658505b38718d79d74c21abd5"
+    },
+    "9.9.0-milestone-2": {
+     "value": "238e777fcddd7e34f9708186085def2abd6e08e658505b38718d79d74c21abd5"
+    }
+   }
+  },
+  "GRADLE_WRAPPER_CHECKSUMS_DATE": {
+   "value": "2026-10-20"
+  },
+  "GRADLE_WRAPPER_CHECKSUMS_SOURCE": {
+   "value": "gradle/actions sources/src/wrapper-validation/wrapper-checksums.json at 1cff18a4cfab5cd8d4c49a8ccf11c1ad18bb30b9 (2026-10-20, \"Update known wrapper checksums (#1075)\"; MIT License), read 2026-10-21"
+  },
+  "GRADLE_WRAPPER_MAX_BYTES": {
+   "value": 1048576
+  },
+  "GRADLE_WRAPPER_NO_CHECKSUM": {
    "set": [
-    ".bdf",
-    ".eot",
-    ".otf",
-    ".pcf",
-    ".pfb",
-    ".ttc",
-    ".ttf",
-    ".woff",
-    ".woff2"
+    "0.7",
+    "0.8",
+    "0.9",
+    "0.9.1",
+    "0.9.2",
+    "3.3",
+    "3.3-rc-1",
+    "3.4",
+    "3.4-rc-1",
+    "3.4-rc-2",
+    "3.4-rc-3",
+    "3.4.1",
+    "3.5",
+    "3.5-rc-1",
+    "3.5-rc-2",
+    "3.5-rc-3",
+    "3.5.1",
+    "4.0",
+    "4.0-milestone-1",
+    "4.0-milestone-2",
+    "4.0-rc-1",
+    "4.0-rc-2",
+    "4.0-rc-3",
+    "4.0.1",
+    "4.0.2"
    ]
   },
   "GYP_EXTS": {
@@ -694,6 +1791,15 @@
   "INSTALL_HOOK_RE": {
    "flags": "i",
    "re": "curl|wget|iwr|Invoke-WebRequest|node\\s+-e|bash\\s+-c|sh\\s+-c|powershell|base64|\\beval\\b"
+  },
+  "KEYSTORE_ELEMENT_MAX_BYTES": {
+   "value": 16384
+  },
+  "KEYSTORE_MAX_BYTES": {
+   "value": 4194304
+  },
+  "KEYSTORE_OPAQUE_MAX_BYTES": {
+   "value": 1048576
   },
   "LAZARET_INFORMATION_URI": {
    "value": "https://lazaret.dev"
@@ -949,11 +2055,1090 @@
   "PACKAGE_CODE_CHARS": {
    "value": 300000000
   },
+  "PICKLE_CODE_ATTRS": {
+   "set": [
+    "__base__",
+    "__bases__",
+    "__builtin__",
+    "__builtins__",
+    "__call__",
+    "__class__",
+    "__closure__",
+    "__code__",
+    "__delattr__",
+    "__dict__",
+    "__func__",
+    "__get__",
+    "__getattr__",
+    "__getattribute__",
+    "__globals__",
+    "__import__",
+    "__init__",
+    "__loader__",
+    "__mro__",
+    "__new__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__self__",
+    "__setattr__",
+    "__spec__",
+    "__subclasses__",
+    "__wrapped__",
+    "builtins",
+    "check_output",
+    "ctypes",
+    "eval",
+    "exec",
+    "execfile",
+    "getoutput",
+    "importlib",
+    "marshal",
+    "nt",
+    "os",
+    "pickle",
+    "popen",
+    "posix",
+    "pty",
+    "runpy",
+    "shutil",
+    "socket",
+    "subprocess",
+    "sys",
+    "system",
+    "webbrowser"
+   ]
+  },
+  "PICKLE_CODE_GLOBALS": {
+   "set": [
+    "_io.FileIO",
+    "_io.open",
+    "_io.open_code",
+    "_operator.attrgetter",
+    "_operator.call",
+    "_operator.methodcaller",
+    "builtins.__build_class__",
+    "builtins.__import__",
+    "builtins.apply",
+    "builtins.breakpoint",
+    "builtins.compile",
+    "builtins.delattr",
+    "builtins.eval",
+    "builtins.exec",
+    "builtins.execfile",
+    "builtins.exit",
+    "builtins.file",
+    "builtins.filter",
+    "builtins.getattr",
+    "builtins.globals",
+    "builtins.help",
+    "builtins.input",
+    "builtins.iter",
+    "builtins.locals",
+    "builtins.map",
+    "builtins.max",
+    "builtins.min",
+    "builtins.next",
+    "builtins.open",
+    "builtins.quit",
+    "builtins.reload",
+    "builtins.setattr",
+    "builtins.sorted",
+    "builtins.vars",
+    "codecs.open",
+    "codecs.register",
+    "copyreg.add_extension",
+    "copyreg.pickle",
+    "copyreg.remove_extension",
+    "functools.reduce",
+    "io.FileIO",
+    "io.open",
+    "io.open_code",
+    "joblib.dump",
+    "joblib.load",
+    "joblib.numpy_pickle.dump",
+    "joblib.numpy_pickle.load",
+    "logging.FileHandler",
+    "numpy.fromfile",
+    "numpy.lib.npyio.load",
+    "numpy.load",
+    "numpy.loads",
+    "numpy.save",
+    "numpy.savetxt",
+    "operator.attrgetter",
+    "operator.call",
+    "operator.methodcaller",
+    "pandas.read_pickle",
+    "torch.jit.load",
+    "torch.load",
+    "torch.serialization._legacy_load",
+    "torch.serialization._load",
+    "torch.serialization.load",
+    "types.CodeType",
+    "types.FunctionType",
+    "types.LambdaType",
+    "types.MethodType",
+    "types.ModuleType",
+    "types.new_class",
+    "uuid._get_command_stdout",
+    "weakref.finalize"
+   ]
+  },
+  "PICKLE_CODE_MODULES": {
+   "set": [
+    "_ctypes",
+    "_pickle",
+    "_posixsubprocess",
+    "_signal",
+    "_socket",
+    "_thread",
+    "aiohttp",
+    "asyncio",
+    "atexit",
+    "bdb",
+    "cProfile",
+    "cffi",
+    "cloudpickle",
+    "code",
+    "codeop",
+    "commands",
+    "compileall",
+    "concurrent",
+    "ctypes",
+    "dbm",
+    "dill",
+    "distutils",
+    "docker",
+    "doctest",
+    "ensurepip",
+    "fabric",
+    "fileinput",
+    "ftplib",
+    "git",
+    "glob",
+    "http.client",
+    "http.cookiejar",
+    "http.server",
+    "httpx",
+    "hydra",
+    "idlelib",
+    "imaplib",
+    "imp",
+    "importlib",
+    "invoke",
+    "itertools",
+    "jsonpickle",
+    "logging.config",
+    "logging.handlers",
+    "marshal",
+    "multiprocessing",
+    "nntplib",
+    "nt",
+    "ntpath",
+    "numpy.distutils",
+    "numpy.f2py",
+    "numpy.testing",
+    "os",
+    "pandas.io.pickle",
+    "paramiko",
+    "pdb",
+    "pexpect",
+    "pickle",
+    "pip",
+    "pipes",
+    "pkgutil",
+    "platform",
+    "plumbum",
+    "popen2",
+    "poplib",
+    "posix",
+    "posixpath",
+    "profile",
+    "pty",
+    "py_compile",
+    "pydoc",
+    "requests",
+    "resource",
+    "ruamel",
+    "runpy",
+    "sched",
+    "select",
+    "selectors",
+    "setuptools",
+    "sh",
+    "shelve",
+    "shutil",
+    "signal",
+    "site",
+    "smtplib",
+    "socket",
+    "socketserver",
+    "sqlite3",
+    "ssl",
+    "subprocess",
+    "sys",
+    "telnetlib",
+    "tempfile",
+    "threading",
+    "timeit",
+    "torch._dynamo",
+    "torch._inductor",
+    "torch.distributed",
+    "torch.hub",
+    "torch.jit.unsupported_tensor_ops",
+    "torch.package",
+    "torch.utils.collect_env",
+    "torch.utils.cpp_extension",
+    "torch.utils.data.datapipes.utils.decoder",
+    "trace",
+    "transformers.dynamic_module_utils",
+    "unittest.mock",
+    "urllib.request",
+    "urllib2",
+    "urllib3",
+    "venv",
+    "webbrowser",
+    "xmlrpc",
+    "yaml",
+    "zipimport"
+   ]
+  },
+  "PICKLE_DATA_GLOBALS": {
+   "set": [
+    "http.HTTPMethod",
+    "http.HTTPStatus",
+    "nt.stat_result",
+    "nt.terminal_size",
+    "nt.times_result",
+    "os.stat_result",
+    "os.statvfs_result",
+    "os.terminal_size",
+    "os.times_result",
+    "platform.uname_result",
+    "posix.stat_result",
+    "posix.statvfs_result",
+    "posix.terminal_size",
+    "posix.times_result",
+    "resource.struct_rusage",
+    "signal.Handlers",
+    "signal.Sigmasks",
+    "signal.Signals",
+    "socket.AddressFamily",
+    "socket.AddressInfo",
+    "socket.MsgFlag",
+    "socket.SocketKind",
+    "ssl.AlertDescription",
+    "ssl.Options",
+    "ssl.Purpose",
+    "ssl.SSLErrorNumber",
+    "ssl.TLSVersion",
+    "ssl.VerifyFlags",
+    "ssl.VerifyMode",
+    "ssl._ASN1Object",
+    "ssl._SSLMethod",
+    "subprocess.CalledProcessError",
+    "subprocess.CompletedProcess",
+    "subprocess.SubprocessError",
+    "subprocess.TimeoutExpired",
+    "time.struct_time"
+   ]
+  },
+  "PICKLE_DATA_MEMBERS": {
+   "set": [
+    "signal.CTRL_BREAK_EVENT",
+    "signal.CTRL_C_EVENT",
+    "signal.SIGABRT",
+    "signal.SIGALRM",
+    "signal.SIGBREAK",
+    "signal.SIGBUS",
+    "signal.SIGCHLD",
+    "signal.SIGCLD",
+    "signal.SIGCONT",
+    "signal.SIGEMT",
+    "signal.SIGFPE",
+    "signal.SIGHUP",
+    "signal.SIGILL",
+    "signal.SIGINFO",
+    "signal.SIGINT",
+    "signal.SIGIO",
+    "signal.SIGIOT",
+    "signal.SIGKILL",
+    "signal.SIGPIPE",
+    "signal.SIGPOLL",
+    "signal.SIGPROF",
+    "signal.SIGPWR",
+    "signal.SIGQUIT",
+    "signal.SIGRTMAX",
+    "signal.SIGRTMIN",
+    "signal.SIGSEGV",
+    "signal.SIGSTKFLT",
+    "signal.SIGSTOP",
+    "signal.SIGSYS",
+    "signal.SIGTERM",
+    "signal.SIGTRAP",
+    "signal.SIGTSTP",
+    "signal.SIGTTIN",
+    "signal.SIGTTOU",
+    "signal.SIGURG",
+    "signal.SIGUSR1",
+    "signal.SIGUSR2",
+    "signal.SIGVTALRM",
+    "signal.SIGWINCH",
+    "signal.SIGXCPU",
+    "signal.SIGXFSZ",
+    "signal.SIG_BLOCK",
+    "signal.SIG_DFL",
+    "signal.SIG_IGN",
+    "signal.SIG_SETMASK",
+    "signal.SIG_UNBLOCK",
+    "socket.AF_AAL5",
+    "socket.AF_ALG",
+    "socket.AF_APPLETALK",
+    "socket.AF_ASH",
+    "socket.AF_ATMPVC",
+    "socket.AF_ATMSVC",
+    "socket.AF_AX25",
+    "socket.AF_BLUETOOTH",
+    "socket.AF_BRIDGE",
+    "socket.AF_CAN",
+    "socket.AF_DIVERT",
+    "socket.AF_ECONET",
+    "socket.AF_HYPERV",
+    "socket.AF_INET",
+    "socket.AF_INET6",
+    "socket.AF_IPX",
+    "socket.AF_IRDA",
+    "socket.AF_KEY",
+    "socket.AF_LINK",
+    "socket.AF_LLC",
+    "socket.AF_NETBEUI",
+    "socket.AF_NETLINK",
+    "socket.AF_NETROM",
+    "socket.AF_PACKET",
+    "socket.AF_PPPOX",
+    "socket.AF_QIPCRTR",
+    "socket.AF_RDS",
+    "socket.AF_ROSE",
+    "socket.AF_ROUTE",
+    "socket.AF_SECURITY",
+    "socket.AF_SNA",
+    "socket.AF_SYSTEM",
+    "socket.AF_TIPC",
+    "socket.AF_UNIX",
+    "socket.AF_UNSPEC",
+    "socket.AF_VSOCK",
+    "socket.AF_WANPIPE",
+    "socket.AF_X25",
+    "socket.AI_ADDRCONFIG",
+    "socket.AI_ALL",
+    "socket.AI_CANONNAME",
+    "socket.AI_DEFAULT",
+    "socket.AI_MASK",
+    "socket.AI_NUMERICHOST",
+    "socket.AI_NUMERICSERV",
+    "socket.AI_PASSIVE",
+    "socket.AI_V4MAPPED",
+    "socket.AI_V4MAPPED_CFG",
+    "socket.MSG_BCAST",
+    "socket.MSG_BTAG",
+    "socket.MSG_CMSG_CLOEXEC",
+    "socket.MSG_CONFIRM",
+    "socket.MSG_CTRUNC",
+    "socket.MSG_DONTROUTE",
+    "socket.MSG_DONTWAIT",
+    "socket.MSG_EOF",
+    "socket.MSG_EOR",
+    "socket.MSG_ERRQUEUE",
+    "socket.MSG_ETAG",
+    "socket.MSG_FASTOPEN",
+    "socket.MSG_MCAST",
+    "socket.MSG_MORE",
+    "socket.MSG_NOSIGNAL",
+    "socket.MSG_NOTIFICATION",
+    "socket.MSG_OOB",
+    "socket.MSG_PEEK",
+    "socket.MSG_TRUNC",
+    "socket.MSG_WAITALL",
+    "socket.SOCK_CLOEXEC",
+    "socket.SOCK_DGRAM",
+    "socket.SOCK_NONBLOCK",
+    "socket.SOCK_RAW",
+    "socket.SOCK_RDM",
+    "socket.SOCK_SEQPACKET",
+    "socket.SOCK_STREAM",
+    "ssl.ALERT_DESCRIPTION_ACCESS_DENIED",
+    "ssl.ALERT_DESCRIPTION_BAD_CERTIFICATE",
+    "ssl.ALERT_DESCRIPTION_BAD_CERTIFICATE_HASH_VALUE",
+    "ssl.ALERT_DESCRIPTION_BAD_CERTIFICATE_STATUS_RESPONSE",
+    "ssl.ALERT_DESCRIPTION_BAD_RECORD_MAC",
+    "ssl.ALERT_DESCRIPTION_CERTIFICATE_EXPIRED",
+    "ssl.ALERT_DESCRIPTION_CERTIFICATE_REVOKED",
+    "ssl.ALERT_DESCRIPTION_CERTIFICATE_UNKNOWN",
+    "ssl.ALERT_DESCRIPTION_CERTIFICATE_UNOBTAINABLE",
+    "ssl.ALERT_DESCRIPTION_CLOSE_NOTIFY",
+    "ssl.ALERT_DESCRIPTION_DECODE_ERROR",
+    "ssl.ALERT_DESCRIPTION_DECOMPRESSION_FAILURE",
+    "ssl.ALERT_DESCRIPTION_DECRYPT_ERROR",
+    "ssl.ALERT_DESCRIPTION_HANDSHAKE_FAILURE",
+    "ssl.ALERT_DESCRIPTION_ILLEGAL_PARAMETER",
+    "ssl.ALERT_DESCRIPTION_INSUFFICIENT_SECURITY",
+    "ssl.ALERT_DESCRIPTION_INTERNAL_ERROR",
+    "ssl.ALERT_DESCRIPTION_NO_RENEGOTIATION",
+    "ssl.ALERT_DESCRIPTION_PROTOCOL_VERSION",
+    "ssl.ALERT_DESCRIPTION_RECORD_OVERFLOW",
+    "ssl.ALERT_DESCRIPTION_UNEXPECTED_MESSAGE",
+    "ssl.ALERT_DESCRIPTION_UNKNOWN_CA",
+    "ssl.ALERT_DESCRIPTION_UNKNOWN_PSK_IDENTITY",
+    "ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME",
+    "ssl.ALERT_DESCRIPTION_UNSUPPORTED_CERTIFICATE",
+    "ssl.ALERT_DESCRIPTION_UNSUPPORTED_EXTENSION",
+    "ssl.ALERT_DESCRIPTION_USER_CANCELLED",
+    "ssl.CERT_NONE",
+    "ssl.CERT_OPTIONAL",
+    "ssl.CERT_REQUIRED",
+    "ssl.OP_ALL",
+    "ssl.OP_CIPHER_SERVER_PREFERENCE",
+    "ssl.OP_ENABLE_KTLS",
+    "ssl.OP_ENABLE_MIDDLEBOX_COMPAT",
+    "ssl.OP_IGNORE_UNEXPECTED_EOF",
+    "ssl.OP_LEGACY_SERVER_CONNECT",
+    "ssl.OP_NO_COMPRESSION",
+    "ssl.OP_NO_RENEGOTIATION",
+    "ssl.OP_NO_SSLv2",
+    "ssl.OP_NO_SSLv3",
+    "ssl.OP_NO_TICKET",
+    "ssl.OP_NO_TLSv1",
+    "ssl.OP_NO_TLSv1_1",
+    "ssl.OP_NO_TLSv1_2",
+    "ssl.OP_NO_TLSv1_3",
+    "ssl.OP_SINGLE_DH_USE",
+    "ssl.OP_SINGLE_ECDH_USE",
+    "ssl.PROTOCOL_SSLv2",
+    "ssl.PROTOCOL_SSLv23",
+    "ssl.PROTOCOL_SSLv3",
+    "ssl.PROTOCOL_TLS",
+    "ssl.PROTOCOL_TLS_CLIENT",
+    "ssl.PROTOCOL_TLS_SERVER",
+    "ssl.PROTOCOL_TLSv1",
+    "ssl.PROTOCOL_TLSv1_1",
+    "ssl.PROTOCOL_TLSv1_2",
+    "ssl.Purpose.CLIENT_AUTH",
+    "ssl.Purpose.SERVER_AUTH",
+    "ssl.SSL_ERROR_EOF",
+    "ssl.SSL_ERROR_INVALID_ERROR_CODE",
+    "ssl.SSL_ERROR_SSL",
+    "ssl.SSL_ERROR_SYSCALL",
+    "ssl.SSL_ERROR_WANT_CONNECT",
+    "ssl.SSL_ERROR_WANT_READ",
+    "ssl.SSL_ERROR_WANT_WRITE",
+    "ssl.SSL_ERROR_WANT_X509_LOOKUP",
+    "ssl.SSL_ERROR_ZERO_RETURN",
+    "ssl.TLSVersion.MAXIMUM_SUPPORTED",
+    "ssl.TLSVersion.MINIMUM_SUPPORTED",
+    "ssl.TLSVersion.SSLv3",
+    "ssl.TLSVersion.TLSv1",
+    "ssl.TLSVersion.TLSv1_1",
+    "ssl.TLSVersion.TLSv1_2",
+    "ssl.TLSVersion.TLSv1_3",
+    "ssl.VERIFY_ALLOW_PROXY_CERTS",
+    "ssl.VERIFY_CRL_CHECK_CHAIN",
+    "ssl.VERIFY_CRL_CHECK_LEAF",
+    "ssl.VERIFY_DEFAULT",
+    "ssl.VERIFY_X509_PARTIAL_CHAIN",
+    "ssl.VERIFY_X509_STRICT",
+    "ssl.VERIFY_X509_TRUSTED_FIRST"
+   ]
+  },
+  "PICKLE_EXTS": {
+   "set": [
+    ".joblib",
+    ".pck",
+    ".pcl",
+    ".pickle",
+    ".pkl"
+   ]
+  },
+  "PICKLE_MAX_DIRECTORY": {
+   "value": 16000000
+  },
+  "PICKLE_MAX_ENTRIES": {
+   "value": 100000
+  },
+  "PICKLE_MAX_FINDINGS": {
+   "value": 20
+  },
+  "PICKLE_MAX_INFLATED": {
+   "value": 64000000
+  },
+  "PICKLE_MAX_PICKLES": {
+   "value": 64
+  },
+  "PICKLE_MAX_READS": {
+   "value": 8
+  },
+  "PICKLE_MODULE_ALIASES": {
+   "map": {
+    "BaseHTTPServer": {
+     "value": "http.server"
+    },
+    "CGIHTTPServer": {
+     "value": "http.server"
+    },
+    "ConfigParser": {
+     "value": "configparser"
+    },
+    "Cookie": {
+     "value": "http.cookies"
+    },
+    "DocXMLRPCServer": {
+     "value": "xmlrpc.server"
+    },
+    "HTMLParser": {
+     "value": "html.parser"
+    },
+    "Queue": {
+     "value": "queue"
+    },
+    "SimpleHTTPServer": {
+     "value": "http.server"
+    },
+    "SimpleXMLRPCServer": {
+     "value": "xmlrpc.server"
+    },
+    "SocketServer": {
+     "value": "socketserver"
+    },
+    "StringIO": {
+     "value": "io"
+    },
+    "Tkinter": {
+     "value": "tkinter"
+    },
+    "UserDict": {
+     "value": "collections"
+    },
+    "UserList": {
+     "value": "collections"
+    },
+    "UserString": {
+     "value": "collections"
+    },
+    "__builtin__": {
+     "value": "builtins"
+    },
+    "_abcoll": {
+     "value": "collections.abc"
+    },
+    "_elementtree": {
+     "value": "xml.etree.ElementTree"
+    },
+    "_winreg": {
+     "value": "winreg"
+    },
+    "anydbm": {
+     "value": "dbm"
+    },
+    "cPickle": {
+     "value": "pickle"
+    },
+    "cStringIO": {
+     "value": "io"
+    },
+    "commands": {
+     "value": "subprocess"
+    },
+    "cookielib": {
+     "value": "http.cookiejar"
+    },
+    "copy_reg": {
+     "value": "copyreg"
+    },
+    "dbhash": {
+     "value": "dbm.bsd"
+    },
+    "dumbdbm": {
+     "value": "dbm.dumb"
+    },
+    "dummy_thread": {
+     "value": "_dummy_thread"
+    },
+    "exceptions": {
+     "value": "builtins"
+    },
+    "gdbm": {
+     "value": "dbm.gnu"
+    },
+    "htmlentitydefs": {
+     "value": "html.entities"
+    },
+    "httplib": {
+     "value": "http.client"
+    },
+    "markupbase": {
+     "value": "_markupbase"
+    },
+    "repr": {
+     "value": "reprlib"
+    },
+    "robotparser": {
+     "value": "urllib.robotparser"
+    },
+    "test.test_support": {
+     "value": "test.support"
+    },
+    "thread": {
+     "value": "_thread"
+    },
+    "torch.tensor": {
+     "value": "torch._tensor"
+    },
+    "urllib2": {
+     "value": "urllib.request"
+    },
+    "urlparse": {
+     "value": "urllib.parse"
+    },
+    "whichdb": {
+     "value": "dbm"
+    },
+    "xmlrpclib": {
+     "value": "xmlrpc.client"
+    }
+   }
+  },
+  "PICKLE_NAME_ALIASES": {
+   "map": {
+    "UserDict.IterableUserDict": {
+     "value": "collections.UserDict"
+    },
+    "__builtin__.basestring": {
+     "value": "builtins.str"
+    },
+    "__builtin__.intern": {
+     "value": "sys.intern"
+    },
+    "__builtin__.long": {
+     "value": "builtins.int"
+    },
+    "__builtin__.raw_input": {
+     "value": "builtins.input"
+    },
+    "__builtin__.reduce": {
+     "value": "functools.reduce"
+    },
+    "__builtin__.unichr": {
+     "value": "builtins.chr"
+    },
+    "__builtin__.unicode": {
+     "value": "builtins.str"
+    },
+    "__builtin__.xrange": {
+     "value": "builtins.range"
+    },
+    "_socket.fromfd": {
+     "value": "socket.fromfd"
+    },
+    "itertools.ifilter": {
+     "value": "builtins.filter"
+    },
+    "itertools.imap": {
+     "value": "builtins.map"
+    },
+    "itertools.izip": {
+     "value": "builtins.zip"
+    },
+    "multiprocessing.forking.Popen": {
+     "value": "multiprocessing.popen_fork.Popen"
+    },
+    "multiprocessing.process.Process": {
+     "value": "multiprocessing.context.Process"
+    },
+    "urllib.quote": {
+     "value": "urllib.parse.quote"
+    },
+    "urllib.unquote": {
+     "value": "urllib.parse.unquote"
+    },
+    "urllib.urlcleanup": {
+     "value": "urllib.request.urlcleanup"
+    },
+    "urllib.urlencode": {
+     "value": "urllib.parse.urlencode"
+    },
+    "urllib.urlopen": {
+     "value": "urllib.request.urlopen"
+    },
+    "urllib.urlretrieve": {
+     "value": "urllib.request.urlretrieve"
+    }
+   }
+  },
+  "PICKLE_SAFE_GLOBALS": {
+   "set": [
+    "_codecs.encode",
+    "_operator.getitem",
+    "argparse.Namespace",
+    "array._array_reconstructor",
+    "array.array",
+    "builtins.Ellipsis",
+    "builtins.NotImplemented",
+    "builtins.bool",
+    "builtins.bytearray",
+    "builtins.bytes",
+    "builtins.chr",
+    "builtins.complex",
+    "builtins.dict",
+    "builtins.float",
+    "builtins.frozenset",
+    "builtins.int",
+    "builtins.list",
+    "builtins.object",
+    "builtins.range",
+    "builtins.set",
+    "builtins.slice",
+    "builtins.str",
+    "builtins.tuple",
+    "builtins.type",
+    "codecs.encode",
+    "collections.ChainMap",
+    "collections.Counter",
+    "collections.OrderedDict",
+    "collections.UserDict",
+    "collections.UserList",
+    "collections.UserString",
+    "collections.defaultdict",
+    "collections.deque",
+    "copyreg.__newobj__",
+    "copyreg.__newobj_ex__",
+    "copyreg._reconstructor",
+    "datetime.date",
+    "datetime.datetime",
+    "datetime.time",
+    "datetime.timedelta",
+    "datetime.timezone",
+    "dateutil.tz.tz.tzfile",
+    "dateutil.tz.tz.tzlocal",
+    "dateutil.tz.tz.tzoffset",
+    "dateutil.tz.tz.tzrange",
+    "dateutil.tz.tz.tzstr",
+    "dateutil.tz.tz.tzutc",
+    "dateutil.tz.win.tzwin",
+    "dateutil.tz.win.tzwinlocal",
+    "decimal.Decimal",
+    "fractions.Fraction",
+    "functools.partial",
+    "joblib.numpy_pickle.NumpyArrayWrapper",
+    "joblib.numpy_pickle_compat.NDArrayWrapper",
+    "joblib.numpy_pickle_compat.ZNDArrayWrapper",
+    "logging.getLogger",
+    "numpy._core._DType_reconstruct",
+    "numpy._core._internal._reconstruct",
+    "numpy._core._ufunc_reconstruct",
+    "numpy._core.multiarray._reconstruct",
+    "numpy._core.multiarray.scalar",
+    "numpy._core.numeric._frombuffer",
+    "numpy.core._DType_reconstruct",
+    "numpy.core._internal._reconstruct",
+    "numpy.core._ufunc_reconstruct",
+    "numpy.core.multiarray._reconstruct",
+    "numpy.core.multiarray.scalar",
+    "numpy.core.numeric._frombuffer",
+    "numpy.dtype",
+    "numpy.ma.core.MaskedArray",
+    "numpy.ma.core._mareconstruct",
+    "numpy.ndarray",
+    "numpy.random._pickle.__bit_generator_ctor",
+    "numpy.random._pickle.__generator_ctor",
+    "numpy.random._pickle.__randomstate_ctor",
+    "numpy.random.bit_generator.__pyx_unpickle_SeedSequence",
+    "operator.getitem",
+    "pandas.core.arrays.arrow.extension_types.ArrowIntervalType.__arrow_ext_deserialize__",
+    "pandas.core.arrays.arrow.extension_types.ArrowPeriodType.__arrow_ext_deserialize__",
+    "pathlib.Path",
+    "pathlib.PosixPath",
+    "pathlib.PurePath",
+    "pathlib.PurePosixPath",
+    "pathlib.PureWindowsPath",
+    "pathlib.WindowsPath",
+    "pathlib._local.Path",
+    "pathlib._local.PosixPath",
+    "pathlib._local.PurePath",
+    "pathlib._local.PurePosixPath",
+    "pathlib._local.PureWindowsPath",
+    "pathlib._local.WindowsPath",
+    "pyarrow.lib.DictionaryScalar._reconstruct",
+    "pyarrow.lib.KeyValueMetadata",
+    "pyarrow.lib._reconstruct_record_batch",
+    "pyarrow.lib._reconstruct_table",
+    "pyarrow.lib._restore_array",
+    "pyarrow.lib.binary",
+    "pyarrow.lib.bool8",
+    "pyarrow.lib.chunked_array",
+    "pyarrow.lib.decimal128",
+    "pyarrow.lib.decimal256",
+    "pyarrow.lib.decimal32",
+    "pyarrow.lib.decimal64",
+    "pyarrow.lib.dictionary",
+    "pyarrow.lib.field",
+    "pyarrow.lib.fixed_shape_tensor",
+    "pyarrow.lib.json_",
+    "pyarrow.lib.large_list",
+    "pyarrow.lib.large_list_view",
+    "pyarrow.lib.list_",
+    "pyarrow.lib.list_view",
+    "pyarrow.lib.map_",
+    "pyarrow.lib.opaque",
+    "pyarrow.lib.py_buffer",
+    "pyarrow.lib.run_end_encoded",
+    "pyarrow.lib.scalar",
+    "pyarrow.lib.schema",
+    "pyarrow.lib.struct",
+    "pyarrow.lib.timestamp",
+    "pyarrow.lib.type_for_alias",
+    "pyarrow.lib.union",
+    "pyarrow.lib.uuid",
+    "pytz.FixedOffset",
+    "pytz._UTC",
+    "pytz._p",
+    "re._compile",
+    "sklearn.externals.joblib.numpy_pickle.NumpyArrayWrapper",
+    "torch.BFloat16Storage",
+    "torch.BFloat16Tensor",
+    "torch.BoolStorage",
+    "torch.BoolTensor",
+    "torch.ByteStorage",
+    "torch.ByteTensor",
+    "torch.CharStorage",
+    "torch.CharTensor",
+    "torch.ComplexDoubleStorage",
+    "torch.ComplexFloatStorage",
+    "torch.DoubleStorage",
+    "torch.DoubleTensor",
+    "torch.FloatStorage",
+    "torch.FloatTensor",
+    "torch.HalfStorage",
+    "torch.HalfTensor",
+    "torch.IntStorage",
+    "torch.IntTensor",
+    "torch.LongStorage",
+    "torch.LongTensor",
+    "torch.QInt32Storage",
+    "torch.QInt8Storage",
+    "torch.QUInt2x4Storage",
+    "torch.QUInt4x2Storage",
+    "torch.QUInt8Storage",
+    "torch.ShortStorage",
+    "torch.ShortTensor",
+    "torch.Size",
+    "torch.Tensor",
+    "torch.TypedStorage",
+    "torch.UntypedStorage",
+    "torch._mkldnn",
+    "torch._tensor._rebuild_from_type",
+    "torch._tensor._rebuild_from_type_v2",
+    "torch._utils._rebuild_device_tensor_from_cpu_tensor",
+    "torch._utils._rebuild_device_tensor_from_numpy",
+    "torch._utils._rebuild_meta_tensor_no_storage",
+    "torch._utils._rebuild_nested_tensor",
+    "torch._utils._rebuild_parameter",
+    "torch._utils._rebuild_parameter_with_state",
+    "torch._utils._rebuild_qtensor",
+    "torch._utils._rebuild_sparse_tensor",
+    "torch._utils._rebuild_tensor",
+    "torch._utils._rebuild_tensor_v2",
+    "torch._utils._rebuild_tensor_v3",
+    "torch._utils._rebuild_wrapper_subclass",
+    "torch.bfloat16",
+    "torch.bits16",
+    "torch.bits1x8",
+    "torch.bits2x4",
+    "torch.bits4x2",
+    "torch.bits8",
+    "torch.bool",
+    "torch.cdouble",
+    "torch.cfloat",
+    "torch.chalf",
+    "torch.channels_last",
+    "torch.channels_last_3d",
+    "torch.complex128",
+    "torch.complex32",
+    "torch.complex64",
+    "torch.contiguous_format",
+    "torch.cuda.BFloat16Storage",
+    "torch.cuda.BFloat16Tensor",
+    "torch.cuda.BoolStorage",
+    "torch.cuda.BoolTensor",
+    "torch.cuda.ByteStorage",
+    "torch.cuda.ByteTensor",
+    "torch.cuda.CharStorage",
+    "torch.cuda.CharTensor",
+    "torch.cuda.ComplexDoubleStorage",
+    "torch.cuda.ComplexFloatStorage",
+    "torch.cuda.DoubleStorage",
+    "torch.cuda.DoubleTensor",
+    "torch.cuda.FloatStorage",
+    "torch.cuda.FloatTensor",
+    "torch.cuda.HalfStorage",
+    "torch.cuda.HalfTensor",
+    "torch.cuda.IntStorage",
+    "torch.cuda.IntTensor",
+    "torch.cuda.LongStorage",
+    "torch.cuda.LongTensor",
+    "torch.cuda.QInt32Storage",
+    "torch.cuda.QInt8Storage",
+    "torch.cuda.QUInt2x4Storage",
+    "torch.cuda.QUInt4x2Storage",
+    "torch.cuda.QUInt8Storage",
+    "torch.cuda.ShortStorage",
+    "torch.cuda.ShortTensor",
+    "torch.cuda.UntypedStorage",
+    "torch.device",
+    "torch.double",
+    "torch.float",
+    "torch.float16",
+    "torch.float32",
+    "torch.float4_e2m1fn_x2",
+    "torch.float64",
+    "torch.float8_e4m3fn",
+    "torch.float8_e4m3fnuz",
+    "torch.float8_e5m2",
+    "torch.float8_e5m2fnuz",
+    "torch.float8_e8m0fnu",
+    "torch.half",
+    "torch.int",
+    "torch.int1",
+    "torch.int16",
+    "torch.int2",
+    "torch.int3",
+    "torch.int32",
+    "torch.int4",
+    "torch.int5",
+    "torch.int6",
+    "torch.int64",
+    "torch.int7",
+    "torch.int8",
+    "torch.jagged",
+    "torch.jit._pickle.build_boollist",
+    "torch.jit._pickle.build_doublelist",
+    "torch.jit._pickle.build_intlist",
+    "torch.jit._pickle.build_tensor_from_id",
+    "torch.jit._pickle.build_tensorlist",
+    "torch.jit._pickle.restore_type_tag",
+    "torch.long",
+    "torch.nn.parameter.Buffer",
+    "torch.nn.parameter.Parameter",
+    "torch.per_channel_affine",
+    "torch.per_channel_affine_float_qparams",
+    "torch.per_channel_symmetric",
+    "torch.per_tensor_affine",
+    "torch.per_tensor_symmetric",
+    "torch.preserve_format",
+    "torch.qint32",
+    "torch.qint8",
+    "torch.quint2x4",
+    "torch.quint4x2",
+    "torch.quint8",
+    "torch.serialization._get_layout",
+    "torch.short",
+    "torch.sparse_bsc",
+    "torch.sparse_bsr",
+    "torch.sparse_coo",
+    "torch.sparse_csc",
+    "torch.sparse_csr",
+    "torch.storage.TypedStorage",
+    "torch.storage.UntypedStorage",
+    "torch.storage._load_from_bytes",
+    "torch.strided",
+    "torch.uint1",
+    "torch.uint16",
+    "torch.uint2",
+    "torch.uint3",
+    "torch.uint32",
+    "torch.uint4",
+    "torch.uint5",
+    "torch.uint6",
+    "torch.uint64",
+    "torch.uint7",
+    "torch.uint8",
+    "types.SimpleNamespace",
+    "uuid.SafeUUID",
+    "uuid.UUID",
+    "zoneinfo.ZoneInfo",
+    "zoneinfo.ZoneInfo._unpickle"
+   ]
+  },
+  "PICKLE_SAFE_PREFIXES": {
+   "list": [
+    {
+     "value": "__torch__."
+    }
+   ]
+  },
+  "PICKLE_STORAGE_SIZES": {
+   "map": {
+    "BFloat16Storage": {
+     "value": 2
+    },
+    "BoolStorage": {
+     "value": 1
+    },
+    "ByteStorage": {
+     "value": 1
+    },
+    "CharStorage": {
+     "value": 1
+    },
+    "ComplexDoubleStorage": {
+     "value": 16
+    },
+    "ComplexFloatStorage": {
+     "value": 8
+    },
+    "DoubleStorage": {
+     "value": 8
+    },
+    "FloatStorage": {
+     "value": 4
+    },
+    "HalfStorage": {
+     "value": 2
+    },
+    "IntStorage": {
+     "value": 4
+    },
+    "LongStorage": {
+     "value": 8
+    },
+    "QInt32Storage": {
+     "value": 4
+    },
+    "QInt8Storage": {
+     "value": 1
+    },
+    "QUInt2x4Storage": {
+     "value": 1
+    },
+    "QUInt4x2Storage": {
+     "value": 1
+    },
+    "QUInt8Storage": {
+     "value": 1
+    },
+    "ShortStorage": {
+     "value": 2
+    }
+   }
+  },
   "PREVIEW_MAX": {
    "value": 60
   },
   "PTH_EXT": {
    "value": ".pth"
+  },
+  "PTH_MAX_KEPT": {
+   "value": 16000000
+  },
+  "PTH_MAX_LINE": {
+   "value": 1000000
   },
   "PYCACHE_DIR": {
    "value": "__pycache__"
@@ -4853,6 +7038,46 @@
     }
    ]
   },
+  "UNWALKED_MAGIC": {
+   "list": [
+    {
+     "value": "%PDF"
+    },
+    {
+     "value": "\u00ffO\u00ffQ"
+    },
+    {
+     "value": "8BPS"
+    },
+    {
+     "value": "DDS "
+    },
+    {
+     "value": "%!PS"
+    },
+    {
+     "value": "\u00c5\u00d0\u00d3\u00c6"
+    },
+    {
+     "value": "gimp xcf"
+    },
+    {
+     "value": "\u0001\u00da"
+    },
+    {
+     "value": "Y\u00a6j\u0095"
+    },
+    {
+     "value": "SIMPLE  ="
+    },
+    {
+     "value": "qoif"
+    },
+    {
+     "value": "#?RADIANCE"
+    }
+   ]
+  },
   "USE_RISK_CHARS": {
    "value": 24000000
   },
@@ -4915,6 +7140,14 @@
      "value": ".go"
     }
    }
+  },
+  "ZIP_READ_EXTS": {
+   "set": [
+    ".apk",
+    ".ear",
+    ".jar",
+    ".war"
+   ]
   },
   "_AGENTDOC_ARCHIVE_RE": {
    "flags": "i",
@@ -5530,11 +7763,83 @@
   "_AUTORUN_WHY": {
    "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
   },
+  "_B64_DESCRIPTOR_CONSUMERS": {
+   "map": {
+    "createFileRegistry": {
+     "set": [
+      "@bufbuild/protobuf"
+     ]
+    },
+    "createMutableRegistry": {
+     "set": [
+      "@bufbuild/protobuf"
+     ]
+    },
+    "createRegistry": {
+     "set": [
+      "@bufbuild/protobuf"
+     ]
+    }
+   }
+  },
+  "_B64_DESCRIPTOR_LOADERS": {
+   "map": {
+    "enumDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    },
+    "extDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    },
+    "fileDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    },
+    "messageDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    },
+    "serviceDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    }
+   }
+  },
+  "_B64_DESCRIPTOR_UNREAD": {
+   "set": [
+    "Q-SYMLINK",
+    "Q-UNREADABLE",
+    "SC-TRUNCATED"
+   ]
+  },
   "_B64_PERIOD_MAX": {
    "value": 64
   },
   "_B64_PLAIN_MAX": {
    "value": 16384
+  },
+  "_B64_RESOLVER_CONFIGS": {
+   "set": [
+    ".babelrc",
+    ".babelrc.json",
+    ".swcrc",
+    "bunfig.toml",
+    "deno.json",
+    "deno.jsonc",
+    "import_map.json",
+    "importmap.json"
+   ]
   },
   "_B64_RULE": {
    "map": {
@@ -5563,6 +7868,18 @@
      "value": "Embedded encoded blobs can carry second-stage payloads."
     }
    }
+  },
+  "_B64_RUNNER_MODULES": {
+   "set": [
+    "child_process",
+    "cluster",
+    "inspector",
+    "module",
+    "repl",
+    "vm",
+    "wasi",
+    "worker_threads"
+   ]
   },
   "_B64_URL_LITERAL_RE": {
    "flags": "",
@@ -6483,8 +8800,25 @@
   "_DECODE_FLOW_MSG": {
    "value": "Decoded payload (assigned at line {line}) reaches a code-execution sink."
   },
+  "_DECODE_HOLE_ARG_RE": {
+   "flags": "",
+   "re": "\\s*(?:'\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\}'|\\\"\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\}\\\"|`\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\}`|\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\})\\s*(?:,\\s*['\\\"`]([\\w-]+)['\\\"`]\\s*)?\\)(?:\\s*\\.\\s*toString\\s*\\(\\s*(?:['\\\"`]utf-?8['\\\"`]\\s*)?\\))?\\s*\\)"
+  },
+  "_DECODE_JS_DECODER_RE": {
+   "flags": "",
+   "re": "(?:^|[^\\w$.])(?:(?:globalThis|window|self|global)\\s*\\.\\s*)?(atob|decodeURIComponent|unescape|Buffer\\s*\\.\\s*from)\\s*\\(\\s*$"
+  },
   "_DECODE_SAME_CALL_MSG": {
    "value": "Decoded payload reaches a code-execution sink in the same call."
+  },
+  "_DECODE_SEEN_MSG": {
+   "value": "Runs code this file writes itself (line {line}), encoded on the way and decoded here: the code is in sight, and read as code it is no supply-chain sign."
+  },
+  "_DECODE_SEEN_RISK_MSG": {
+   "value": "Runs code this file writes itself (line {line}), encoded on the way and decoded here; read as code, it {reasons}."
+  },
+  "_DECODE_SEEN_WHY": {
+   "value": "A script handed to a child process is often encoded to keep it out of the shell's quoting. What runs is text the file writes, which the scan reads as code (the install-script test, as for a hook's inline code); a decoded payload that is not in sight is what droppers run."
   },
   "_DECODE_SINK_RE": {
    "flags": "",
@@ -11767,9 +14101,23 @@
   "_EVAL_BY_NAME": {
    "value": "\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]"
   },
+  "_EVAL_CALL_RE": {
+   "flags": "",
+   "re": "\\b(?:eval|Function|exec|compile|getattr|globalThis|window|self|global|top|parent|frames|builtins|__builtins__)\\b|\\\\u(?:00[4-7][0-9A-Fa-f]|\\{0*[4-7][0-9A-Fa-f]\\})"
+  },
+  "_EVAL_DEPTH": {
+   "value": 4
+  },
+  "_EVAL_NOTE": {
+   "value": " (in a string it runs as code)"
+  },
   "_EXEC_CALL_RE": {
    "flags": "",
    "re": "\\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\\s*\\("
+  },
+  "_EXEC_PATCH_RE": {
+   "flags": "",
+   "re": "RegExp\\s*\\.\\s*prototype|\\.\\s*exec\\s*(?:\\*\\*|>>>|<<|>>|&&|\\|\\||\\?\\?|[-+*/%&|^])?=(?!=)|\\[\\s*['\\\"`]exec['\\\"`]\\s*\\]\\s*(?:\\*\\*|>>>|<<|>>|&&|\\|\\||\\?\\?|[-+*/%&|^])?=(?!=)|['\\\"`]exec['\\\"`]\\s*:|(?<![\\w$.])exec\\s*:(?!:)|[{,]\\s*exec\\s*[,}]|\\bdefineProperty\\s*\\([^;]{0,200}?['\\\"`]exec['\\\"`]|\\bdelete\\b[^;\\n]{0,120}\\bexec\\b"
   },
   "_EXFIL_SERVICES": {
    "value": "pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"
@@ -11883,19 +14231,6 @@
   "_FN_PY_DEF_RE": {
    "flags": "",
    "re": "^(\\s*)(?:async\\s+)?def\\s+(\\w+)"
-  },
-  "_FONT_MAGIC": {
-   "list": [
-    {
-     "value": "\u0000\u0001\u0000\u0000"
-    },
-    {
-     "value": "true"
-    },
-    {
-     "value": "typ1"
-    }
-   ]
   },
   "_FOR_NAME_RE": {
    "flags": "",
@@ -12212,6 +14547,169 @@
   },
   "_GO_START_WHY": {
    "value": "Go runs nothing when a module is downloaded, but a package's init functions and the initializers of its package-level variables run when any program that imports the package starts, and so does a cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - \u2026 | /bin/bash` from init). Collecting credentials or the whole environment next to a network call is the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library needs: code fetched and run, a reverse shell, a beacon to a data-capture service."
+  },
+  "_GO_TESTDATA_IMPORT_WHY": {
+   "value": "Go's tools leave a testdata/ folder out of a module's packages (go build ./..., go vet ./...), and a scan of that module reads it as test data unless the module's own code imports it. An import path can still name such a package from another module, and a build of the importing module then compiles it and runs its init code: code shipped where a review of either module does not look. A library has no reason to import another module's test data."
+  },
+  "_GRADLE_DISTRIBUTION_HOST_RULE": {
+   "map": {
+    "fix": {
+     "value": "Pin the distribution with distributionSha256Sum (Gradle publishes each distribution's)."
+    },
+    "id": {
+     "value": "SC-GRADLE-WRAPPER"
+    },
+    "msg": {
+     "value": "Gradle wrapper whose distribution comes from {host}, not services.gradle.org, with no distributionSha256Sum."
+    },
+    "name": {
+     "value": "Gradle distribution from another host"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "./gradlew downloads and runs the distribution its gradle-wrapper.properties names; a mirror is common in companies, and what it serves is whatever its owner puts there unless the checksum pins it."
+    }
+   }
+  },
+  "_GRADLE_DISTRIBUTION_RULE": {
+   "map": {
+    "fix": {
+     "value": "Use https://services.gradle.org/distributions/ (or your mirror over HTTPS) and pin the distribution with distributionSha256Sum."
+    },
+    "id": {
+     "value": "SC-GRADLE-WRAPPER"
+    },
+    "msg": {
+     "value": "Gradle wrapper whose distribution comes over plain HTTP, or from what is not a URL: {url}."
+    },
+    "name": {
+     "value": "Gradle distribution fetched unsafely"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 CWE-319 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "./gradlew downloads the distribution its gradle-wrapper.properties names and runs it; over plain HTTP, or from a path that is not a URL, anyone between the build and the server, or anyone who can write there, chooses what runs."
+    }
+   }
+  },
+  "_GRADLE_PROPERTIES_ERROR": {
+   "value": "its gradle-wrapper.properties is there but was not read ({error})"
+  },
+  "_GRADLE_PROPERTIES_LONG": {
+   "value": "its gradle-wrapper.properties is longer than the {limit} bytes Lazaret reads of one (Java reads the whole file, and the wrapper uses its last distributionUrl)"
+  },
+  "_GRADLE_PROPERTIES_MALFORMED": {
+   "value": "its gradle-wrapper.properties holds a \\uXXXX escape that is not one, which java.util.Properties refuses (Java 17 and later) and earlier Java reads past"
+  },
+  "_GRADLE_PROPERTIES_VERSIONS": {
+   "value": "Java 8 and later Java read its gradle-wrapper.properties into different distributions (a line continued onto a comment, or a comment that ends in a backslash)"
+  },
+  "_GRADLE_WRAPPER_DISTRIBUTION": {
+   "value": "; its gradle-wrapper.properties names Gradle {version}"
+  },
+  "_GRADLE_WRAPPER_JAR": {
+   "value": "this gradle-wrapper.jar"
+  },
+  "_GRADLE_WRAPPER_LFS": {
+   "value": "it is a Git LFS pointer, not the jar, which is stored elsewhere"
+  },
+  "_GRADLE_WRAPPER_MANIFEST_NEWER": {
+   "value": "its manifest names Gradle {version}, newer than Lazaret's list of Gradle's checksums (to Gradle {newest}), and its checksum is none of the listed"
+  },
+  "_GRADLE_WRAPPER_NEWER": {
+   "value": "its gradle-wrapper.properties names Gradle {version}, newer than Lazaret's list of Gradle's checksums (to Gradle {newest}), and its checksum is none of the listed"
+  },
+  "_GRADLE_WRAPPER_NIGHTLY": {
+   "value": "its gradle-wrapper.properties names a nightly build of Gradle ({version}), and Lazaret's list of Gradle's checksums holds its releases (to Gradle {newest}), none of whose checksums it has"
+  },
+  "_GRADLE_WRAPPER_NO_DISTRIBUTION": {
+   "value": "; no gradle-wrapper.properties beside it names a Gradle version"
+  },
+  "_GRADLE_WRAPPER_PROPERTIES_NOT_READ": {
+   "value": "; {why}"
+  },
+  "_GRADLE_WRAPPER_PROPERTIES_UNREAD": {
+   "value": "it is Gradle's wrapper, but {why}, so the distribution ./gradlew downloads and runs is not known"
+  },
+  "_GRADLE_WRAPPER_RULE": {
+   "map": {
+    "fix": {
+     "value": "Regenerate the wrapper with a Gradle you trust (gradle wrapper --gradle-version <version>) and compare it with the committed one; validate wrappers in CI as gradle/actions/wrapper-validation does."
+    },
+    "id": {
+     "value": "SC-GRADLE-WRAPPER"
+    },
+    "msg": {
+     "value": "Changed Gradle wrapper: {what} matches none of Gradle's published wrapper checksums ({count} releases, to Gradle {newest}){distribution}."
+    },
+    "name": {
+     "value": "Changed Gradle wrapper"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "./gradlew runs gradle/wrapper/gradle-wrapper.jar on every build, on developers' machines and in CI, before Gradle itself is downloaded. Gradle publishes the SHA-256 of each release's wrapper jar, and its wrapper-validation action fails a build whose jar matches none of them, because a changed jar runs its own code wherever the project is built."
+    }
+   }
+  },
+  "_GRADLE_WRAPPER_TOO_LARGE": {
+   "value": "this gradle-wrapper.jar, larger than {limit} bytes (no wrapper jar of Gradle's is near that size),"
+  },
+  "_GRADLE_WRAPPER_UNLISTED": {
+   "value": "its manifest names Gradle {version}, for which Gradle publishes no wrapper checksum (as for 3.3 to 4.0.2, whose wrapper jars were not reproducible)"
+  },
+  "_GRADLE_WRAPPER_UNREAD": {
+   "value": "it was not read whole (it is over the size limit), so its checksum is not known"
+  },
+  "_GRADLE_WRAPPER_UNVERIFIED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Regenerate the wrapper with a Gradle you trust (gradle wrapper --gradle-version <version>) and compare it with the committed one; validate wrappers in CI as gradle/actions/wrapper-validation does."
+    },
+    "id": {
+     "value": "SC-GRADLE-WRAPPER"
+    },
+    "msg": {
+     "value": "Gradle wrapper jar that can't be verified: {why}."
+    },
+    "name": {
+     "value": "Unverified Gradle wrapper"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "./gradlew runs gradle/wrapper/gradle-wrapper.jar on every build, on developers' machines and in CI, before Gradle itself is downloaded. Gradle publishes the SHA-256 of each release's wrapper jar, and its wrapper-validation action fails a build whose jar matches none of them, because a changed jar runs its own code wherever the project is built."
+    }
+   }
   },
   "_GUARD_BLOCK_LINES": {
    "value": 12
@@ -12637,6 +15135,9 @@
    "flags": "",
    "re": "[\"'](?!(?:127|0|255)\\.)((?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d))[\"']"
   },
+  "_JAVA_CLASS_DESC": {
+   "value": "Java .class bytecode"
+  },
   "_JC_TECHNIQUE_REASON": {
    "value": "hides its strings in one long string it decodes as it runs (JS-Confuser's string concealing)"
   },
@@ -12846,6 +15347,93 @@
   "_KEYED_WRITE_RE": {
    "flags": "",
    "re": "^\\s*([A-Za-z_$][\\w$]*)\\s*\\[\\s*([\"'])([^\"'\\\\\\n]*)\\2\\s*\\]\\s*=(?![=>])"
+  },
+  "_KEYSTORE_CERTS_RULE": {
+   "map": {
+    "fix": {
+     "value": "Nothing to do for a truststore meant to ship; a keystore meant to hold a key does not."
+    },
+    "id": {
+     "value": "S-SECRET"
+    },
+    "msg": {
+     "value": "Keystore of certificates only: a {kind} that holds no private or secret key ({entries})."
+    },
+    "name": {
+     "value": "Hardcoded credential"
+    },
+    "ref": {
+     "value": "CWE-321 \u00b7 CWE-798"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "A keystore of trusted certificates (a truststore) holds public data; it is listed so that every keystore a project ships is known."
+    }
+   }
+  },
+  "_KEYSTORE_OPAQUE_MSG": {
+   "value": "Opaque high-entropy file ({size} bytes): a {kind} whose bytes no structure reads (encrypted data, keys, secrets, signatures, certificates, names past a real one's size) are more than a keystore's: its largest such part holds {largest} bytes and all of them {opaque}, where a real keystore's hold at most {one} and {all}."
+  },
+  "_KEYSTORE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Keep keystores out of the repository and the package (load them from a secrets store when building or running), and replace a key that was shipped."
+    },
+    "id": {
+     "value": "S-SECRET"
+    },
+    "msg": {
+     "value": "Credential file: a {kind} that holds a private or secret key ({entries})."
+    },
+    "name": {
+     "value": "Hardcoded credential"
+    },
+    "ref": {
+     "value": "CWE-321 \u00b7 CWE-798"
+    },
+    "sev": {
+     "value": "BLOCKER"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "A keystore holds private or secret keys behind a password, often a well-known one (a debug keystore's 'android', 'changeit'): one in a repository or a package leaks its keys with every copy, and whoever has them can sign or decrypt as their owner."
+    }
+   }
+  },
+  "_KEYSTORE_SEALED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Keep keystores out of the repository and the package (load them from a secrets store when building or running), and replace a key that was shipped."
+    },
+    "id": {
+     "value": "S-SECRET"
+    },
+    "msg": {
+     "value": "Credential file: a {kind} whose entries are encrypted, so it may hold a private key ({entries})."
+    },
+    "name": {
+     "value": "Hardcoded credential"
+    },
+    "ref": {
+     "value": "CWE-321 \u00b7 CWE-798"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "A keystore holds private or secret keys behind a password, often a well-known one (a debug keystore's 'android', 'changeit'): one in a repository or a package leaks its keys with every copy, and whoever has them can sign or decrypt as their owner."
+    }
+   }
   },
   "_KEY_LITERAL_RE": {
    "flags": "",
@@ -13512,7 +16100,7 @@
   },
   "_LD_OPTIONS_SEND_RE": {
    "flags": "",
-   "re": "\\baxios\\s*\\("
+   "re": "\\baxios\\s*\\(|\\.\\s*rest\\s*\\.\\s*[A-Za-z_$][\\w$]*\\s*\\.\\s*[A-Za-z_$][\\w$]*\\s*\\("
   },
   "_LD_OPTION_KEYS": {
    "set": [
@@ -13766,12 +16354,15 @@
     },
     {
      "value": "ping"
+    },
+    {
+     "value": "rest"
     }
    ]
   },
   "_LD_SEND_RE": {
    "flags": "",
-   "re": "\\b(?:axios|got|needle|superagent|ky|requests|httpx|session|client|aiohttp)\\s*\\.\\s*(?:post|put|patch)\\s*\\(|\\bsendBeacon\\s*\\(|\\bRequest\\s*\\(|\\burlopen\\s*\\(|(?<![\\w$.])fetch\\s*\\(|\\b(?:globalThis|window|self|global)\\s*\\.\\s*fetch\\s*\\("
+   "re": "\\b(?:axios|got|needle|superagent|ky|requests|httpx|session|client|aiohttp)\\s*\\.\\s*(?:post|put|patch)\\s*\\(|\\bsendBeacon\\s*\\(|\\bRequest\\s*\\(|\\burlopen\\s*\\(|(?<![\\w$.])fetch\\s*\\(|\\b(?:globalThis|window|self|global)\\s*\\.\\s*fetch\\s*\\(|\\.\\s*request\\s*\\((?=\\s*[\"'`](?:GET|POST|PUT|PATCH|DELETE|HEAD) /)|\\.\\s*(?:post|put|patch)Json\\s*\\("
   },
   "_LD_STATEMENT_SPAN": {
    "value": 2000
@@ -14303,6 +16894,9 @@
   "_LOOKS_SAMPLE": {
    "value": 2048
   },
+  "_MACHO_FAT_DESC": {
+   "value": "Mach-O universal binary (macOS)"
+  },
   "_MANIFEST_WRITE_RE": {
    "flags": "",
    "re": "\\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync|outputFile|write_text|dump)\\s*\\("
@@ -14769,10 +17363,19 @@
   "_OPAQUE_SAMPLE": {
    "value": 8192
   },
+  "_OPAQUE_UNREAD": {
+   "value": "it was not read past its first bytes"
+  },
+  "_OPAQUE_WALK_MSG": {
+   "value": "Opaque high-entropy file ({size} bytes, entropy {entropy}/8; read as {kind}, it is not one to its end: {why})."
+  },
   "_PACKAGE_RULE_NAMES": {
    "map": {
     "SC-GO-GENERATE": {
      "value": "A go:generate command"
+    },
+    "SC-GO-TESTDATA-IMPORT": {
+     "value": "An import of another module's test data"
     },
     "SC-IMPORT-RISK": {
      "value": "Risky import-time code"
@@ -14995,6 +17598,90 @@
   },
   "_PE_DESC": {
    "value": "Windows PE executable/DLL"
+  },
+  "_PICKLE_CODE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not load the file. Ship weights in a format that holds only data (safetensors), or load with torch.load(weights_only=True), and find out why this file runs code."
+    },
+    "id": {
+     "value": "SC-PICKLE-CODE"
+    },
+    "msg": {
+     "value": "Loading this model file runs code: {detail}."
+    },
+    "name": {
+     "value": "Model file runs code when loaded"
+    },
+    "ref": {
+     "value": "CWE-502 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Loading a model file unpickles it (torch.load without weights_only=True, a Lightning checkpoint, joblib.load, pickle.load, numpy.load with allow_pickle=True), and a pickle runs whatever its globals name and its REDUCE, BUILD, NEWOBJ, INST and OBJ opcodes call. This one imports or calls code that runs commands, evaluates or compiles code, imports modules, reaches files, sockets or the interpreter, or loads another pickle; or it puts a callable where the unpickler calls it (an object's __setstate__, a class's special method)."
+    }
+   }
+  },
+  "_PICKLE_GLOBAL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Find out what the call does before loading the file; prefer a format that holds only data (safetensors), or torch.load(weights_only=True)."
+    },
+    "id": {
+     "value": "SC-PICKLE-GLOBAL"
+    },
+    "msg": {
+     "value": "Loading this model file calls code outside its format: {detail}."
+    },
+    "name": {
+     "value": "Model file calls code outside its format"
+    },
+    "ref": {
+     "value": "CWE-502 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Loading a model file unpickles it (torch.load without weights_only=True, a Lightning checkpoint, joblib.load, pickle.load, numpy.load with allow_pickle=True), and a pickle runs whatever its globals name and its REDUCE, BUILD, NEWOBJ, INST and OBJ opcodes call. A tensor checkpoint is rebuilt from PyTorch's own functions and plain data, and pickled objects are remade by their classes; this file calls an installed function with text it is told to use (a command, code, a path, a URL, a module path, bytes), or calls an object the file builds as it loads: what that does depends on the code it reaches."
+    }
+   }
+  },
+  "_PICKLE_OWN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Nothing to do unless the module does more than define its classes when it is imported; a format that holds only data (safetensors) imports nothing."
+    },
+    "id": {
+     "value": "SC-PICKLE-GLOBAL"
+    },
+    "msg": {
+     "value": "Loading this model file imports this package's own module: {detail}."
+    },
+    "name": {
+     "value": "Model file imports this package's own module"
+    },
+    "ref": {
+     "value": "CWE-502 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Loading a model file unpickles it (torch.load without weights_only=True, a Lightning checkpoint, joblib.load, pickle.load, numpy.load with allow_pickle=True), and unpickling imports the module each global names. This file names a module of the package itself (torch.save(model) of the package's own class does): that module's code runs when the file is loaded, and it is the package's code the scan reads, so this is listed and sets no verdict. A call of such a function with text it is told to use is SC-PICKLE-GLOBAL, MAJOR, as another function's is: the text decides what the code does."
+    }
+   }
   },
   "_PIPE_SCAN_RE": {
    "flags": "",
@@ -15531,6 +18218,12 @@
     "start_sdist": {
      "value": "runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], a load section)"
     },
+    "testdata_import_fix": {
+     "value": "Read that package's code in the other module's testdata/ folder before building with this module."
+    },
+    "testdata_import_msg": {
+     "value": "{path} imports {import}{more}, a package in another module's testdata/ folder: a build of this module compiles it, while a scan of that module leaves it out as test data."
+    },
     "use_fix": {
      "value": "Don't use the {what}; report it to its registry."
     },
@@ -15895,6 +18588,22 @@
   "_SCRIPT_EXT_RE": {
    "flags": "i",
    "re": "\\.(?:c|m)?js$|\\.sh$|\\.py$"
+  },
+  "_SCRIPT_HOLDER_EXTS": {
+   "set": [
+    ".astro",
+    ".ejs",
+    ".hbs",
+    ".htm",
+    ".html",
+    ".marko",
+    ".mdx",
+    ".njk",
+    ".riot",
+    ".svelte",
+    ".vue",
+    ".xhtml"
+   ]
   },
   "_SCRIPT_INTERP_RE": {
    "flags": "",

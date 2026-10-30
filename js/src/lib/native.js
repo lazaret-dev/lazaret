@@ -36,6 +36,19 @@ export class NativeError extends Error {
 }
 /** SC-TRUNCATED's detail for a file whose reading spent the engine's work budget. */
 export const EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)";
+// how the engine words a limit a reading met before a text's end (BIG-BUNDLE-TAIL: flow.rs, Reading.cap), and a text
+// the supply-chain tree did not read whole (the review of Oct 20: the parser refused code V8 compiles, the model's
+// budget ran out; signs.rs TREE_UNREAD): the file is SC-TRUNCATED beside what the text follower found
+export const TREE_CUT = "the supply-chain tree did not read it whole: ";
+// and a text that nests the strings eval calls run deeper than the tests read them (EVAL-LITERAL: signs.rs
+// eval_literal_reasons, _EVAL_DEPTH)
+const EVAL_CUT = "the strings eval calls run as code are read ";
+const CUT_PREFIXES = ["the text follower reads at most ", TREE_CUT, EVAL_CUT];
+const isCut = (why) => typeof why === "string" && CUT_PREFIXES.some((p) => why.startsWith(p));
+/** Why a call answered as one that ran out (BIG-BUNDLE-TAIL): the limit a reading of its text met before the text's
+ * end, or the tree's not reading it whole, in the engine's words, else EXHAUSTED (its work budget spent). A worker's
+ * error is {name, message}. */
+export const exhaustedWhy = (e) => (e && isCut(e.message) ? e.message : EXHAUSTED);
 
 /** The call's work budget was spent (a hostile input): it has no answer. */
 export class NativeExhausted extends NativeError {
@@ -52,7 +65,10 @@ let workBudget = null;     // steps of the regex matcher a call may take (null: 
 // dep_file_issues, the import-time test of a file, is budgeted.
 const UNBUDGETED = new Set(["batch", "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line",
   "pem_lines", "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
+  "model_sniff", "model_file", "model_own", "pth_stream", "pth_kept", "media_walk", "media_stream",
   "deps_hooks", "deps_script", "deps_targets", "deps_files", "agent_issue", "declared_names",
+  // FP-B64-PROTOBUF: the scan's pass over its descriptors (core's asks it on the engine's default budget too)
+  "b64_descriptors",
   // the reports' forms and the terminal's sanitizers (step 4 c): no matcher runs
   "term", "issue_excerpt", "report_json", "report_items", "sarif_rules", "sarif_frame", "sarif_items", "html_frame",
   "html_items", "text_frame", "text_order", "text_items",
@@ -140,6 +156,20 @@ function wtf8(s) {
   return out.subarray(0, n);
 }
 
+/** How many bytes UTF-8 writes `s` in (a well-formed string). */
+function utf8Length(s) {
+  if (typeof Buffer !== "undefined") return Buffer.byteLength(s, "utf8");
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }       // (a pair: the string is well-formed)
+    else n += 3;
+  }
+  return n;
+}
+
 function concatBytes(parts) {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let at = 0;
@@ -176,8 +206,13 @@ export function call(name, args = {}, text = "") {
   if (workBudget !== null && !UNBUDGETED.has(name)) args = { ...args, budget: workBudget };
   const nameBytes = utf8.encode(name);
   const argBytes = utf8.encode(JSON.stringify(args));   // lone surrogates come out as \u escapes
-  const textBytes = Array.isArray(text) ? concatBytes(text.map((t) => wtf8(String(t)))) : wtf8(String(text));
-  const len = 8 + nameBytes.length + argBytes.length + textBytes.length;
+  // (a well-formed text is written into the module's memory as it is encoded, not encoded into a copy first:
+  // BIG-BUNDLE-TAIL, memory, a 16 MB file's copy)
+  const one = Array.isArray(text) ? null : String(text);
+  const direct = one !== null && one.isWellFormed();
+  const textBytes = direct ? null : one === null ? concatBytes(text.map((t) => wtf8(String(t)))) : wtf8(one);
+  const textLength = direct ? utf8Length(one) : textBytes.length;
+  const len = 8 + nameBytes.length + argBytes.length + textLength;
   let status, answer;
   try {
     const req = e.lazaret_alloc(len);
@@ -187,7 +222,27 @@ export function call(name, args = {}, text = "") {
     bytes.set(nameBytes, req + 4);
     view.setUint32(req + 4 + nameBytes.length, argBytes.length, true);
     bytes.set(argBytes, req + 8 + nameBytes.length);
-    bytes.set(textBytes, req + 8 + nameBytes.length + argBytes.length);
+    const at = req + 8 + nameBytes.length + argBytes.length;
+    if (direct) {
+      // (Node 26.10's TextEncoder.encodeInto writes a character short when the room is exactly the text's UTF-8
+      // length and the text holds a character of more than one byte, 1,408 of the parity tests' texts, Oct 29:
+      // where Node's Buffer is, its own writer; elsewhere encodeInto; either one checked, and a text not written
+      // whole is copied in instead)
+      let whole;
+      if (typeof Buffer !== "undefined") {
+        whole = Buffer.from(e.memory.buffer, at, textLength).write(one, 0, textLength, "utf8") === textLength;
+      } else {
+        const r = utf8.encodeInto(one, bytes.subarray(at, at + textLength));
+        whole = r.read === one.length && r.written === textLength;
+      }
+      if (!whole) {
+        const copy = typeof Buffer !== "undefined" ? Buffer.from(one, "utf8") : utf8.encode(one);
+        if (copy.length !== textLength) throw new Error("the text's length");
+        bytes.set(copy, at);
+      }
+    } else {
+      bytes.set(textBytes, at);
+    }
     const out = e.lazaret_call(req, len);                  // frees the request
     view = new DataView(e.memory.buffer);
     status = view.getUint32(out, true);
@@ -201,7 +256,11 @@ export function call(name, args = {}, text = "") {
   if (e.memory.buffer.byteLength > MEMORY_KEEP) engine = null;
   const value = JSON.parse(answer);
   if (status === 0) return value;
-  if (status === 2) throw new NativeExhausted(`${name}: the call's work budget was spent`);
+  if (status === 2) {
+    const why = value && value.error;
+    throw new NativeExhausted(isCut(why) ? why
+      : `${name}: the call's work budget was spent`);
+  }
   throw new NativeError(`${name}: ${value && value.error}`);
 }
 
@@ -390,12 +449,15 @@ function readerArgs(args, what, names, redact) {
 }
 
 /** The Go reader (G-1; the Python package's engine.go_package) on a module's files, [[path below the module's root,
- * text]] of its .go files and its cgo packages' .c and .h files; `module`: its path. With `what` and `names`, its
- * answer's `issues` are its findings, [[file index, issue]]. */
+ * text]] of its .go files, as the Go toolchain reads them (goContent where there is one, F-06), and its cgo
+ * packages' .c and .h files; `module`: its path; `listed`: every package given is one a vendor tree's modules.txt
+ * lists, built even in testdata/. With `what` and `names`, its answer's `issues` are its findings, [[file index,
+ * issue]]. */
 export function goPackage(files, { module = null, useFileChars = null, useChars = null, what = null, names = [],
-  redact = true } = {}) {
+  redact = true, listed = false } = {}) {
   const args = { files: files.map(([path, text]) => [path, codePoints(text)]) };
   if (module) args.module = module;
+  if (listed) args.listed = true;
   if (useFileChars !== null) args.use_file_chars = useFileChars;
   if (useChars !== null) args.use_chars = useChars;
   return call("go_package", readerArgs(args, what, names, redact), files.map(([, text]) => text));
@@ -419,6 +481,27 @@ export function rsCrate(files, { build = null, procMacro = false, lib = null, us
 export const cargoLayout = (text) => call("cargo_layout", {}, text);
 /** The module paths a vendor/modules.txt says are vendored, longest first (engine.go_vendored_modules). */
 export const goVendoredModules = (text) => call("go_vendored_modules", {}, text);
+/** The packages a vendor/modules.txt lists, which a build compiles, sorted (engine.go_vendored_packages; F-06). */
+export const goVendoredPackages = (text) => call("go_vendored_modules", { packages: true }, text);
+/** The characters of Go a goImports call takes at once (engine.GO_IMPORTS_CHARS). */
+const GO_IMPORTS_CHARS = 32_000_000;
+/** The import paths of each Go file's build, [[path, text]] -> [[import path, …] or null (the parser refused it), …]:
+ * none for a file a build constraint leaves out (engine.go_imports; F-06: deps.js goVendorData). A batch at a time. */
+export function goImports(files) {
+  const out = [];
+  let batch = [], size = 0;
+  const flush = () => {
+    for (const r of call("go_imports", { files: batch.map(([p, t]) => [p, codePoints(t)]) }, batch.map(([, t]) => t))) out.push(r);
+  };
+  for (const [path, text] of files) {
+    const n = codePoints(text);
+    if (batch.length && size + n > GO_IMPORTS_CHARS) { flush(); batch = []; size = 0; }
+    batch.push([path, text]);
+    size += n;
+  }
+  if (batch.length) flush();
+  return out;
+}
 
 // ---- the cross-file JavaScript taint pass ----
 

@@ -104,6 +104,34 @@ fn jsx_text_attributes_and_code() {
 }
 
 #[test]
+fn of_and_a_propertys_name_are_operands() {
+    // FP-HOMOGLYPH-ORDINAL, the review of Oct 27 (H1): `of` and a keyword-named property were read as words an
+    // expression follows, so `<b>` after them opened an element and `x('1')` became JSX text
+    use Kind::*;
+    for src in ["const of = 1, b = 2;\nof <b> x('1');", "obj.return <b> x('1');", "obj?.return <b> x('1');",
+        "o.typeof <b> x('1');", "o.in <b> x('1');", "o.of <b> x('1');", "o.new <b> x('1');", "o.case <b> x('1');",
+        "o.yield <b> x('1');", "o.await <b> x('1');", "o.default <b> x('1');", "o.else <b> x('1');", "o.do <b> x('1');",
+        "o.if <b> x('1');", "o.for <b> x('1');", "o.void <b> x('1');", "o.delete <b> x('1');", "o.throw <b> x('1');",
+        "o.extends <b> x('1');", "o.instanceof <b> x('1');", "async <b> x('1');", "get <b> x('1');", "set <b> x('1');",
+        "let <b> x('1');", "static <b> x('1');", "as <b> x('1');", "from <b> x('1');"] {
+        assert_eq!(jsx(src), vec![k(Str, "'1'")], "{src}");
+    }
+    // a property's name divides, whatever word it is
+    assert_eq!(jsx("a = o.return / 2; b = '/'"), vec![k(Str, "'/'")]);
+    assert_eq!(js("a = o.typeof / 2 / 3; b = 'q'"), vec![k(Str, "'q'")]);
+    // `of` in a for head after its binding is the keyword: an expression (an element, a regular expression) follows
+    assert_eq!(jsx("for (const x of <b>it's</b>) y('1');"), vec![k(JsxText, "it's"), k(Str, "'1'")]);
+    assert_eq!(jsx("for await (const [a, b] of /x/g.exec(s)) y('1');"), vec![k(Regex, "/x/g"), k(Str, "'1'")]);
+    assert_eq!(jsx("for (const {a} of /x/g.exec(s)) y('1');"), vec![k(Regex, "/x/g"), k(Str, "'1'")]);
+    // and elsewhere in the head, or in a call inside it, a name
+    assert_eq!(jsx("for (let i = of <b> 1; i < 2; i++) y('1');"), vec![k(Str, "'1'")]);
+    assert_eq!(jsx("for (const x of f(of <b> y('1')));"), vec![k(Str, "'1'")]);
+    // the words an expression follows still are (`return <a/>`, `return /re/`)
+    assert_eq!(jsx("function f() { return <b>it's</b>; }"), vec![k(JsxText, "it's")]);
+    assert_eq!(jsx("function f() { return /x/g; }"), vec![k(Regex, "/x/g")]);
+}
+
+#[test]
 fn linear_on_what_would_be_quadratic() {
     // a `/` in a regular expression's place, and nothing closing it, over and over
     for src in ["=/[".repeat(60_000), "(/".repeat(90_000), "x = '\n".repeat(30_000), "`${".repeat(60_000)] {
@@ -123,14 +151,14 @@ fn every_character_once_and_no_panic() {
         for jsx in [false, true] {
             let t = js::tokens(&u(s), jsx);
             let mut at = 0u32;
-            for tok in &t {
+            for tok in t.iter() {
                 assert!(tok.start >= at && tok.end > tok.start && tok.end as usize <= s.chars().count(), "{s:?} {t:?}");
                 at = tok.end;
             }
         }
         let t = py::tokens(&u(s));
         let mut at = 0u32;
-        for tok in &t {
+        for tok in t.iter() {
             assert!(tok.start >= at && tok.end >= tok.start, "{s:?} {t:?}");
             at = tok.end;
         }

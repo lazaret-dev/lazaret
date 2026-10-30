@@ -41,6 +41,8 @@ pub mod unparse;
 #[cfg(test)]
 mod tests;
 
+mod listing;
+
 pub use crate::jsflow::Out;
 pub use driver::{analyze, Config};
 

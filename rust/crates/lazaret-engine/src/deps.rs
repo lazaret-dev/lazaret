@@ -636,13 +636,24 @@ pub fn dependency_import_issue(
 /// `dep_file_issues`: [SC-IMPORT-RISK or null, SC-AGENT-HIJACK or null] for a dependency's file no hook runs (core's
 /// import-time and agent checks of dependency_checks), given its package's names (D-12b, D-9c). The agent check has a
 /// budget of its own; when it runs out, the call answers as one that ran out (the file is SC-TRUNCATED, as it was).
-pub fn dep_file_issues(p: &Pack, text: &[u32], lang: Option<&str>, declared: Option<&[PyStr]>, release: Option<&[u32]>, o: &Opts) -> Value {
+/// `unread` (BIG-BUNDLE-TAIL): a file not read whole adds a third element, the words of why (budget::cut).
+pub fn dep_file_issues(p: &Pack, text: &[u32], lang: Option<&str>, declared: Option<&[PyStr]>, release: Option<&[u32]>, o: &Opts, unread: bool) -> Value {
     let found = dependency_import_issue(p, text, lang, declared, release, o);
     if budget::exhausted() {
         return Value::Null;
     }
     match budget::isolated(budget::DEFAULT_STEPS, || dependency_agent_issue(p, text, o)) {
-        Ok(agent) => Value::Arr(vec![found.unwrap_or(Value::Null), agent.unwrap_or(Value::Null)]),
+        Ok(agent) => {
+            let mut out = vec![found.unwrap_or(Value::Null), agent.unwrap_or(Value::Null)];
+            if unread {
+                // (BIG-BUNDLE-TAIL: what was found, and the file's not being read whole beside it; a file read whole
+                // keeps the answer it had)
+                if let Some(c) = budget::take_cut() {
+                    out.push(Value::Str(crate::pystr::u(&c)));
+                }
+            }
+            Value::Arr(out)
+        }
         Err(_) => {
             budget::exhaust();
             Value::Null
@@ -664,9 +675,13 @@ fn hook_not_followed(p: &Pack) -> Value {
     manifest::gyp::truncated_issue(p, &pystr::to_string(&detail))
 }
 
-/// engine.error_issue for a check that spent its budget: SC-TRUNCATED, EXHAUSTED.
+/// engine.error_issue for a check that spent its budget: SC-TRUNCATED, EXHAUSTED, or the words of the limit a reading
+/// of it met or of the supply-chain tree's not reading a text whole (BIG-BUNDLE-TAIL: budget::isolated_cut).
 fn exhausted_issue(p: &Pack) -> Value {
-    manifest::gyp::truncated_issue(p, &p.string("EXHAUSTED"))
+    match budget::take_isolated_cut() {
+        Some(why) => manifest::gyp::truncated_issue(p, &why),
+        None => manifest::gyp::truncated_issue(p, &p.string("EXHAUSTED")),
+    }
 }
 
 // ---------------- the follow of an install hook ----------------

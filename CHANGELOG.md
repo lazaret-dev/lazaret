@@ -7,11 +7,27 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [0.1.9] — 2026-10-10
+## [0.1.9] — 2026-10-30
 
 RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and Rust models and reads shell deletion commands. Removing a home directory or its personal files, a filesystem/drive root, or repositories selected through recursive `.git` globs adds “deletes the user's files”: CRITICAL at install/build/import, MAJOR when found only in use-time code. Relative build/dist/fixture cleanup, created temporary directories and named application-cache subtrees are excluded. Unknown paths alone are not evidence of deletion of user files. The check is static; no target path is accessed.
 
 RA-6 follow-up (rule set 2.99.0) exempts fully literal paths at least two components below home outside protected personal-data and credential subtrees. This is a lexical path rule, not proof that a package owns a folder. Home itself, whole top-level home folders, roots/drives, repository deletion and unknown/globbed home paths still trigger. Protected paths include personal folders, cloud storage, browser profiles, Mail/Messages/Photos and credentials; their ancestors are protected too because deleting an ancestor deletes that data. Matching is case-insensitive independent of the scanning host. Dot components and separators are normalized before classification, and unknown components cannot disappear through `..` to gain the new exemption. The existing named-cache exemption retains precedence, including unknown descendants under a known owner; whole caches and unknown owners are not exempt. Unknown paths without an identified home/root/repository target remain outside this detector's evidence. Import-risk attribution preserves the deleting call's line when another call adds no finding. No filesystem paths are accessed and no cleanup is executed.
+
+RA-6 rework (rule set 2.101.0) restores protection for whole application-data containers and listed wallet, messenger, password-manager, keyring, mail, browser and developer-credential paths on macOS, Linux and Windows. Container ancestors remain protected; literal tool children outside the protected lists remain exempt. The names come from data categories, not benchmark or holdout samples. APPDATA/LOCALAPPDATA paths are recognized, and an unknown child directly under a root/drive remains dangerous.
+
+A separate bounded provenance check can exempt a direct entry of the same exempt directory returned by a Node or Python directory listing, with optional literal suffixes. It follows single-source bindings, collection iteration, inline Node callbacks, filtering, indexing/destructuring and Python loops/comprehensions; Dirent and pathlib path forms retain the directory anchor. Reassignments, mutations, object escape, mismatched directories, extra unknown components, recursive listings, globs and visible API/symlink changes do not earn the new exemption. A Python comprehension's provenance stays within its expression. Provenance uses a separate work budget and reads its directory in literal-only mode; cycles cannot consume the original path reader's budget. This checks lexical containment and modeled native API origins, not filesystem ownership, absence of pre-existing symlinks, or API replacement outside the scanned source. The exempt directory is the boundary of the listed-name exception: an unknown entry name is not itself compared with protected basenames such as `.git` or vault-file suffixes. General import/use-time reachability is unchanged. The holdout is not inspected or scored here; John performs the one aggregate acceptance run against stack-0.1.9-b, then decides whether further narrowing or a revert is needed.
+
+The native listing callee must have one unambiguous binding, followed through aliases without reassignment or escape; a conditional callee does not qualify. Name-array filters use the same mutation and escape checks as Dirent filters, including callback rest/third arguments, arguments, closures and helper calls. Python escape checks include positional and keyword values and star expansions. Its writes and escapes are keyed by lexical binding, including global/nonlocal writes, so an unrelated local with the same spelling does not invalidate a listing. Unknown scope ownership or an escaped native namespace keeps the original deletion reading.
+
+Directory expressions at the listing and join also require single-write, scope-qualified literal/native provenance. Augmented, annotated, destructuring and other unsupported writes cannot reuse an earlier decoy value. Global/nonlocal declarations, dynamic namespace access and star imports conservatively disable listing exemptions in that source; failed provenance retains the may-resolve deletion reading. JavaScript global-object access similarly prevents an exemption.
+
+F-05 (rule set 2.102.0) gives the path readers separate operations for Node join and resolve, Python POSIX and Windows joins, Go path/filepath joins, and Rust path pushes/joins. Later absolute components append in Node/Go joins; Python joins can reset the root or drive. Native-platform operations retain two correlated POSIX/Windows interpretations; either can add a deletion or credential-read finding, and a listing exemption requires the directory interpretations to agree. No target cwd or filesystem is consulted. A home API supplies an absolute symbolic anchor; a literal tilde component is not expanded by joining. Dot normalization retains unknown components when their cancellation would discard uncertainty. The shared path helper is removed. The regression matrix compares inert strings with Node/Python path libraries, plus Go standard-library tests selected for the running platform.
+
+F-05 independent v3 review: retain the possible same-drive home reading for Windows drive-relative joins, preserve credential suffixes, and distinguish the home anchor from an unknown cwd. Explicit-drive Node resolution keeps its absolute root; ordinary relative paths remain unknown. A later absolute reset still takes effect.
+
+Path assembly checks a conservative MAX_TEXT bound before allocating intermediates, retains a bounded prefix plus unknown interpretation on overflow, and charges the engine work budget by text length. Callers collect each part once and evaluate the whole API operation only at completion (or once to check a listed-name prefix); resolve selects components before joining instead of repeatedly prepending strings. Shared input conversions and fixed-platform operations avoid duplicate work. These bounds preserve uncertainty instead of exempting truncated paths.
+
+The F-05 loss audit also retainsthe protected reading for Node `os.userInfo().homedir` and the conventional XDG config/data roots when a later slash no longer resets `path.join` to `/`. These are conservative named-root readings; arbitrary environment values remain unknown.
 
 Where the numbers stand (rerun October 10 on this engine: the benchmark's 516 malicious releases and 429
 popular packages are in-sample; the holdout is 745 other malicious releases of the same dataset, read only in
@@ -1535,6 +1551,25 @@ aggregate):
   Tests: `test_review_project_hooks` (8) and `review-project-hooks.test.js`, on inert stand-ins (an "obfuscated" file
   that only names five `_0x` variables, `.invalid` hosts), and `test_js_parity_project_hooks` (the two CLIs, with and
   without `--deps`).
+- **pratique's B-119, B-120 and B-126, `38bef0ec`: its server shuts down cleanly on macOS and Windows, a connection it
+  closes after a response is not reset on Windows, and the HTTP/2 client's reader thread no longer keeps an upload
+  waiting (NET-1).** `rust/crates/pratique` is pratique's `xos` at `38bef0ec`: 55 commits on `57c22cb0`, each round
+  reviewed (twelve) or checked, run on Linux, macOS and Windows runners, and pratique's `main` fast-forwarded to it.
+  For Lazaret's client: the HTTP/2 reader thread no longer steps aside while a caller that cannot read the socket (an
+  upload waiting for window credit) is asleep, where that upload woke 25 ms late (85 to 204 times under load); a
+  socket call that a shutdown should end is woken on Windows too, and a look at an idle socket puts it back to
+  blocking. Everything else is pratique's server, which only Lazaret's tests use: a shutdown closes an idle connection
+  at once, not when the shutdown is over; a graceful end shuts only the sending side and reads on, so a response's
+  tail reaches the client (B-120), with an idle clock driven by the client's credit on the connection and at most
+  sixteen idle timeouts after the end; after a fatal TLS alert the server shuts its sending side and drains for at
+  most a second, so that a Windows client reads why (`tls::Linger`, a public trait with an empty default). CI runs
+  three of pratique's four timed unit tests again (the coarse-clock one stays out), and the three that failed on PR
+  #17's macOS runner (`shutdown_finishes_what_is_under_way_and_closes_the_rest`, `the_limit_ends_the_race`,
+  `a_download_that_pauses_does_not_hold_up_a_request_that_waits_for_the_reader_thread`) now wait for what they time.
+  On PR #17's `windows-latest` run the HTTP/1.1 server's pipelining test failed: a connection the server closed after
+  a response (`connection: close`, HTTP/1.0) was closed with the client's next request unread, Windows reset it, and
+  the client lost the response; the server now stops writing and reads what the client still sends, a little, before
+  it closes (B-126), as it did for a request it refuses.
 - **pratique's main of Oct 27, 57c22cb0: certificate-policy extensions no longer ignored (LZ-01), Lazaret's host rule
   the library's default, and a company's own CA still trusted (NET-1).** `rust/crates/pratique` is pratique's `main` at
   `57c22cb0`, the merge of its pull request #1 (its tree is the branch's `fa1e6304`): the two commits John pushed on Oct
@@ -1903,9 +1938,20 @@ aggregate):
   without them. What this does not cover (`docs/DESIGN.md`): a file written while it is being read, or the tree
   changed after the scan and before it is installed; on a disk whose times are coarse (FAT, exFAT) a file written in
   place within the same tick at the same size, and a name that briefly reaches nothing while its folder's times do
-  not move; on Windows, whose listing has no inodes, a file replaced by another of the same size with its
-  modification time set back; and on Windows, the npm package's walk of a path longer than `MAX_PATH` if Windows
-  reports it as missing rather than too long.
+  not move; on Windows, a file written in place at the same size with its modification time kept or set back (its
+  writer can set every time NTFS keeps, and no lstat there gives the change time), and on a disk whose file IDs are 0
+  or can be reused (FAT, exFAT, some network redirectors) a file held to its size and times alone, as before; and on
+  Windows, the npm package's walk of a path longer than `MAX_PATH` if Windows reports it as missing rather than too
+  long. Windows' listing (`DirEntry.stat`) has no file IDs, and the walk held a file it listed there to its kind,
+  size and modification time alone: another file put in its place with the same size and times (a copy made within
+  one tick of the system's clock has them on NTFS; PR #17's Windows runs met it) was read as the walk's file, the
+  call complete, and one that could not be opened was the walk's unreadable file, a Q-UNREADABLE note with the gate
+  passed. The walk now lstat's each entry it lists on Windows by its exact path (`\\?\`) for its volume and file ID
+  and holds every later lstat and fstat to them, as to an inode on POSIX: such a file is a change (SC-TRUNCATED,
+  incomplete). An entry whose ID cannot be had is not taken for one that has one. Beside its size and modification
+  time, a file is held there to its creation time (`st_birthtime_ns` from Python 3.12, `st_ctime_ns` on 3.10 and
+  3.11), not its change time as on POSIX: from 3.12 Windows' `os.lstat` gives `st_ctime` the creation time and
+  `os.fstat` the change time, so every file written after it was made would have been another file at its read.
 
 - **Security: a Go module proxy's redirect, or an SCA feed's, can no longer send Lazaret to this machine, its network
   or the cloud's metadata service (LZ-02, the external security report of Oct 27; CWE-918, server-side request forgery; no
@@ -1991,6 +2037,572 @@ aggregate):
   links lead to, so on such a Mac the target compared nothing and the tests' comparisons with npm skipped. The
   dashboard's folder test held `z.py` beside `Z.py`, which a Mac's folder cannot: that pair is now a folder of its own,
   compared where the disk holds both and skipped where it cannot.
+
+- **A file is a compiled binary by its bytes, not its name (FP-BINARY-BY-NAME; rule set 2.110.0).**
+  John's corrected fp-tally: `toanle88/Agentic`'s `examples/sandbox/Dockerfile.node` was SC-BINARY (MAJOR: WARN),
+  "Executable/compiled binary in the source tree: compiled artifact (.node)": a text Dockerfile, called a Node addon
+  by its extension. A name in `COMPILED_EXTS` (`.node`, `.so`, `.dll`, `.exe`, `.class`, `.jar`, `.a`, …) now stops
+  making a file a compiled artifact only when the whole file is text, read to the size limit (the review of Oct 27: a
+  Spring Boot executable jar is a launcher script, then the zip): no NUL byte and no 2 KB window anywhere that looks
+  binary, and for a format read from its end, no zip end-of-central-directory record in a `.jar`'s, `.war`'s,
+  `.ear`'s or `.apk`'s last 65,557 bytes (`ZIP_READ_EXTS`; `.war`, `.ear` and `.apk` join `COMPILED_EXTS`: a zip so
+  named was SC-NESTED-ARCHIVE MAJOR, now SC-BINARY MAJOR) and no UDIF trailer (`koly`) ending a `.dmg`. A file over
+  the limit, binary bytes, or an ar archive's (a static library, whose member headers are text:
+  `COMPILED_TEXT_MAGIC`) keep it; text is read as what it is (a Dockerfile as config). A document that is a container
+  (`CONTAINER_DOCUMENT_EXTS`: an Office or OpenDocument file, an EPUB, an SVGZ) is quiet only when its bytes are its
+  container's (a zip's local header; gzip for `.svgz` and `.dia`, `CONTAINER_GZIP_EXTS`), else judged as any file
+  (random bytes named `.docx` were quiet). A program's own bytes (`EXEC_MAGIC`: ELF, Mach-O, PE, WebAssembly, DEX, 0xCAFEBABE) are
+  one whatever its name, as before; in text a DEX now needs its whole magic (`dex\n`, three digits, a NUL: text may
+  begin `dex\n`; binary bytes after `dex\n` keep "Android DEX bytecode"), and 0xCAFEBABE is told apart by the number
+  after it: a universal Mach-O's architecture count (`_MACHO_FAT_DESC`) or a Java class's version (`_JAVA_CLASS_DESC`;
+  either, as before, when it is neither). Binary bytes under such a name keep SC-BINARY. `binbandit/native`'s `….pcm`
+  stays "Mach-O 64-bit binary", a description only its first bytes give (0xFEEDFACF; `.pcm` is no compiled artifact's
+  name): clang writes a precompiled module as a Mach-O object file when module debugging is on (`-gmodules`, which
+  passes `-fmodule-format=obj`; clang 18 here writes 0xFEEDFACF, MH_OBJECT, its AST in `__CLANG,__clangast`), a raw
+  `CPCH` file otherwise. Measured by route (project scan, `--deps`, the npm CLI and its `--deps`, the registry's
+  sdist, wheel and npm tarball, the GitHub scan route; native and WebAssembly alike): the tally's `Dockerfile.node`, a
+  GNU ld script named `.so` and text beginning `dex\n` named `.dex`, SC-BINARY MAJOR (the GitHub route WARN) → quiet
+  (OK); the registry left them quiet before and after. Still SC-BINARY MAJOR: an ELF and random bytes named `.node`, a
+  Mach-O object named `.pcm` (`binbandit/native`'s shape), a universal Mach-O, a Java class (now described as "Java
+  .class bytecode"), an ar archive whose first 2 KB read as text (in the routes that look at it), a jar or a disk
+  image whose first 2 KB are text (a launcher script before a jar's zip, text before binary bytes), a text file
+  named so past the size limit. A name alone was never enough for a file that is text throughout.
+- **A Gradle wrapper jar is judged by Gradle's published wrapper checksums (FP-GRADLE-WRAPPER, John's decision of Oct
+  21: "Yes, check checksums"; rule set 2.109.0).** SC-BINARY (MAJOR) reported every
+  `gradle/wrapper/gradle-wrapper.jar`, which nearly every Gradle project commits; John's fp-tally over 261 GitHub
+  scans found 9 WARN verdicts SC-BINARY set, 3 by it alone. `./gradlew` runs that jar on every build, which is why
+  Gradle publishes each release's wrapper checksum and validates projects' jars against them. A file named
+  `gradle-wrapper.jar` in a `gradle/wrapper/` folder is now checked by its SHA-256 against `GRADLE_WRAPPER_CHECKSUMS`
+  (the rule pack: 382 Gradle versions to 9.9.0-milestone-2 (9.8.2 the newest release), 97 distinct checksums, from
+  gradle/actions' `wrapper-checksums.json` at 1cff18a4 of 2026-10-20): one of them is quiet; none is the new rule
+  **SC-GRADLE-WRAPPER**, CRITICAL, a changed wrapper. MAJOR ("can't be verified") only when the list cannot judge it
+  yet and the jar is a wrapper jar (a zip holding `org/gradle/wrapper/GradleWrapperMain.class`): the last
+  `distributionUrl` of the `gradle-wrapper.properties` beside it (the one the wrapper reads) names a release in
+  Gradle's form that may well be the next one (at most two patches past its line's newest listed release, Gradle
+  publishing patches of older lines after newer releases; at most two minors past the newest; the next major's first
+  two lines), or a nightly of one, no older than the list; the properties name a listed release and the jar's
+  manifest such a next one; the manifest names a version Gradle publishes no checksum for
+  (`GRADLE_WRAPPER_NO_CHECKSUM`: 3.3 to 4.0.2 with their candidates and milestones, 0.7 to 0.9.2); the file is a Git
+  LFS pointer; it was not read whole and is no larger than a wrapper jar can be (`GRADLE_WRAPPER_MAX_BYTES`, 1 MiB;
+  one larger is CRITICAL). Whatever else matches no checksum is CRITICAL (the review of Oct 27: a version such as
+  `99.0` was MAJOR). A genuine jar is judged by its distribution too, which `./gradlew` downloads and runs: MAJOR over
+  plain HTTP or from what is not a URL, INFO (listed, not counted) over HTTPS from a host other than
+  services.gradle.org with no `distributionSha256Sum`. A jar elsewhere or under another name is SC-BINARY, as before.
+  rust/NOTICE, which the wheels and the npm package carry, says where the list came from: a checksum is a fact, so no
+  licence applies to it (John, Oct 28). Every route reads the properties: the project scan and `--deps`
+  (`collect_file` asks for the file beside the jar: `{"need": {"read": "sibling"}}`), the npm CLI and the dashboard,
+  and the registry, which judges a release's wrapper jars once every member is read.
+  `scripts/update_gradle_wrapper_checksums.py` (standard library only) refreshes the list from services.gradle.org's
+  `versions/all`, verifying each checksum's form and each new jar's hash, and writes the versions with no checksum
+  and the list's date. Measured by route (project scan, `--deps`,
+  the npm CLI and its `--deps`, the registry's sdist, wheel and npm tarball, the GitHub scan route; native and
+  WebAssembly alike): the three genuine jars (butterknife's 4.10.3, mockito's 8.14 with 9.4.1 properties, RxJava's
+  9.8.1), SC-BINARY MAJOR (WARN; INFO in a wheel) → quiet (OK); a byte changed, a class added, no properties, a
+  Gradle no next release has (`99.0`, `8.14.99`), two `distributionUrl` lines whose last is listed, an ELF in the
+  wrapper's place: → SC-GRADLE-WRAPPER CRITICAL (SUSPICIOUS); properties naming the next release (a patch past its
+  line's newest, the next minor or major) or a nightly of one, a manifest naming 3.4: → MAJOR (WARN); a genuine jar
+  whose distribution comes over plain HTTP → MAJOR (WARN), from another host → INFO (OK); a changed jar elsewhere or
+  under another name: SC-BINARY, as before. Real files: react-native-image-picker 8.3.0 and react-native-svg 15.16.0,
+  WARN for their Android wrapper alone → OK; the wrapper folders of fourteen GitHub projects as the GitHub route scans
+  them (butterknife, Hystrix, RxJava, nowinandroid, junit5, mockito, spring-boot, okhttp; and the review's retrofit,
+  timber, gradle/gradle on 9.9.0-milestone-2, detekt, kotlinx.coroutines, ksp), WARN → OK but Hystrix's, a Gradle 4.0
+  wrapper (Gradle publishes no checksum for it) with 8.1.1 properties, → MAJOR (WARN). The properties are read as
+  `java.util.Properties.load(InputStream)` reads them, as Gradle's wrapper does (the re-review of Oct 27: a `\uXXXX`
+  escape in a key, a continuation across `\r\n` and a `distributionUrl` past the first 64 KiB each left a genuine jar
+  quiet beside a plain-HTTP distribution): ISO-8859-1; `\r\n`, `\r` and `\n` each end a line; `#` and `!` comments; a
+  line ending in an odd number of backslashes goes on with the next, whose leading blanks are dropped; `=`, `:` or
+  blanks between key and value; `\uXXXX`, `\t`, `\n`, `\r`, `\f` and `\x` decoded in keys and values; the last of a
+  key's lines. A genuine jar whose properties can't be read so is MAJOR, can't be verified, saying why: longer than
+  `GRADLE_PROPERTIES_MAX_BYTES` (64 KiB; every host reads one byte more, so that a longer file is told), a `\u`
+  escape that is not one, read into another distribution by Java 8 than by later Java, or there and not read (a
+  symbolic link, which Java follows); a changed jar with such properties is CRITICAL. Held to Java itself: 50,038
+  generated files read by JDK 8, 11, 17 and 21's `Properties.load`: every one the engine reads gives the distribution
+  and checksum each JDK that loads it reads (Java 8 refuses 3 of them), and every one it refuses is one that a JDK
+  refuses or that two JDKs read otherwise.
+- **A sound, video, image or font file is read by its structure to its end, and a keystore is a credential file
+  (FP-OPAQUE-MEDIA, John's decision of Oct 21; rule set 2.108.0).** SC-OPAQUE-BLOB (MAJOR) reports a
+  binary file whose first bytes are near-random, as encrypted or packed data is; compressed media are too, and a list
+  of first-bytes signatures exempted them (a font by its extension). John's fp-tally over 261 GitHub scans found 3
+  WARN verdicts SC-OPAQUE-BLOB set, 2 by it alone: `music/music1.mp3` (an MP3 that starts at its first frame, with no
+  ID3v2 tag, which no signature named), Pillow's `Tests/images/bw_gradient.imt` (an IM Tools image: a text header,
+  then 2,560 bytes of a grey gradient, each of the 256 levels ten times: 7.9 bits a byte and nothing hidden; not a
+  name exemption: it is recognised by its header and its exact pixel count) and `signing/tiles-foss-debug.pkcs12` (a
+  debug signing keystore). A near-random file is now quiet only when its bytes are a format the engine walks, from the
+  first byte to the last (`rust/crates/lazaret-engine/src/media/`, never the name): MPEG audio and AAC (ADTS) frames
+  after their ID3v2 tags (ID3v1, APEv2 and Lyrics3 after them), Ogg pages and FLAC frames with their checksums, ISO
+  media boxes (MP4, MOV, M4A, 3GP, HEIC, AVIF, JPEG 2000), Matroska and WebM elements, RIFF (WAV, AVI, WebP, RF64,
+  big-endian RIFX) and AIFF chunks, transport-stream packets, PNG chunks with their checksums, JPEG segments and
+  scans, GIF blocks, BMP, TIFF and BigTIFF, ICO and CUR, TGA, Apple icons, ICC profiles, TrueType and OpenType fonts
+  and collections, WOFF and WOFF2, IM Tools and Netpbm (PBM, PGM, PPM, PAM) images. It fails closed: a payload
+  appended, a gap between a directory's parts, a chain or checksum broken, a file cut short (read whole or as its
+  stream passes: the host never passes over a file's end, and a part that runs past it fails the walk), a format's
+  signature glued onto random bytes stay SC-OPAQUE-BLOB, whose message now says what the file was read as and where it
+  stopped being that; so does a file of no format walked. PNG's, JPEG's, a font's and the other walked formats' first
+  bytes no longer exempt a file by themselves; PDF, PostScript, Photoshop, DDS, GIMP's, SGI's, Sun's, FITS, QOI,
+  Radiance and bare JPEG 2000 codestreams still do (`UNWALKED_MAGIC`), as before: no walker reads them yet. A file too
+  large to read whole is walked as it is read, passing over what the walk skips. A walk to the end proves a file's
+  shape, not what its parts hold, so it is bounded (the review of Oct 27), and a header and a payload are quiet only
+  within the bounds. Shapes no real file has are opaque: an ISO media file with neither a file type box nor a movie
+  box, a box of size 0 that is not the media data, a PNG with no IDAT, a JPEG image with no frame header or no scan, a
+  GIF with no image, a transport stream with no program association table, a sound whose format names no channels,
+  rate or block size, a font without the tables every font has, a TIFF directory naming a tag twice, an icon whose
+  images overlap. The parts a format leaves free-form hold at most 64 KiB in all and a quarter of the file; past that
+  the file stays SC-OPAQUE-BLOB, its message naming the part: ISO media's `free`, `skip`, `wide`, `uuid` and unknown
+  boxes; PNG's text, private and unregistered chunks; JPEG's comments and unregistered application segments; ID3's
+  private (PRIV), object (GEOB) and unknown frames (its frames are read now, its padding must be zero bytes); RIFF's
+  and AIFF's JUNK and unknown chunks; TIFF's private tags but the well-known ones; a font's unregistered tables;
+  Matroska's Void elements and attachments; GIF's comments and application extensions but the looping and XMP ones; an
+  Ogg stream of no known codec; FLAC's application blocks (its padding must be zero bytes). The formats that store
+  their samples as they are (Netpbm, IM Tools, TGA, an uncompressed BMP, PCM in WAV, RIFX, RF64 and AIFF) are quiet
+  only when their first 8 KB of samples follow one another (the smallest entropy of their differences at lags 1 to 4
+  is under 7.0 bits a byte). What a codec decodes (an MP4's media data, an audio frame, a JPEG's scan, a WAV of a
+  coded format's data) stays unbounded: a payload there needs code to read it out, which the scan reads. A TIFF's walk
+  reads at most a million directory entries and a million offsets, an icon's image once. A PKCS#12, JKS, JCEKS or BKS
+  keystore read to its end is **S-SECRET**, listed as secrets are and never a registry's verdict: BLOCKER when it
+  holds a private or secret key in the clear part of its structure, MAJOR when its entries are encrypted whole, INFO
+  for certificates alone; not an opaque blob. Each part has its shape (a certificate a DER Certificate spanning its
+  bytes, an encrypted key an EncryptedPrivateKeyInfo, a signed PKCS#12's content read as an unsigned one's), and
+  SC-OPAQUE-BLOB stands beside S-SECRET when one part no structure reads (encrypted data, a key's or a secret's bytes)
+  is over 16 KiB or all of them over 1 MiB. Measured by route (project scan, `--deps`, the registry's sdist, wheel and
+  npm tarball, the npm CLI and its `--deps`; the native and WebAssembly engines alike): the 44 files ffmpeg, Pillow
+  and fontTools wrote (`tests/fixtures/media`: from seeded noise, the raw formats' from a signal, as a real picture's
+  or sound's samples are), 7 or 8 SC-OPAQUE-BLOB → none; the same files' first 64 bytes glued onto random bytes, 9 →
+  43 (the 44th, a transport stream named `.ts`, is TypeScript to the scan, as before); with 2 KB of random bytes
+  appended, 7 → 21 in a project scan, whose sample is a file's first 512 bytes (the other 23 begin with headers that
+  are not near-random, before as now), and 8 → 40 in the registry, whose sample is 8 KB; seven keystores, 5
+  SC-OPAQUE-BLOB and 2 quiet → S-SECRET (4 BLOCKER, 1 MAJOR, 2 INFO), a registry verdict WARN → OK; the tally's three
+  shapes WARN → OK; the review's 33 media and 5 keystore probes (a payload in a free-form part, a raw image or sound
+  of random bytes, a size-0 box, a PNG with no image data, a font of one table, a keystore's shell around random
+  bytes, a file claiming 1 GB and cut short) all SC-OPAQUE-BLOB but the codecs' data (MP3 and AAC frames, an MP4's
+  media data), two whose first bytes are not near-random (the sample's limit, as at the base) and a keystore's secret
+  entry under 16 KiB (S-SECRET). 2,311 real files on the build machine (Pillow's and Go's test images, scipy's WAVs,
+  system and TeX fonts, keystores made with keytool and OpenSSL, the JDK's trust store), classified as the registry
+  does: of 40 SC-OPAQUE-BLOB, 23 quiet (14 TGA, Netpbm, BigTIFF, the IM Tools image), 8 S-SECRET, 9 still opaque (BLP,
+  FLI, a tar, a PNG broken on purpose renamed `.bin`, and scipy's 32-bit RIFX and RF64 test WAVs, whose samples are
+  near-random: 7.50 bits a byte from one to the next); 16 newly opaque: 13 images Pillow's tests break on purpose (cut
+  short, a changed checksum, junk in a JPEG's header, fuzzers' crash files, an old-style JPEG TIFF that names a tag
+  twice, a cut Ultra HDR sample), scipy's 32-bit little-endian test WAV and LibreOffice's `applause.wav` (7.67 bits: a
+  recording like noise measures as random bytes do), a cost of the raw-sample bound: 7 of the 49 WAVs measure as
+  near-random, these 3 and the 4 still opaque; 1,933 of the 2,311 files walk to their end. Pillow's checkout, as the
+  GitHub scan reads it: WARN by 5 SC-OPAQUE-BLOB (the .imt, four TGAs) → WARN by 4 (its PNGs broken on purpose). The
+  19 TrueType fonts of react-native-vector-icons 10.3.0 walk to their end. The reviewer's PyPI sdists (mutagen,
+  fonttools, scikit-image, matplotlib, Pillow) and npm tarballs (font-awesome, bootstrap-icons, @fontsource/roboto,
+  pdfjs-dist, leaflet, ion-sound): no new finding; ion-sound WARN → OK. Classifying the 2,311 files (260 MB) takes 1.1
+  s, from 0.2 s: a candidate is now read whole. Bounded further (the re-review of Oct 27): a font collection's walk
+  passes its tables in linear time (it dropped the first of a vector of parts, which moved every other: 64 fonts of
+  4,096 one-byte tables took 19 s to walk, a 16 MB collection minutes), a font directory naming a table twice is no
+  font's (a TrueType or OpenType font's, each of a collection's, a WOFF's, a WOFF2's, each font's of a WOFF2
+  collection), and a directory read as its stream passes names at most `MAX_CLAIMS` (65,536) parts, past which the
+  file stays opaque; a keystore's certificates are counted, each whole toward the 1 MiB total and its signature with
+  its bytes past 16 KiB as one part, and so are an alias's bytes past 256 and those of any other value no structure
+  reads (a MAC's salt, a bag's attributes, an algorithm's parameters, a signer's names, a serialized object's
+  strings; its arrays whole); the free-form parts of an icon's PNG images count toward the icon's 64 KiB and quarter,
+  and so do a TGA's developer area and an ICC profile's tags of no registered signature (`ICC_TAGS`); the size a WOFF,
+  WOFF2 or BMP declares is checked at the file's end however its last chunks came (an empty chunk before the end
+  passed it over: `noise.woff2` cut by one
+  byte was opaque whole and quiet streamed). The re-review's collections of 16, 32 and 64 fonts and of 16 MB walk in
+  0.02, 0.03, 0.04 and 0.15 s natively (from 0.69, 3.0, 19 s and over 45) and 0.09, 0.10, 0.17 and 0.36 s in
+  WebAssembly (from 0.77, 3.3, 19 s and over 45); the npm tarball holding one takes 0.85, 1.5, 2.7 and 9.3 s (the base
+  1.8, 1.5, 2.7 and 8.7; before, 1.5, 4.4, 24 and 8.8), and they are SC-OPAQUE-BLOB. No answer moved for the reviews'
+  probes on any route, nor for 7,350 real files walked (Pillow's test images, fontTools' fonts, mutagen's and
+  pymediainfo's tests, seven npm packages, 52 ICC profiles, the system's fonts with Noto's CJK collections) and 460
+  keystores (436 `cryptography_vectors` PKCS#12 files, 23 from keytool, OpenSSL and the JDK, the system's `cacerts`:
+  123 certificates, 133,175 bytes counted of 1 MiB, the largest part 513 of 16 KiB).
+- **An ordinal in display text is not a look-alike name (FP-HOMOGLYPH-ORDINAL, from John's fp-tally of Oct 21,
+  reworked after the review of Oct 27; rule set 2.112.0).** SC-HOMOGLYPH (MAJOR, WARN) reported "'Nº'
+  reads as 'No' but is spelled with U+00BA for 'o'" on `doomvault/src/library/LocalLibrary.tsx:581`, a label's JSX
+  text. A file that may hold JSX is read with JSX and without, and only the literals both readings agree on were left
+  out of the names; JSX text is code to the reading without JSX. Now an ordinal — digits or one ASCII letter, then one
+  ordinal indicator (ª U+00AA, º U+00BA), with no identifier character before or after it (`1º`, `2ª`, `Nº`, `nº`,
+  `Mª`), not itself a look-alike of a dangerous name — is not read as a name where the file's JSX reading holds it as
+  display text, as the lexer reads it and as the parser reads it (JSX text, a JSX attribute's string, a string, a
+  template's text), in a file that does not parse as JavaScript without JSX (Node runs a `.js`, `.mjs` or `.cjs` file
+  so: one that parses so has no display text) and whose JSX reading parses; the line is read on for the next name.
+  `evªl`, `aºb` and any longer name holding an indicator are never exempt, and a look-alike of a dangerous name
+  (CRITICAL) is never lowered. The JavaScript lexer reads `of` (but after a `for` head's binding) and a keyword used as
+  a property's name (after `.` or `?.`) as operands: the review's `of <b> evªl("1")` and `obj.return <b> evªl("1")`,
+  valid JavaScript (two comparisons) that the first version made quiet on every route, are CRITICAL again in `.js`,
+  `.mjs`, `.cjs`, `.jsx` and `.tsx`. An ordinal in an identifier (`const Nº`), in a file read without JSX, or after no
+  letter or digit, and every other look-alike in display text (`pаypal` with a Cyrillic а), are reported as before;
+  Python reads `Nº` as `No`, as it always did. The rule's other confusables were looked at in JSX text: superscript
+  abbreviation letters (`Mᵐᵉ`), ligatures (`ﬁle`), fullwidth letters beside ASCII, the script l of `mℓ` and a Greek
+  word with a Latin letter are still MAJOR there (not changed: John's call); the micro sign, `№`, Roman numerals and
+  Cyrillic words of mapped letters alone were already quiet.
+
+- **A protobuf file's descriptor that generated code alone uses is not a base64 payload (FP-B64-PROTOBUF, from John's
+  fp-tally of Oct 21, reworked after the review of Oct 27; rule set 2.111.0).** protoc-gen-es
+  (protobuf-es 2.x) embeds each `.proto` file's serialized FileDescriptorProto as base64 and hands it to
+  `fileDesc("…")` from `@bufbuild/protobuf/codegenv2` (`codegenv1` in 2.0 to 2.2); SC-B64 (MAJOR, WARN) reported every
+  such file — the tally found it on `worker/src/gen/listentogether_pb.ts:13`. A descriptor is data the program can
+  read back, so the decision is the whole scan's, not a file's: a project scan, `--deps` and the registry drop a
+  file's SC-B64 finding only when every run of the line is a FileDescriptorProto read to its end by descriptor.proto's
+  structure with no free text (no source information or comments, no JSON name but the one protoc derives from the
+  field's name, default values of 64 characters at most), handed whole to the runtime's loader and bound as generated
+  code binds it, and used only as generated code uses it in every file of the scan (by
+  `messageDesc`/`enumDesc`/`serviceDesc`/`extDesc`, another descriptor's dependency list, the runtime's registry
+  constructors, imports and exports by name), its module read only for its members wherever a specifier may lead to it
+  (relative paths, tsconfig `paths`/`baseUrl`, packages; an undeclared or aliased name may lead anywhere) and never
+  through its own exports by a name made at run time, its file named by no string but a module specifier; when no code
+  of the scan runs text it builds (`eval`, `Function`, vm, a constructor, a global looked up by a computed name),
+  loads a module that runs code (`child_process`, `worker_threads`, `vm`, `module` …), reaches the module registry or
+  loads a module by a name made at run time; when the project does not remap the runtime (a package.json `npm:`,
+  `file:`, `link:`, git, URL or `workspace:` spec under any key that names it, a tsconfig/jsconfig `paths` entry or
+  `baseUrl`, a config `extends` the scan did not read, a bundler's alias or `{ find }`, an import map); and when the
+  scan read everything (`.vue`, `.svelte`, `.html` and other files that hold script are read for it). A file scanned
+  alone keeps its finding. The pass is linear in the scan (each reading indexed once). Each form the generator writes
+  (target ts, js, legacy CommonJS; codegenv1), compiled by tsc, laid out by prettier, is quiet in a project scan,
+  `--deps`, the registry and the npm CLI, as are @bufbuild/protovalidate's, @connectrpc/connect's and
+  @bufbuild/protoc-gen-es's packages and 437 of the 439 files protoc-gen-es generates from googleapis' protos
+  (grafeas' `intoto_statement` and `sbom` keep SC-B64: their descriptors carry a JSON name of their own, `_type`).
+  Base64 that is not such a descriptor, a descriptor read back or handed on, in its file or another, or one whose
+  loader the project remaps, is SC-B64 as before; no path or file name exempts anything. @bufbuild/protobuf's own
+  well-known types import `fileDesc` by a relative path and keep SC-B64. Residual (John's call): a descriptor's
+  options are reachable through the schemas generated code exports (`X.file.proto`, `getOption`), and code that takes
+  them out and hands them to a sink the pass does not read (a file run later, the network) is not seen.
+- **SC-EVAL-DECODE exemptions require file-wide integrity and an exact child program
+  (FP-PDFJS-DECODE, external review amendment, Oct 27; rule set 2.113.0).**
+  RegExp literals, intact constructions and single bindings can be proven; reflection,
+  unknown writes and all direct eval invalidate that proof, including above the 2 MB
+  tree boundary. Encoded visible-source exemptions require intact encoders and a direct,
+  untransformed child-process command whose complete program is one supported decoder
+  and sink. Unresolved dynamic execution in visible source keeps BLOCKER. Every round
+  trip on a line retains its own source risk, reasons and location. This deliberately
+  reverses the earlier unsafe precision gains for eval-bearing bundles, replaced encoders,
+  shadowed child decoders, stored/transformed commands and unknown dynamic source.
+  Python and the rule pack are unchanged; shared inert acceptance tests cover native,
+  WASM and both sides of the tree-size boundary.
+
+- **A model file is read for what loading it runs, not reported as an embedded archive (FP-MODEL-FILES, John's OK of
+  Oct 20; rule set 2.104.0).** scan-all's run of Oct 20 gave `github:ObsidianArch02/fireredasr2s-mlx`
+  WARN for one finding, SC-NESTED-ARCHIVE on `golden/golden.pt`: a PyTorch checkpoint is a zip by design, so every
+  repository or package that shipped one was WARN, while what loading it runs was never read — `torch.load` without
+  `weights_only=True`, a Lightning checkpoint, `joblib.load`, `pickle.load` and `numpy.load(allow_pickle=True)`
+  unpickle the file, and a pickle runs whatever its globals name and its REDUCE, BUILD, NEWOBJ, INST and OBJ opcodes
+  call (a known way to spread malware through model files). The engine now recognizes a model file by its bytes (a
+  zip whose first member is `<archive>/data.pkl`, or an `.npy`; PyTorch's legacy stream and tar; a pickle of protocol
+  2 to 5; zlib or gzip around a pickle; a zip of one pickle, pandas' `to_pickle('x.pkl.zip')`; text that reads to
+  its STOP as a protocol 0 pickle) or, for a protocol 0 or 1
+  pickle and bzip2/xz/lzma/lz4 around one, by its name (`.pkl`, `.pickle`, `.pck`, `.pcl`, `.joblib`), and reads its
+  pickles opcode by opcode, never unpickling them (every protocol; the memo, Python 2's names; each `.pkl` member of
+  a checkpoint, a second `data.pkl` too; joblib's arrays skipped as joblib skips them, and read as plain `pickle.load`
+  would read them when they start with an opcode; object arrays in `.npy` and `.npz` files; the bytes handed to
+  `torch.storage._load_from_bytes` or `pickle.loads`, as a file of their own). Each global is judged by its name and
+  its use: the ones a tensor checkpoint is rebuilt from (PyTorch's own weights-only unpickler's set), numpy's own
+  pickling functions and constructors of plain data are the format (`PICKLE_SAFE_GLOBALS`: what PyTorch itself trusts,
+  not an exemption), and so are pyarrow's pickling helpers (pandas 3's Arrow-backed arrays, a Hugging Face dataset's
+  table), pandas' Arrow extension types and dateutil's and pytz's zones; the data types of modules of code, named
+  exactly (`http.HTTPStatus`, `signal.Signals`, `socket.AddressFamily`, `os.stat_result`, `time.struct_time`,
+  `subprocess.CompletedProcess`: `PICKLE_DATA_GLOBALS`), are data; `getattr(<a global>, '<a name>')`, how pickle
+  writes a bound method (a datetime's zone, `zoneinfo.ZoneInfo._unpickle`), is read as that dotted global and judged
+  by its name; objects remade by NEWOBJ and BUILD, or by a reconstructor handed their class (sklearn's estimators,
+  omegaconf, Lightning's hyperparameters), are quiet; a global that runs code or touches the system (`os`, `posix`,
+  `nt`, `subprocess`, `eval`/`exec`/`compile`/`__import__`/`open`, `getattr` in any other use, `runpy`, `importlib`, `socket`,
+  `shutil`, `sys`, `webbrowser`, `ctypes`, nested `pickle`, `marshal` and `torch.load` loads and the like), in any use,
+  a callable put where the unpickler calls it (an object's `__setstate__`), BUILD on a class or function, a class made
+  with `type()` and a dotted name of code handed to a call are **SC-PICKLE-CODE** (new, CRITICAL); another installed
+  function called with text it is told to use (a command, code, a path, a URL, a module path, bytes), or an object the
+  file computes and calls, is **SC-PICKLE-GLOBAL** (new, MAJOR); a global of the scanned package's own modules
+  (`torch.save(model)` of its own class: importing it runs that module's code when the file is loaded, code the scan
+  reads) is SC-PICKLE-GLOBAL as INFO, listed and setting no verdict, and a call with text of it (an enum's member
+  lookup by a URL too, `Source('https://...')`) is MAJOR; a pickle the reader cannot read to its end (cut
+  short, garbled, past its bounds, compressed with bzip2, xz, lzma or lz4, a pickle or legacy file larger than the
+  source-size limit) is SC-TRUNCATED. A checkpoint (or an `.npz`) is read by range, whatever its size: its zip's end
+  records, central directory and pickle members, never its tensor storages, so one of hundreds of MB is judged as one of
+  a few KB is (a 200 MB checkpoint reads in a few KB: from the disk in a project scan and `--deps`, as the stream passes
+  in a registry archive); a `.pth` file too large to read whole, PyTorch's usual name for one, is read in chunks for
+  the lines Python runs of it (SC-PTH-EXEC as for any `.pth` file; a line longer than 1,000,000 bytes is SC-TRUNCATED),
+  so a 200 MB `model.pth` is judged by its pickle and its import lines, not INCOMPLETE. A model file that was read has no SC-NESTED-ARCHIVE unless its zip holds members its format
+  does not; other nested archives keep it as before. Every route: the registry (a wheel's checkpoint was not reported
+  at all), a project scan and `--deps`, Python and npm (the WebAssembly engine) alike. Measured on files the real libraries wrote
+  (numpy 2.5, joblib 1.6, scikit-learn 1.9, pandas 3.0, omegaconf 2.4: 83 files of 13 kinds of estimator dumped plain,
+  with zlib and gzip, protocols 0 to 5, `.npy`/`.npz` with and without object arrays, DataFrames and hyperparameters)
+  and on the data files those libraries ship (numpy's, scipy's and joblib's tests: Python 2 pickles, joblib 0.8 to 0.11
+  formats): quiet but for the 18 compressed with bzip2, xz or lzma (SC-TRUNCATED), 174 files read in under a second.
+  After the precision review of Oct 21, on 199 more files the real libraries wrote — the reviewer's 112 (pandas 3.0 with
+  pyarrow 26, zoneinfo, dateutil and pytz zones, the standard library's enums, hyperparameters at protocols 0 to 5),
+  75 of polars 2.0, scipy 1.18's sparse matrices, Pillow 13's images, xgboost 3.4's and lightgbm 4.7's scikit-learn
+  models, networkx 3.7's graphs, datasets 5.1's Dataset, DatasetDict and Features, transformers 5.20's
+  TrainingArguments (as `training_args.bin`) and a config, a Lightning checkpoint's AttributeDict, and the 12 test
+  fixtures — the 42 the first reader reported CRITICAL or MAJOR and the 2 zip-compressed pandas pickles it left as
+  archives are quiet; what is left is the 5 compressed with
+  bzip2, xz or lzma (SC-TRUNCATED) and 6 enums pickled from `__main__` called with a URL, a path or a dotted name
+  (MAJOR: their class is not in any scan). The external review of Oct 21 (H1–H7, M1–M4) closed where the reader
+  decided less than the loader reads: an `.npy` header read by `ast.literal_eval`'s and numpy's dtype grammar (an
+  object dtype however written is read, one it cannot place is SC-TRUNCATED); a zip's members the union of what every
+  common unpacker finds (`zip::entries`' `Listing`, its `ambiguous` reasons SC-TRUNCATED: with FP-NESTED-ARCHIVE's
+  review of the zip reader); every copy of a legacy tar member read; a nested load past the queue
+  SC-TRUNCATED; a checkpoint member the format's only by its content (any pickle among the others read, a program or
+  an archive among them reported, a TorchScript archive's code scanned as Python); BUILD state that gives a special
+  method a callable kept past the reader's bounds, an installed `__setstate__` dispatched, what a look cannot see
+  SC-TRUNCATED; a `.pth` read whole by the stream's byte-wise rule; byte ranges charged once (a 50,000-member `.npz`
+  by range is quiet); an extension code called SC-PICKLE-GLOBAL, MAJOR; `__torch__` trusted in TorchScript archives
+  only. The external re-review of Oct 27 (5 HIGH), in the same commit: a zip member's Unicode Path extra name
+  (Info-ZIP's) is a name of it too, read as an ordinary member when it is not the format's, and a disagreement
+  SC-TRUNCATED; numpy's `_reconstruct` (and `_mareconstruct`, torch's `_rebuild_wrapper_subclass`) makes data only of
+  the format's own array types, anything else possibly callable; the enum waiver dropped (a call with text MAJOR
+  whatever the source says); a member a Unix system marked executable keeps SC-NESTED-ARCHIVE (or SC-BINARY), named
+  with its mode, before any member the format owns is passed over; one budget for a zip's listing (at most 16 end
+  records a reader may take, each directory read once, its entries and bytes charged once): 2,000 end records over
+  one directory are SC-TRUNCATED in milliseconds, not an aborted process. Its second (4 HIGH), in the same
+  commit: every Unicode Path field of both headers names the member (more than one on an entry SC-TRUNCATED); the
+  safe constructors handed a class audited as one category (DESIGN.md lists them: `array._array_reconstructor`,
+  joblib's wrappers' `subclass`, torch's `Parameter` of its argument's type, pyarrow's extension types, torch.jit's
+  `build_*list`, numpy's object scalar), data only when what decides the class is the format's own; a member's Unix
+  mode judged whatever system made it; a symlink, directory, device, FIFO or socket never passed over as a storage
+  or record (SC-NESTED-ARCHIVE naming its type). Its third (pass, no bypass; one LOW), at stacking: a cap that
+  passes findings over says how many, as SC-TRUNCATED, as the nested loads past 64 do: the places the pickles run code
+  past 64, the findings of a checkpoint's members past 64 and the parts that could not be read past 16 (the 64 and
+  16 listed as before, so no verdict is weaker; the same on every route, native and WebAssembly). Owed:
+  John's `bench.py all` (the popular set: a release that ships a checkpoint or a pickle moves; joblib's wheel becomes
+  INCOMPLETE for its own `.pkl.bz2`/`.pkl.xz`/`.pkl.lzma` test files).
+- **A member of the standard library's data enums that Python 3.10 or 3.11 pickled is data, not code
+  (FP-MODEL-FILES-PY311, John's decision of Oct 29; rule set 2.114.0).** FP-MODEL-FILES reads
+  `signal.Signals`, `socket.AddressFamily`, `ssl.VerifyMode` and the like as data (`PICKLE_DATA_GLOBALS`) and the rest
+  of `signal`, `socket` and `ssl` as code. Python 3.12 and later pickle `signal.SIGTERM` through its class
+  (`signal.Signals(15)`), but Python 3.10 and 3.11.0 to 3.11.4 pickle a member of an enum that
+  `IntEnum`/`IntFlag._convert_` made by the module-level alias it exports (`GLOBAL 'signal SIGTERM'`; signal's
+  `Signals`, `Handlers` and `Sigmasks`, socket's `AddressFamily`, `SocketKind`, `MsgFlag` and `AddressInfo`, ssl's
+  `_SSLMethod`, `Options`, `AlertDescription`, `SSLErrorNumber`, `VerifyFlags` and `VerifyMode`), and 3.11.0 to 3.11.4 a
+  member of `ssl.TLSVersion` or `ssl.Purpose` as `getattr(ssl.TLSVersion, 'TLSv1_2')`: a benign pickle those Pythons
+  wrote holding a signal, a handler, an address family, a socket kind or an ssl constant was SC-PICKLE-CODE (CRITICAL),
+  and three of FP-MODEL-FILES's tests, which pickled with the running Python, failed there. A member named exactly
+  (`PICKLE_DATA_MEMBERS`, 202 names: every constant CPython 3.10.0 to 3.14.6's `signalmodule.c`, `socketmodule.c` and
+  `_ssl.c` can export on any platform that those enums take — Windows' `CTRL_C_EVENT`, `AF_HYPERV`, Linux's `AF_PACKET`,
+  macOS' `AF_SYSTEM` among them — `ssl.PROTOCOL_SSLv23`, and `TLSVersion`'s and `Purpose`'s members as
+  `ssl.TLSVersion.TLSv1_2`) is data where it is only kept: pushed, stored, memoized, put in a list, tuple, set or dict
+  (a dict's key too), handed to a call or a BUILD. Called (REDUCE, OBJ, INST, a helper's call of it, or APPEND,
+  APPENDS or ADDITEMS calling the `extend`, `append` or `add` the pickle gave an object), made (NEWOBJ, the class of a
+  reconstructor, of numpy's `_reconstruct` and the format's other constructors of their argument's class, of a joblib
+  array wrapper), changed (BUILD, SETITEM, SETITEMS, APPEND, APPENDS or ADDITEMS on it), given to a special method or
+  in a pickle that calls an object it computed (`functools.partial(signal.SIGTERM)()`) or what it may have given an
+  object and the reader does not see, it is SC-PICKLE-CODE as before, and so are an attribute reached through it
+  (`getattr(signal.SIGTERM, '__class__')`), `signal.signal`, `socket.socket` and any name that is not exactly a
+  member's, module and name each (`signal.SIGTERMX`, `signal.Signals.SIGTERM`, `_signal.SIGTERM`, `ssl.SOCK_STREAM`,
+  `http.client.OK`, `GLOBAL 'ssl.TLSVersion' 'TLSv1_2'`), and a dotted member's name where Python looks it up with a
+  plain `getattr` (GLOBAL or STACK_GLOBAL below protocol 4, numpy's `_ufunc_reconstruct`: it raises there); the getattr
+  form and protocol 4's GLOBAL walk it. `ssl._SSLMethod` joins `PICKLE_DATA_GLOBALS`: 3.12 pickles `ssl.PROTOCOL_TLS_CLIENT` as
+  `ssl._SSLMethod(16)`, CRITICAL before on every Python. The engine's, so every route alike, native and WebAssembly.
+  Measured on the runner, base `9ec8f832` → this change, 181 files on the 9 routes (github, project, --deps, sdist,
+  wheel, npm tarball, action; the npm CLI and its --deps in WebAssembly): 88 benign files — pickles of signal's,
+  socket's and ssl's members and plain data written by Python 3.10.22, 3.12.16 and 3.14.10 on the runner and 3.11.1,
+  3.11.4 and 3.11.17 here (a dict of members at protocols 0 to 5, every member at protocols 2 and 4, a `torch.save`
+  checkpoint, a joblib file), and 28 hand-built — were SUSPICIOUS on every route but 3 (85, SC-PICKLE-CODE CRITICAL:
+  every 3.10 and 3.11.0–3.11.4 file for the aliases, 3.10's and 3.11.0–3.11.4's with SC-TRUNCATED for
+  `{SIGTERM: SIG_DFL}` in an object's state; the later Pythons' but their checkpoints for `ssl._SSLMethod`) and are OK
+  on every route; the 31 hostile ones (each member called, called through `functools.partial` or
+  `operator.itemgetter`, made, changed by BUILD, SETITEM or APPEND, given to `__setstate__` or reached through,
+  `signal.signal` with a handler, a socket made and connected, `os.system`, near names, other modules' names,
+  checkpoints of them) stay SC-PICKLE-CODE CRITICAL and SUSPICIOUS on every route, losing only the "imports" of a
+  member handed beside them as an argument; the review's 62 (4 benign, OK now; 53 hostile, each as on base; 5
+  controls, as on base but one, a member as a key of a call's keyword arguments: OK now) too. No cell is louder; the
+  routes agree file by file. Amended after the review (Oct 29): a member in a pickle that calls an object it computed,
+  a member given items (SETITEM, APPEND) and `GLOBAL 'ssl.TLSVersion' 'TLSv1_2'` (the table matched the joined name)
+  were passed over as data; they are code again, as on base. Amended after the re-review (Oct 30): a member an object
+  was given as the `extend`, `append` or `add` that APPEND, APPENDS or ADDITEMS call (pickle's `load_append`,
+  `load_appends` and `load_additems` look them up on the object; the reader now keeps what BUILD's state and slots,
+  SETITEM on an object and the helpers that set attributes from a state — torch's `_rebuild_parameter_with_state` and
+  `_rebuild_from_type(_v2)`, `types.SimpleNamespace` — give an object under those names, and calls it there), a member
+  as the class numpy's `_reconstruct`, `_mareconstruct`, `array._array_reconstructor`, `__pyx_unpickle_SeedSequence`,
+  torch's `_rebuild_wrapper_subclass` or a joblib array wrapper makes an object of, and a member's dotted name that
+  Python looks up with a plain `getattr` (`GLOBAL 'ssl' 'TLSVersion.TLSv1_2'` below protocol 4,
+  `_ufunc_reconstruct('ssl', 'TLSVersion.TLSv1_2')`) were passed over as data, though Python raises at each; they are
+  code again, as on base: the re-review's 19 such probes and 21 more of the same shapes, SUSPICIOUS on base and OK on
+  the first amendment, are SUSPICIOUS again on all 9 routes, while the getattr form 3.11.0 to 3.11.4 write (protocols 0
+  to 5), the dotted name at protocols 4 and 5 and Python's own order (APPENDS, then the BUILD that names `append`) stay
+  OK. Amended after the re-check (Oct 30): a member given as that `extend`, `append` or `add` in ways the record of
+  each object did not see — a slot state's `__dict__` or torch's setattr-style state, a dict installed as an object's
+  attributes by reference and filled later, the object reached through an alias (`operator.getitem((obj,), 0)`,
+  `logging.getLogger('x')` twice, an enum's member), joblib's memoised array wrapper — was passed over as data, and the
+  record's walk of each BUILD's state and its calls at each APPEND were unbounded (a 300 KB pickle took 13 s). Now
+  every member written under those names wherever a dict may be built or filled — DICT, SETITEM and SETITEMS on
+  anything, a call's arguments (`_operator.setitem(d, 'extend', m)`, `dict.setdefault`,
+  `dict.update(d, [('extend', m)])`), a list or tuple state each of whose items is a 2-item tuple or list
+  (`torch.nn.Module.__setstate__`'s `__dict__.update`), a helper's pairs — is the whole file's (vm.rs `AnyGiven`, noted
+  where the pair is written), and so, only where a dict is or becomes an object's attributes (a BUILD's or a helper's
+  state, SETITEM on an object, a dict installed by reference, followed by its address), is an object the pickle
+  computed that may be called under a key it computes (in a state of pairs no helper reads, its literal names only);
+  APPEND, APPENDS and ADDITEMS on anything but a list, set, dict or tuple the pickle built call each, so an alias
+  reaches it; an object the pickle computed given so, or a mapping of attributes it computed in a dict's place, passes
+  no member over. The walks and the calls have their own count (`GIVE_WORK`, apart from the `STATE_WORK` the reading's
+  other looks charge): past it nothing more is looked at or called and no member is passed over; a record full is not
+  walked again (a record only unseen is); an APPEND whose call is not made, or on an object part of whose state the
+  reader did not look at for a bound of its own (the count spent, the record full, a container's items past what it
+  keeps), is SC-TRUNCATED; a dict a state holds twice is walked once, and a global no helper models, called again with
+  items of the same text kind and number, is not called again. The re-check's 11 such probes and the third re-check's 6
+  more (a state of pairs reached through an alias, a dict filled by a call) are SC-PICKLE-CODE CRITICAL again on every
+  route, as on base; a plain dict keyed by an enum's member or a class before a deque or a list subclass is filled (the
+  third re-check's 12 benign files in 3.10's form) stays OK, as on the second amendment, and so do 300,000 objects
+  BUILT before a deque, which reached the reading's looks when the two counts were one. After the fourth re-check: a
+  tuple state's 2-item containers were each read as a pair, so a frame's BlockManager axes, a numpy object array of two
+  objects, `functools.partial`'s two arguments, a custom `__setstate__`'s list of (enum member, object) pairs and an
+  (n, (obj, obj)) state, each before a deque, were CRITICAL again (its 14 benign files), and are OK; past `GIVE_WORK` a
+  function given as `extend` that APPEND would call was passed over silently (4 of its probes: OK where the second and
+  third amendments were CRITICAL), and is SC-TRUNCATED (so, louder, are the same shapes with an int or plain text).
+  After the fifth re-check: an object's record unseen (a state the pickle computed, a dict past what the reader keeps)
+  was not walked again, so a function given as `extend` by a later BUILD was passed over silently (its 3 probes, OK
+  since the third amendment; the second read two of them CRITICAL), and is called (CRITICAL) or, where the reader's
+  bounds hide it, SC-TRUNCATED; and a state of (computed key, member) pairs, `[(Transport.TCP, SOCK_STREAM)]`,
+  `list({int: SIGTERM}.items())` or a dict state `{Transport.TCP: AF_INET}`, each before a deque, read as code (its 12
+  benign files), and reads as on the second amendment. Still read as code, as on base, though Python writes them: an
+  object the pickle computed under a computed key in a dict subclass's or an OrderedDict subclass's items with a member
+  kept, a member under the literal name `append`, `extend` or `add` anywhere, and an object whose own state is keyed
+  by an enum member or another object the pickle computes and holds an object, with a member kept elsewhere (the
+  first amendment read it SC-TRUNCATED), each before a deque. Known limits,
+  passed over (parity with base is backlog PY311-MEMBER-PARITY): a member under a key the pickle computes, in a dict, a
+  state or a state of pairs; a member a dict a call fills gives by a computed key or through a mapping or iterable the
+  pickle builds (`dict.update(d, [(<computed>, m)])`, `dict.fromkeys`, `zip`); one under a key
+  `codecs.encode(…, 'rot13')` makes. Each for one reason: every `PICKLE_DATA_MEMBERS` name is a plain int or str enum
+  member, none is callable, so calling one raises TypeError and runs nothing. The cost probes take 0.9 to 1.6 times
+  base's time (BUILDs of one memoised list state of 64 pairs 1.0 to 1.3, which took 1.5 to 2.0; 300,000 objects each
+  given a function and kept, 200,000 SETITEMs of a `__dict__` and 200,000 objects each BUILT with a tuple of 64 dicts,
+  1.4 to 1.6; APPENDs of text that names code to a function an object was given, which base never calls, 6 to 8,
+  bounded by `GIVE_WORK`; a record only unseen is walked again at a cost of at most one `GIVE_WORK` walk, about
+  0.3 s in WebAssembly, so a small file of that shape takes up to 1.7 times), where they took up to 20 times; the
+  earlier probes and the 380-file corpus read as on the second amendment.
+- **On Windows, `--deps` no longer reads a dependency's nested manifest as its root (WIN-DEP-PATHS, PR #17's CI of
+  Oct 30; rule set: assigned at stacking).** Both packages give the engine a manifest's path as their walk names it,
+  root-relative with the system's separator. `scan_manifest` reads SC-DEP-URL from a package's root manifest only
+  (the top of the tree, or `node_modules/<name>/`), and its test of that (`manifest::at_package_root`,
+  `is_package_root`) read the path '/'-separated, as core reads a path on POSIX, where a backslash is a file name's.
+  On Windows a dependency's fixture, `node_modules\dep\test\package.json`, then had no folder: it was read as a
+  package's root manifest, and the dependencies it names from an insecure source were SC-DEP-URL (MAJOR: the gate
+  failed) in both CLIs' `--deps` scans there alone, which `test_js_parity_dep_url` met on the `js (windows-latest,
+  24)` job. `scan_manifest` now takes `windows`, as `collect_file`, `binary_classify` and the SARIF calls do: the
+  walks pass it (`core._scan_manifest_entry` with `_WINDOWS_PATHS`, `scancollection.js` with collect.js `WINDOWS`), and
+  with it a backslash separates the path's folders. Nothing changes on POSIX, a file name that holds a backslash
+  included, nor in the registry's routes, whose member paths are '/'-separated on every system and pass none, nor in
+  the dashboard (its uploads are '/'-separated). The engine's other readers of a walk's paths read either separator,
+  take `windows` or the separator, or are given '/'-separated paths (the root test of SC-MANIFEST-UNPARSEABLE, the
+  dependency-folder test, the .gyp reader, the walk's `collect_dir`, `collect_file` and `collect_pycache`, the .pth and
+  .pyc readers, the `--deps` and descriptor calls, the cross-file follower, the taint helpers, the settings, agent and
+  CI readers, the vendored Go and Rust readers); the npm CLI, run with Windows' separator on a POSIX disk over the
+  parity tests' trees, now differs from its POSIX run only in how its messages name paths. Tests:
+  `test_dep_url`'s `WindowsPathTests` (3) and `dep-url.test.js` (2), which give the engine Windows' form on every
+  system (they fail on the old code), and `manifest::tests`. Route scans, base and this change, 8 inert manifests on
+  the 9 routes (the runner: a project's own, and a dependency's nested one): the same 72 results.
+- **The code a text hands an eval call as a string is read as code (EVAL-LITERAL; the engine's, for both packages;
+  rule set 2.107.0).** `eval("…")`, `Function("…")`, `new Function("a", "…")` and a global object's eval
+  or Function by a computed name (`globalThis["ev" + "al"]("…")`) run the string they are handed, and so do Python's
+  `eval`, `exec` and `compile`; the import-time and install-script tests read it as a string, so the whole environment
+  or a credential file sent from inside one was quiet in every route the tests serve: the registry's import-time code,
+  install scripts and action scan, and both CLIs' `--deps` (found and first fixed by the external review agent, card
+  609dd639, Oct 21–22). Now each such string (a string literal or a template with no holes, or several joined by `+`;
+  escaped quotes, `\x41`, `\u0041`, `\u{41}`; Python's adjacent, raw, bytes and triple-quoted strings; the call found
+  on the text's tokens, so one in a comment or a string is none) is read by the same test as a text of its own, and
+  what it finds is given at the call's line, noted " (in a string it runs as code)". Strings in strings are read four
+  deep (`_EVAL_DEPTH`): a text that nests them deeper is SC-TRUNCATED ("the strings eval calls run as code are read 4
+  deep (_EVAL_DEPTH), and this text nests them deeper"; both packages' `EVAL_CUT`), never quiet; each string read is
+  charged to the call's budget, a step a character and a fixed amount for the reading itself (50,000 steps in
+  JavaScript, 200,000 in Python), so a text of many strings runs out (SC-TRUNCATED) rather than on; a call's arguments
+  are found in one reading of the text's brackets, calls nested in each other's arguments too; a text that ends inside
+  a call (`eval(` at its end) is read. A string handed through a name (`eval(code)`) is not read here. On 10,765 JavaScript
+  files of popular packages (the latest releases of 39 from npm, lodash, moment, jquery, three, webpack,
+  @babel/standalone, core-js, mathjax, underscore, ejs, handlebars, doT, lodash.template, vue, angular and hogan.js
+  among them, twenty local ones and fourteen local bundles; some 280 hand such a call a string) both tests answer as
+  before for every file, in the same CPU. docs/RUST_ENGINE.md, section 24.
+
+- **A big text's tail is read: the supply-chain tree reads a file up to 16,000,000 characters, and the text follower
+  a text whole or says where it stopped (BIG-BUNDLE-TAIL, D-8; the engine's, for both packages; rule set 2.106.0).**
+  The tree read a JavaScript or Python text up to 2,000,000 characters; past that the text follower
+  answered, and it read a text's first 5,000 assignments, 100 returns, 200 functions with parameters, calls of them
+  and matches of each other kind, four passes, four links of a `.then` chain, quietly: an action's own code, which ncc
+  puts at its bundle's end, was past them (the review of FP-GITHUB-SCRIPT, Oct 18: the whole environment sent after
+  the 5,000th assignment of a bundle was OK). Now the tree reads a text up to 16,000,000 characters, the largest
+  source file the scans read (a larger one is SC-TRUNCATED, as it was), on its own budget; a reading past that budget,
+  or a text the parser refuses, is the text follower's, as before, never an answer of nothing. The follower reads a
+  text whole: each of its lists holds about as many items as a text of its length can (the pack's limit, or one in 8
+  characters for matches and returns, one in 4 for assignments, one in 2 for calls), a return's function and a
+  declaration's are found in one sweep, the script's functions' calls are read name by name, its passes run until
+  nothing grows (at most 256) and a `.then` chain to its end, and what it reads is charged to the call's budget. A
+  limit it still meets before a text's end (a text of little else, a chain past 256 passes) is said: the file is
+  SC-TRUNCATED in the limit's words ("the text follower reads at most 256 passes over the names, and this text's
+  still had more to give"), and the action scan keeps what was found beside it. The tree also knows two API clients'
+  own sends: @actions/http-client's `postJson`, `putJson` and `patchJson`, and Octokit's REST methods
+  (`github.rest.gists.create(...)`) and its `request` given a route (`github.request('POST /gists', ...)`); the text
+  follower's patterns the same. So github-script's bundle, read by the tree, is quiet through the action scan and the
+  import-time test; and an exfiltration in a bundle past 2,000,000 characters is CRITICAL at its start, its middle,
+  its end, and split (a helper that returns the environment, the call that sends it a megabyte later), sent by fetch,
+  a gist, a connection written to, `~/.npmrc` read and sent, http-client and Octokit; the review's tail (0 to 6,000
+  assignments before it) is CRITICAL through the action scan. A second external review (Oct 20) found four more ways
+  this lost a real send or ran unbounded, each fixed: a method's call (`a.send(data)`) was not followed where another
+  object had a method of its name, and is now a call of each function of the name (the text follower alone reports
+  github-script's bundle again, CRITICAL at http-client's `write(data)`: it answers there only where the tree does not
+  read the bundle); a file the tree did not read whole, the parser refusing valid code (500 nested brackets) or the
+  model's budget spent, was the follower's alone, and a split it cannot see was a quiet OK, where now the file is
+  SC-TRUNCATED (CRITICAL) in the tree's words ("the supply-chain tree did not read it whole: the parser refused it at
+  line 1 (nesting too deep); its text alone was read for what it sends") beside whatever the follower found, in the
+  import-time code, an action's scripts, an install script and a dependency's file of both CLIs, the follower's quiet
+  answer never clearing it (code that may never run keeps the follower's answer; a syntax error no runtime runs is not
+  truncated); so the model reads an ordinary bundle whole, its budget twice the taint pass's a node up to 32,000,000
+  steps and a function read up to 1,000 times (TypeScript's compiler, pyright's bundle and Claude Code's `cli.js`, which
+  met the old cap of 50 readings, are read whole now); and 3,000 callbacks of one function, each its own `data`, took
+  the follower 9 s whatever its budget, 8,000 past 45, where its reading of them is linear now (0.1 s; 100,000 in 9 MB:
+  1 s) and charged, with what it reads by hand, to the call's budget (a step a character), which its costliest input
+  runs out of in 18 s of CPU natively and 25 s in WebAssembly. Reading a big bundle whole cost TypeScript's compiler
+  28 to 36 s natively and 37 to 46 s in WebAssembly, which every dependency scan of a project using TypeScript would
+  pay, and a 16 MB bundle 841 MB of memory in WebAssembly, so both were cut before this shipped (John's decisions of
+  Oct 21): the model reads a function again only for what changed of what it uses, writes what callers give a closure
+  variable without reading the callers again, runs again only the calls a change concerns, and reads a recursion or a
+  cycle of calls once a round rather than at each change in it (TypeScript's busiest function 8 and 11 times, where it
+  was read up to 367), and it holds a tree's node without its line, one copy of the text, its per-node marks for the
+  marked nodes alone and its tables in rows. The import-time test of `typescript.js` takes 3.4 s of CPU natively and
+  6.5 s in WebAssembly, of `_tsc.js` 2.1 and 4.4 s (1.4 and 0.6 s natively, 2.8 and 1.7 s in WebAssembly while the
+  tree gave up on them); of a 16 MB synthetic bundle 3.9 and 6.5 s, peaking at 437 and 440 MB (1.0 and 2.1 s, 428 and
+  503 MB, while the tree read 2,000,000 characters); one that sends the environment, through the action scan, 14 to 16
+  s natively and 17 to 19 s in WebAssembly; fourteen local bundles of 2 to 11 MB 25.9 s natively and 54.2 s in
+  WebAssembly (16.8 and 35.2 s before), none cut. The limits of each path, with what is past them before and now:
+  docs/RUST_ENGINE.md, section 18.
+
+- **The text follower reads a function's variable in that function where it is sure of it (FP-GITHUB-SCRIPT; the
+  engine's, for both packages; rule set 2.105.0).** John's run of Oct 18 over vercel/next.js's workflows:
+  the official `actions/github-script` at 3a2844b was SC-IMPORT-RISK CRITICAL on 9 uses ("dist/index.js runs when the
+  action runs (runs.main), and it reads credentials or the whole environment and sends data over the network", line
+  2176, `req.write(data, 'utf8')` in @actions/http-client). Its `dist/index.js` is 2,228,144 characters, past the
+  2,000,000 the supply-chain tree read, so the text follower read it, by names: @actions/exec's `_cloneExecOptions`
+  gives a `result` a child process's environment, and TypeScript's `__importStar` helper, 12 KB on, has a `result` of
+  its own, which was taken for that one; every module imported through the helper then "held the environment", a
+  child's stdout callback's `data` with them, and that `data` was taken for http-client's own `data` parameter.
+  Renaming either `result` made the old engine quiet, and the tree, which reads each name's binding, finds nothing in
+  the same code: a coincidence of names, not a flow. The text follower now asks for the same variable where it can be
+  sure of it. A variable a function declares (`const`, `let`, `var`: a name, a destructuring's, a loop's) and a
+  callback's parameter (`x.on('data', (d) => {…})`, a read's callback, a `.then`) hold what they are given in that
+  function's body, the functions inside it among it, in the calls it makes (the calls of the script's own functions in
+  such a body, read even past the text's first 200) and, by its return, in its callers (`f()`, `this.f()`; and where
+  the old reading reached the same by the name alone, a method's parameter of the variable's name, `this.send(data)`,
+  and a variable of the name an instance's method returns, `const data = s.grab()`), never in another function's
+  variable of the name; but only where
+  the body's end is certain: a brace counter and a JavaScript reading of the body (regular expressions, templates
+  inside templates: `js_block_end`) close it at the same `}`, and no `/` in it is a guess (one after a class's, a
+  function's or an arrow's body or a label's block, after `await`, `yield` or `of`, a regular expression unclosed on
+  its line, an HTML-like comment). Elsewhere (a module's top, an arrow's expression, a body whose end is not certain) a
+  name reaches as before. And a reading that narrowed a name and met any of the follower's limits (the 100 returns,
+  the 200 calls, functions with parameters and matches of each kind, the 5,000 assignments, a pass that still had
+  more to give) reads the text again as before, and what that reading finds is reported (what the narrowing reading
+  finds when it finds nothing): what a narrowed name holds leaves its function only by the paths those lists hold. The external review of Oct 18 found the first
+  version of this fix losing real sends the reading before it found, in three ways: a body ended at a regular
+  expression's `}` after a class's body (with `extends`, a call in it, a static block, a template), a labeled block,
+  or a `break`, `continue`, labeled `break` or `debugger` that a line's end ends; a function returning the environment
+  after 100 others' returns; the call that gives it, or the function given it, past the 200 kept. Each is found now
+  (the environment, `~/.npmrc` and `~/.aws/credentials`, by fetch, `https.request` and axios), at and past each limit,
+  through the follower, past the tree's limit and through the action scan, as the reading before found it. A second
+  external review (Oct 20) found the line terminators U+2028 and U+2029 read as code: after `debugger`, U+2028, then
+  `/}/.test(s)`, both readers took the regular expression for a division and its `}` for the function's end, so their
+  agreeing proved nothing. Both now read ECMAScript's line terminators (LF, CR, U+2028, U+2029: a line comment and a
+  regular expression end at each, and each is a line break to ASI) and white space (NBSP, U+FEFF and every Zs, as
+  well as space, tab, VT and FF) as the grammar does, and a decision that rests on a character they do not model (one
+  outside ASCII, a name's escape, a comment between `break` and its label) makes the end a guess; the end is sure when
+  the JavaScript reading made no guess and the brace counter closes the body at the same `}`. Each such case (U+2028,
+  U+2029, CR and LF after `debugger` and `break`, a line comment each ends, NBSP, U+FEFF and U+3000 before a label, a
+  spread's regular expression) is found through the follower, past the tree's limit and in a text the parser refuses
+  (500 nested brackets), as the reading before found it. On its own
+  this leaves github-script's whole bundle reported: it meets the follower's limits (5,112 assignments, more than the
+  5,000 read), so the follower answers as before, CRITICAL at line 2176, until the tree reads the bundle
+  (BIG-BUNDLE-TAIL); the reduction of its names, and any text that meets no limit, is quiet. Assignments without a
+  keyword, members, Python's names, the 20,000-character reach in a long text and the follower's limits are as before.
+  The whole environment or a credential store really sent stays CRITICAL in every shape tried (a body, a query of its
+  entries, an object it is copied or spread into, a gist on api.github.com, an axios helper, one to three helpers of
+  the script's, a closure, a class's methods, an instance's, a callback, past a brace a regular expression or a
+  template holds): on its own and through the text follower the same answers as before.
 
 - **A download's deadline covers the whole request and holds while a read waits (F-07, the external review of Oct 18; no
   rule-set change).** On Python's transport (urllib's, and the pool's with `--keepalive`; the native transport has its
@@ -2080,6 +2692,51 @@ aggregate):
   run alone; a stand-in put back after the last close), and its `ClosedPoolTests` and `CloseMidwayTests` (with a
   stand-in executor).
 
+- **A Go file is left out as never built only for a real `ignore` constraint (F-06, the review of Oct 18; rule set
+  2.103.0).** The Go reader left a file out, unread, when its header held `//go:build` or `// +build`
+  followed directly by `ignore`: it stripped the prefixes without asking for the white space Go's constraint parser
+  (`go/build/constraint`) needs after them, so `//go:buildignore` and `// +buildignore` — plain comments to Go, the
+  file builds — read as `ignore`, and every finding of the file was gone: a package whose `init` deletes the user's
+  Documents folder, SUSPICIOUS (SC-IMPORT-RISK, CRITICAL), was OK with no issue once either comment was added, in the
+  registry and in a `--deps` scan of both packages. The header is now read as `go/build` reads it, and a file is left
+  out only where that is certain: a `//go:build` line needs white space after its prefix and, with one, decides; it
+  leaves the file out when it comes before any block comment or code and is `ignore` and'd with other tags (`&&`,
+  parentheses); two of them are Go's error. Without one, a `// +build` line before the leading comments' last blank
+  line leaves it out when it is one option that holds `ignore` (`ignore,linux`). Read now: a constraint inside a
+  block comment or after the package clause, `||` or `!`, a `// +build ignore` with no blank line before the package
+  clause, a `//go:build ignore` whose own `// +build` lines say otherwise, white space outside ASCII, and a header past
+  the 65,536 characters the old reading looked at, where `//go:build ignore || linux` could be cut to
+  `//go:build ignore`.
+  The reader decides on the file as the Go toolchain reads its bytes (the engine's `go_text`, given to the reader by
+  the registry and both `--deps`): UTF-8, its byte order mark dropped once, "\r\n" folded and a lone "\r" kept,
+  white space to Go and no line end (`// c\r//go:build ignore` is one comment, and `"a\rb"` a string Go compiles,
+  which the parser refused once the "\r" became a line end); a file is never left out with a NUL where Go's reader of
+  the package clause and imports meets one (its error; one past them is none, and such a file is left out as Go
+  leaves it out), a "\r" in its header or a byte order mark left at its start. The rules read the text as before: a
+  UTF-16 or UTF-32 `.go` file is still decoded for them (its tokens are found), while Go, and the reader, refuse its
+  NULs; and the reader's findings are numbered as the rules number lines (a lone "\r" ends one).
+  A `.go` file the engine's parser refuses makes the module INCOMPLETE (SC-TRUNCATED, naming the first and how many
+  more): a build may compile what that parser refuses; not one in a `_`, `.` or `testdata/` folder no import names,
+  which Go builds only when imported, and not one whose bytes are not text to Go (its decoding's SC-TRUNCATED is the
+  file's one; a UTF-16 file has none, and Go refuses it). A package in `testdata/` that the module's code imports is built, and is now read, with the file rules
+  too: the registry decodes a module's testdata/ files, and counts them against the reader's 300,000,000
+  characters, only when the reader asks for their package; one it asks for that was not kept makes the module
+  INCOMPLETE. An import of another module's testdata/ package, which that module's own scan leaves out as data, is
+  the new **SC-GO-TESTDATA-IMPORT** (MAJOR) in the importing module, with the path, and so is an import, under the
+  module's own path, of a `testdata/` folder the module does not have: a nested module's (`example.test/nst` importing
+  `example.test/nst/inner/testdata/x`), which a module zip leaves out. A package in a module's own
+  `vendor/` (`m/vendor`) is read. In a `--deps` vendor tree, a Go file is left out by its name alone (the path below
+  `vendor/` begins with a module's, which may be `example.test/testdata`), and one in a `testdata/`, `_` or `.` folder
+  is Go code as a package `vendor/modules.txt` lists, which the reader then reads whoever imports it, or as one an
+  import of a Go file read names (the project's or the vendor tree's, through a chain: a main module whose `go.mod`
+  says a `go` below 1.23 builds a vendored package modules.txt does not list when an import names it); another is
+  data, as in the registry (`go mod vendor` copies the files a package's `//go:embed` patterns match, `.go` fixtures
+  below it too, and lists every package a build imports): the rules no longer read an unlisted, unimported `_` or `.`
+  folder's `.go` files, which they read before, and read a listed `testdata/` package's, which they did not; a
+  modules.txt that cannot be read, or lists no package, leaves every file read. And a Go test file's name ends in
+  `_test.go` exactly, as Go reads it: `x_TEST.go`, which Go builds, was taken for a test file by the file selection
+  of the registry and of a vendor tree in both packages (`core.never_built`, the engine's `collect`), so neither the
+  reader nor the file rules read it.
 - **A tagged template call of a script's wrapper no longer crashes the engine (PANIC-TAGGED; rule set 2.98.0).** John's discovery run of Oct 18: `@epoch32/visage` 1.14.0's `dist/vite/index.js` made the engine panic
   ("index out of bounds" in `jsparse/tree.rs`), so the release was INCOMPLETE with a CRITICAL SC-TRUNCATED; the npm
   package's WASM build aborts on a panic. A tagged template (`` fn`…` ``) runs the function as a call does, and the
@@ -4708,3 +5365,5 @@ shared source of truth for both engines.
 - The cross-file received-code pass no longer perturbs `--deps` stop / time-budget
   accounting: it had run an extra `should_stop` check that could swallow a stop
   reason and report a stopped scan as complete.
+
+RA-6 independent v3 review: dynamic-code aliases, constructor arguments and escaped path/home namespaces cannot support a listing exemption. Replacement of homedir/normalize also invalidates provenance. Added inert regression fixtures; rule set 2.101.0.

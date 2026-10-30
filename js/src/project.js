@@ -10,7 +10,7 @@ import { scanFile } from "./scanner/scan.js";
 import { collectionIssues, scanTask } from "./scancollection.js";
 import { redactResult } from "./lib/redact.js";
 import { buildResult } from "./report.js";
-import { dependencyChecks, projectHookChecks, diskReader } from "./deps.js";
+import { dependencyChecks, projectHookChecks, diskReader, goVendorData } from "./deps.js";
 import { Pool, threadsFor, mapTasks } from "./pool.js";
 
 /**
@@ -19,7 +19,9 @@ import { Pool, threadsFor, mapTasks } from "./pool.js";
  */
 export function collectProject(root, { deps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
   const col = collectFiles(root, { includeDeps: deps, exclude, maxFileBytes });
-  if (!col.files.length && !col.manifests.length && !col.configs.length && !col.pth.length && !col.binaryIssues.length) {
+  goVendorData(root, col, { exclude, maxFileBytes });         // (F-06: a vendor tree's .go files that are data)
+  if (!col.files.length && !col.manifests.length && !col.configs.length && !col.pth.length && !col.binaryIssues.length
+      && !(col.models ?? []).length) {
     throw new ScanTargetError(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL `
       + "sources, package manifests or other files to check");
   }

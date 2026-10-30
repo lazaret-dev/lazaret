@@ -1624,7 +1624,7 @@ def is_suppressed(issue, lines, lang=None, dep=False):
 
 COMPILED_EXTS = {".so", ".pyd", ".dll", ".dylib", ".node", ".a", ".lib", ".o",
                  ".obj", ".exe", ".pyc", ".pyo", ".class", ".wasm",
-                 ".dex", ".jar", ".msi", ".dmg",
+                 ".dex", ".jar", ".war", ".ear", ".apk", ".msi", ".dmg",
                  ".jsc"}              # V8 bytecode (bytenode): JavaScript no one can read
 #: MPEG transport stream video (a camera's AVCHD .mts): the extensions it shares
 #: with TypeScript (.ts, .mts), and Blu-ray's .m2ts
@@ -1687,22 +1687,202 @@ def decode_member(path, data, lang=None):
     got = _native.call("decode_source", args, _bytes_text(data))
     return got["text"], engine._issues(path, got["issues"])
 
-def classify_binary(path, data, size, context):
-    """Return a supply-chain issue dict for a suspicious non-source file, or None:
+
+def decode_go_member(path, data):
+    """decode_member for a .go file, and what the Go reader reads of it -> (text, extra_issues, go_text): the bytes
+    as the Go toolchain reads them where that is not the text (UTF-16 or UTF-32, whose NULs Go refuses; a lone
+    "\\r", white space to Go and a line end to the rules), the text otherwise (F-06: the engine's decode::go_text).
+    One call."""
+    data = bytes(data or b"")
+    args = {"issues": True, "redact": bool(REDACT_SECRETS), "name": path, "windows": _WINDOWS_PATHS, "lang": "go"}
+    got = _native.call("decode_source", args, _bytes_text(data))
+    return got["text"], engine._issues(path, got["issues"]), got.get("goText", got["text"])
+
+#: classify_binary's `props` when its caller does not look beside the file (FP-GRADLE-WRAPPER)
+_NOT_GIVEN = object()
+
+
+def classify_binary(path, data, size, context, whole=None, walked=None, props=_NOT_GIVEN):
+    """Return a supply-chain issue dict for a suspicious non-source file (a list
+    of two for a keystore that is an opaque blob too), or None:
     SC-BINARY for an executable or a compiled artifact (by its magic bytes, or
-    its extension: inventory in a wheel, a capability to review elsewhere),
+    its extension when its bytes are binary, FP-BINARY-BY-NAME: inventory in a
+    wheel, a capability to review elsewhere),
     SC-NESTED-ARCHIVE for an archive inside the package, SC-OPAQUE-BLOB for a
-    high-entropy binary blob; nothing for an image, font, media or document
-    file. The engine's (BR-7 step 3 d: binary.rs).
+    high-entropy binary blob; nothing for an image or document file. The
+    engine's (BR-7 step 3 d: binary.rs).
+
+    FP-OPAQUE-MEDIA: a near-random file is a sound, video, image or font, and
+    quiet, when its bytes are that format from start to end (walked by its
+    structure: media.rs), and a keystore read to its end is a credential file
+    (S-SECRET, listed only; with SC-OPAQUE-BLOB beside it when it holds more
+    bytes no structure reads than a keystore does). Both need the whole file:
+    `whole` when `data` is it (it is handed over only when the first bytes
+    call for it), or `walked`, a walk of it as its stream passed
+    (media_stream_file's answer). Without either, a file that would need them
+    is judged by its first bytes: an opaque blob stays one.
+
+    FP-GRADLE-WRAPPER: a Gradle wrapper jar (gradle/wrapper/gradle-wrapper.jar)
+    is judged by its checksum against Gradle's published wrapper checksums
+    (gradle.rs), with `props`, the bytes of the gradle-wrapper.properties
+    beside it (its first GRADLE_PROPERTIES_MAX_BYTES and one more, so that a
+    longer one is told; None: there are none; {"error": why}: it is there and
+    was not read; not given, as None when `data` is the whole jar, else the
+    jar is judged as any jar). Given `props` without the whole jar, it was not
+    read whole.
 
     context: 'sdist' | 'npm' | 'wheel' | 'repo'
     data:    leading bytes of the file (>= a few KB is ideal for entropy; the
-             first 8,192 are read)
+             first 8,192 are read), or all of it with `whole`
     size:    full file size in bytes
+    whole:   `data` is the whole file (None: when it holds `size` bytes)
     """
-    got = _native.call("binary_classify", {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS,
-                                           "neumaier": False}, _bytes_text(bytes(data[:8192])))
+    args = {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS, "neumaier": False}
+    if walked is not None:
+        args["walked"] = walked
+    if props is not _NOT_GIVEN:
+        args["props"] = (None if props is None else {"error": str(props.get("error", ""))} if isinstance(props, dict)
+                         else _bytes_text(bytes(props)))
+    data = bytes(data or b"")
+    if whole is None:
+        whole = len(data) == size
+    if whole and walked is None:
+        if len(data) <= 8192 or "props" in args:
+            got = _native.call("binary_classify", dict(args, whole=True), _bytes_text(data))
+        else:
+            got = _native.call("binary_classify", dict(args, more=True), _bytes_text(data[:8192]))
+            if isinstance(got, dict) and "need" in got:
+                got = _native.call("binary_classify", dict(args, whole=True), _bytes_text(data))
+    else:
+        got = _native.call("binary_classify", args, _bytes_text(data[:8192]))
+    if isinstance(got, dict) and got.get("need") == "wrapper":
+        # (a Gradle wrapper jar its caller gave no properties for: judged with none)
+        got = _native.call("binary_classify", dict(args, whole=True, props=None), _bytes_text(data))
+    if isinstance(got, list) and got and isinstance(got[0], list):
+        return engine._issues(path, got)          # (a keystore that is an opaque blob too: both findings)
     return None if got is None else engine._issues(path, [got])[0]
+
+
+def gradle_wrapper_path(path):
+    """FP-GRADLE-WRAPPER: whether classify_binary judges a file at `path` as a Gradle wrapper jar, by its checksum
+    with the gradle-wrapper.properties beside it (gradle/wrapper/gradle-wrapper.jar)."""
+    got = _native.call("binary_classify", {"path": path, "size": 0, "context": "repo", "windows": _WINDOWS_PATHS,
+                                           "neumaier": False, "more": True}, "")
+    return isinstance(got, dict) and got.get("need") == "wrapper"
+
+
+def classify_needs_whole(path, data, size, context):
+    """FP-OPAQUE-MEDIA: whether classify_binary needs a file's whole bytes, or a walk of them, to judge it (a
+    keystore, or a near-random file whose first bytes start a format the engine walks), from its first bytes."""
+    got = _native.call("binary_classify", {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS,
+                                           "neumaier": False, "more": True}, _bytes_text(bytes(data or b"")[:8192]))
+    return isinstance(got, dict) and got.get("need") == "whole"
+
+
+#: A file walked as its stream passes is read this many bytes at a time (media_stream).
+MEDIA_CHUNK = 1 << 20
+
+
+def media_stream(state, offset, chunk, eof):
+    """FP-OPAQUE-MEDIA: the next chunk of a file walked by its structure as its stream passes: `state` None at its
+    start, else the last answer's; `offset` where the chunk starts (where the last ended, or the answer's `next`, when
+    the bytes between are passed over); `eof` with its last (an empty chunk at its end will do) -> {"state", "next",
+    "end": None while it runs, else {"is": kind}, {"not": kind, "why"} or {"unknown": True}}. The engine's
+    (media::feed)."""
+    return _native.call("media_stream", {"state": state, "offset": offset, "eof": bool(eof)}, _bytes_text(bytes(chunk)))
+
+
+def media_walk(data):
+    """FP-OPAQUE-MEDIA: what a whole file is, walked by its structure to its end: {"is": kind}, {"not": kind, "why"}
+    or {"unknown": True}. The engine's (media::walk)."""
+    return _native.call("media_walk", {}, _bytes_text(bytes(data)))
+
+
+def media_stream_file(read_at, size=None):
+    """The end of a walk of a file (of `size` bytes) read through `read_at(offset, n)` (its bytes from `offset`, at
+    most `n`, b"" at its end), MEDIA_CHUNK at a time, passing over what the walk skips (media_stream), never past the
+    file's end: a part that runs past it is a file cut short (its size not given, the byte before where the walk
+    goes on is read to tell)."""
+    state, offset = None, 0
+    while True:
+        chunk = read_at(offset, MEDIA_CHUNK)
+        got = media_stream(state, offset, chunk, not chunk)
+        if got["end"] is not None:
+            return got["end"]
+        state = got["state"]
+        end, nxt = offset + len(chunk), got["next"]
+        if nxt > end and (nxt > size if size is not None else not read_at(nxt - 1, 1)):
+            # (the file ends before where the walk goes on: it is cut short there)
+            return media_stream(state, end, b"", True)["end"]
+        offset = max(end, nxt)
+
+
+def media_stream_chunks(chunks):
+    """The end of a walk of a file whose bytes come as `chunks` (an iterable of bytes, in order, to its end), each
+    fed whole: a stream that cannot pass over bytes (an archive's member); None when it ended without an answer."""
+    state, offset = None, 0
+    for chunk in chunks:
+        if not chunk:
+            continue
+        got = media_stream(state, offset, chunk, False)
+        if got["end"] is not None:
+            return got["end"]
+        state = got["state"]
+        offset += len(chunk)
+    return media_stream(state, offset, b"", True)["end"]
+
+
+def model_sniff(path, data):
+    """FP-MODEL-FILES: whether a file whose first bytes are `data` (the first 512 are read) may be a model file, one
+    to hand model_file whole. The engine's (pickle::sniff)."""
+    return _native.call("model_sniff", {"path": path, "windows": _WINDOWS_PATHS}, _bytes_text(bytes(data or b"")[:512]))
+
+
+def model_file(path, data, size=None, limit=None, pieces=None, last=True):
+    """FP-MODEL-FILES: a model file (a PyTorch checkpoint, a pickle, joblib's, numpy's .npy/.npz) read for what its
+    pickles would run, never unpickled -> None when it is not one, else {"kind", "issues" (SC-PICKLE-CODE,
+    SC-PICKLE-GLOBAL, SC-TRUNCATED), "imports" ([[module, name, how]]: the globals of no known kind, for
+    model_own_issues), "opaque" (its archive holds more than its format: SC-NESTED-ARCHIVE stays)}. `data`: the file
+    whole, or its first bytes when it is larger (`size`) than the scan reads (`limit`). Or, for a zip model file read
+    by range whatever its size, `pieces` ([(offset, bytes)], its first bytes among them) of a file of `size` bytes:
+    {"need": [[offset, length]]} until it has the ranges it reads (its end records, its central directory, its pickle
+    members), unless `last` (what it still needs is SC-TRUNCATED). The engine's (pickle/)."""
+    if pieces is not None:
+        pieces = [(off, bytes(b)) for off, b in pieces]
+        args = {"path": path, "size": size, "windows": _WINDOWS_PATHS, "pieces": [[off, len(b)] for off, b in pieces],
+                "last": bool(last)}
+        got = _native.call("model_file", args, _bytes_text(b"".join(b for _, b in pieces)))
+        if got is not None and "need" in got:
+            return {"need": got["need"]}
+    else:
+        data = bytes(data or b"")
+        args = {"path": path, "size": len(data) if size is None else size, "windows": _WINDOWS_PATHS}
+        if limit is not None:
+            args["limit"] = limit
+        got = _native.call("model_file", args, _bytes_text(data))
+    if got is None:
+        return None
+    return {"kind": got["kind"], "issues": engine._issues(path, got["issues"]), "imports": got["imports"],
+            "opaque": got["opaque"], "calls": got.get("calls", [])}
+
+
+def model_own_issues(models, files):
+    """FP-MODEL-FILES, once the scan knows its files: SC-PICKLE-GLOBAL as INFO for each global of the scanned package's
+    own modules a model file imports (importing one runs that module's code, which the scan reads, when the file is
+    loaded), and SC-PICKLE-GLOBAL, MAJOR, for each call with text a model file holds (whatever the scan's source says
+    of the class: which file a module name is when the file is loaded is the loading program's import path, the
+    external re-review of Oct 27). `models`: [[path, dep, imports, calls]] (model_file's, collect_file's); `files`:
+    the scan's files, [[path, dep]] (its Python files are its modules, a dependency's its package's). The engine's
+    (pickle::own_imports)."""
+    if not models:
+        return []
+    got = _native.call("model_own", {"models": models, "files": files})
+    return [engine._issues(p, [row])[0] for p, row in got]
+
+
+def model_own_files(models, files):
+    """model_own_issues' files from the scan's [{path, content, dep}]: [[path, dep]]."""
+    return [[f["path"], bool(f.get("dep", False))] for f in files]
 
 
 #: The leading bytes disguised_binary reads: an oversized source file's prefix
@@ -1838,7 +2018,7 @@ def _tree_stats_at(tree, parts):
     while stack:
         cur = stack.pop()
         try:
-            entries = tree.listdir(cur)
+            entries = tree.listdir(cur, identify=False)
         except OSError:
             continue
         for e in entries:
@@ -2803,7 +2983,7 @@ def _script_key_lines(text, section="scripts"):
     return _native.call("manifest_check", {"check": "key_lines", "section": section}, text)
 
 
-def scan_manifest(path, content, registry=False, hooks=None):
+def scan_manifest(path, content, registry=False, hooks=None, windows=False):
     """Check package.json install hooks — the primary supply-chain attack
     vector — and its dependencies from an insecure source. The engine's
     (BR-7 step 3 b: rust/crates/lazaret-engine/src/manifest/, the
@@ -2835,12 +3015,20 @@ def scan_manifest(path, content, registry=False, hooks=None):
     a package's root manifest counts in a registry or --deps scan, and none
     whose `hooks` are not npm's. MAJOR (WARN in the registry). `registry`
     None: a manifest under a dependency folder (DEP_MARKERS) is a
-    dependency's (the engine's: collect.rs)."""
+    dependency's (the engine's: collect.rs).
+
+    `windows`: `path` is the walk's on Windows (os.sep, _WINDOWS_PATHS:
+    _scan_manifest_entry), where a backslash separates its folders too, so
+    a dependency's node_modules\\dep\\test\\package.json is no package's
+    root manifest (WIN-DEP-PATHS). Otherwise a backslash is a file name's,
+    as on POSIX; a registry's member paths are '/'-separated on every
+    system and pass none."""
     if not isinstance(content, str):
         return load_manifest(path, content)[1]
     args = engine._budget({"path": path, "registry": None if registry is None else bool(registry),
                            "redact": bool(REDACT_SECRETS),
-                           "hooks": list(hooks) if hooks is not None else None})
+                           "hooks": list(hooks) if hooks is not None else None,
+                           "windows": bool(windows)})
     try:
         return engine._issues(path, _native.call("scan_manifest", args, content)["issues"])
     except _native.NativeError as exc:
@@ -3229,30 +3417,63 @@ class _TooDeep(OSError):
     """_Root: a folder nested deeper than MAX_WALK_DEPTH below the root is not opened."""
 
 
+#: Windows' stat calls: the third time the walk holds a file to is its creation time there, not its change time
+#: (_held_time).
+_WINDOWS_TIMES = os.name == "nt"
+
+
+def _held_time(st):
+    """The time the walk holds a file to beside its size and modification time (_file_record, _unwritten), the same
+    whichever stat call gave `st`. On POSIX its change time (st_ctime_ns), which only the system sets. On Windows its
+    creation time, the one time every stat call there fills alike: from Python 3.12, os.lstat and os.stat give
+    st_ctime the creation time (posixmodule.c's win32_xstat copies st_birthtime into it, as DirEntry_from_find_data
+    does for the listing's from 3.12.3; 3.12.0 to 3.12.2 leave the listing's 0) but os.fstat gives it the change time
+    (fileutils.c's _Py_fstat_noraise:
+    FILE_BASIC_INFO.ChangeTime), so the walk's lstat and a read's fstat of one file never agreed on it once the file
+    was written after it was made; st_birthtime_ns is the creation time in all of them (FILE_BASIC_INFO's, or
+    FILE_STAT_BASIC_INFORMATION's, CreationTime; the listing's ftCreationTime). Python 3.10 and 3.11 have no
+    st_birthtime there and give st_ctime the creation time in all of them (BY_HANDLE_FILE_INFORMATION's
+    ftCreationTime). Windows' change time is not held: no lstat there gives it (3.12 and later overwrite it with the
+    creation time; 3.10 and 3.11 never read it), and its writer can set it, as every time NTFS keeps
+    (SetFileInformationByHandle). So a file written in place at the same size whose modification time is kept or set
+    back (SetFileTime, or its updates suspended with -1) is not told from the file the walk listed there: writing in
+    place never moves its creation time (docs/DESIGN.md)."""
+    if not _WINDOWS_TIMES:
+        return st.st_ctime_ns
+    born = getattr(st, "st_birthtime_ns", None)
+    return st.st_ctime_ns if born is None else born
+
+
 def _file_record(st):
-    """What the walk keeps of a regular file it listed (`st`, its lstat): (st_dev, st_ino, st_size, st_mtime_ns,
-    st_ctime_ns). The size and times tell a file deleted and made again under its name, which can reuse its inode (ext4
-    does), or written in place, from the file the walk listed (LZ-03's re-check 2, N5)."""
-    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+    """What the walk keeps of a regular file it listed (`st`, its lstat): (st_dev, st_ino, st_size, st_mtime_ns, its
+    change time: _held_time, Windows' creation time). The size and times tell a file deleted and made again under its
+    name, which can reuse its inode (ext4 does), or written in place, from the file the walk listed (LZ-03's re-check
+    2, N5)."""
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, _held_time(st)
 
 
 def _unwritten(st, then, inode_known):
-    """Is `st` unwritten since `then` (st_size, st_mtime_ns, st_ctime_ns, or () where none was kept)? Its change time
-    is compared only where both have an inode: a listing without one (Windows' DirEntry.stat) has a change time of its
-    own making, which an fstat need not share."""
+    """Is `st` unwritten since `then` (st_size, st_mtime_ns, _held_time, or () where none was kept)? The held time is
+    compared only where both have an inode: a listing without one (a disk that keeps no file IDs) has times of its own
+    making, which an fstat need not share."""
     if not then:
         return True
     size, mtime, ctime = then
-    return st.st_size == size and st.st_mtime_ns == mtime and (not inode_known or st.st_ctime_ns == ctime)
+    return st.st_size == size and st.st_mtime_ns == mtime and (not inode_known or _held_time(st) == ctime)
 
 
 def _same_file(st, expect):
     """Is `st` (an lstat or an fstat) the regular file `expect` (_file_record: as the walk's lstat gave it), unwritten
-    since? Where an inode is not known (0: Windows' DirEntry.stat), its kind, size and modification time are compared."""
+    since? Its device and inode (a file ID on Windows: _Root.listdir) are compared, then its size, modification time
+    and _held_time (Windows' creation time: an fstat there has another change time than the lstat). Where neither has
+    an inode (0: a disk that keeps no file IDs), its kind, size and modification time are; where one has and the other
+    has not, it is not told to be that file (fail closed)."""
     if not _stat.S_ISREG(st.st_mode):
         return False
     dev, ino = expect[:2]
-    known = bool(ino and st.st_ino)
+    if bool(ino) != bool(st.st_ino):
+        return False
+    known = bool(ino)
     if known and (st.st_dev, st.st_ino) != (dev, ino):
         return False
     return _unwritten(st, expect[2:], known)
@@ -3260,15 +3481,44 @@ def _same_file(st, expect):
 
 def _same_entry(st, rec):
     """Is `st` (an lstat) the entry `rec`, (st_dev, st_ino, its kind: S_IFMT) as the walk's listing gave them, and a
-    regular file's size and times (_file_record) after them, unwritten since? Where an inode is not known (0: Windows'
-    DirEntry.stat), its kind (and a regular file's size and modification time) are compared."""
+    regular file's size and times (_file_record) after them, unwritten since? Where neither has an inode (0: a disk
+    that keeps no file IDs), its kind (and a regular file's size and modification time) are compared; where one has
+    and the other has not, it is not told to be that entry (fail closed)."""
     dev, ino, kind = rec[:3]
     if _stat.S_IFMT(st.st_mode) != kind:
         return False
-    known = bool(ino and st.st_ino)
+    if bool(ino) != bool(st.st_ino):
+        return False
+    known = bool(ino)
     if known and (st.st_dev, st.st_ino) != (dev, ino):
         return False
     return _unwritten(st, rec[3:], known)
+
+
+def _exact_path(folder, name):
+    """The path of `name` in `folder` as the system takes it exactly: on Windows, _windows_exact_path; elsewhere the
+    two joined."""
+    if os.name != "nt":
+        return os.path.join(folder, name)
+    return _windows_exact_path(folder, name)
+
+
+def _windows_exact_path(folder, name):
+    """Windows' path of `name` in `folder` as the system takes it exactly: absolute and with the \\\\?\\ prefix, so
+    that no name in it is rewritten (Win32 drops a name's trailing dots and spaces, so `a.js.` would name `a.js`) and
+    its length is not capped at MAX_PATH (`name` is joined once `folder` is made absolute, which would rewrite it too).
+    A \\\\.\\ folder is made \\\\?\\ (the device form still has its names rewritten), a UNC one \\\\?\\UNC\\, and NT's
+    \\??\\ form, which Win32 also opens (a root given so), \\\\?\\: the same namespace, but ntpath would take it for a
+    path rooted on the current drive, and every exact lstat under it would fail (each file then held to no file ID:
+    the whole tree changed, fail closed, but unreadable)."""
+    if folder.startswith("\\??\\"):
+        folder = "\\\\?\\" + folder[4:]
+    folder = ntpath.abspath(folder)
+    if folder.startswith("\\\\.\\"):
+        folder = "\\\\?\\" + folder[4:]
+    elif not folder.startswith("\\\\?\\"):
+        folder = "\\\\?\\UNC\\" + folder[2:] if folder.startswith("\\\\") else "\\\\?\\" + folder
+    return folder.rstrip("\\") + "\\" + name
 
 
 def _name_keys(name):
@@ -3349,7 +3599,10 @@ class _Root:
     its final path, its links followed (CreateFileW with FILE_FLAG_BACKUP_SEMANTICS, GetFinalPathNameByHandleW), is
     under `within` (the root's real path); every file is opened and read only when its handle's final path is
     (_open_verified), so no file outside the root is read. A folder swapped between that check and its listing can
-    still show its names there (not its files' contents): the gap docs/DESIGN.md states."""
+    still show its names there (not its files' contents): the gap docs/DESIGN.md states. Its listing gives no file
+    IDs: each entry is lstat'ed by its exact path for its volume and file ID (`listdir`), which the walk holds what
+    it found to, as to a device and inode elsewhere, with its size, modification time and creation time
+    (_held_time: Windows' fstat has another change time than its lstat)."""
 
     _KEEP = 16
     _STRIDE = 16
@@ -3639,10 +3892,18 @@ class _Root:
                 self.changed_at(parts[:n])
                 return
 
-    def listdir(self, parts=()):
+    def listdir(self, parts=(), identify=True):
         """[_Entry] of the folder `parts`, each lstat'ed while it is open. The folder itself is opened afresh (a
         descriptor of it kept from before is let go): what is listed is the folder its name names now, and a folder
-        that is a link or no folder now is _PathChanged."""
+        that is a link or no folder now is _PathChanged.
+
+        Where the listing gives an entry no identity (Windows' DirEntry.stat: st_ino and st_dev 0), the entry is
+        lstat'ed by its exact path (_exact_path) for its volume and file ID, which every later lstat and fstat of it
+        is held to (_same_file, _same_entry): a file replaced by another, whose size and times can be the same (a
+        copy made within one tick of the system's clock has them on NTFS, and SetFileTime sets them), is a change, as
+        it is by its inode on POSIX. Where that lstat fails or gives no ID either, the entry keeps the listing's stat:
+        no lstat or fstat with an ID is taken for it. `identify` False (a count or a probe of names and kinds, which
+        nothing is held to): the listing's stat as it is."""
         parts = tuple(parts)
         where = self._dir(parts, fresh=True)
         out = []
@@ -3652,8 +3913,20 @@ class _Root:
                     st = e.stat(follow_symlinks=False)
                 except OSError as exc:
                     st = exc
+                else:
+                    if identify and not st.st_ino and not _ANCHORED_OPEN:
+                        st = self._identified(where, e.name, st)
                 out.append(_Entry(e.name, st))
         return out
+
+    @staticmethod
+    def _identified(where, name, st):
+        """The lstat of `name` in the folder `where` (a path) by its exact path, where it has a file ID; else `st`."""
+        try:
+            now = os.lstat(_exact_path(where, name))
+        except (OSError, ValueError):
+            return st
+        return now if now.st_ino else st
 
     def listdir_after(self, parts):
         """listdir, for a reader after the walk: a regular file the walk listed in that folder that is gone from it,
@@ -3818,6 +4091,22 @@ def tree_incomplete(tree):
     return out
 
 
+def _read_sibling(path, name, limit):
+    """FP-GRADLE-WRAPPER: the first `limit` bytes of the regular file `name` beside `path` (a Gradle wrapper jar's
+    gradle-wrapper.properties; the engine asks one byte more than it reads, so that a longer file is told) as latin-1
+    text, False when there is no such regular file, or {error} (a symbolic link among them: Java follows it, the scan
+    does not, and the engine judges the jar as one whose properties were not read). `path`: a path, or (a _Root, the
+    file's names), the file beside it read from the root's descriptor as the walk's other readers read (LZ-03)."""
+    try:
+        data = (path[0].read(path[1][:-1] + (name,), limit) if isinstance(path, tuple)
+                else _read_prefix(os.path.join(os.path.dirname(path), name), limit))
+        return _bytes_text(data)
+    except (_NotRegularFile, FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        return {"error": exc.strerror or type(exc).__name__}
+
+
 def collect_issue(kind, path, **args):
     """A coverage note the collection's I/O finds, the engine's (collect.rs): "unreadable" (reason), "symlink"
     (target) or "skipped_tree" (files, bytes)."""
@@ -3883,6 +4172,43 @@ def pth_issues(path, text):
     A finding is reported at the physical (\\n) line holding the statement,
     once per line."""
     return engine._issues(path, _native.call("pth_issues", {"redact": bool(REDACT_SECRETS), "neumaier": False}, text))
+
+
+#: A .pth file too large to read whole is read this many bytes at a time (pth_stream).
+PTH_CHUNK = 1 << 20
+
+
+def pth_stream(state, chunk, end):
+    """The next chunk of a .pth file too large to read whole (FP-MODEL-FILES, John's decision of Oct 21: a 200 MB
+    `model.pth` checkpoint is judged by the lines site.py runs, streamed): `state` None at its start, else the last
+    answer's; `end` with its last (an empty chunk at its end will do) -> {"state", "lines": [[line, its bytes from
+    its first import start, latin-1]], "cuts": [why a line could not be kept: SC-TRUNCATED]}. Byte-wise, whatever the
+    decoding: a line starting "import " or "import\t", or a part of one str.splitlines() splits off, as pth_issues
+    reads them; at most PTH_MAX_LINE bytes a line and PTH_MAX_KEPT in all. The engine's (binary::pth_stream)."""
+    return _native.call("pth_stream", {"state": state, "end": bool(end)}, _bytes_text(bytes(chunk)))
+
+
+def pth_stream_file(read):
+    """{"lines", "cuts"} of a .pth file read to its end through `read()` (its next bytes, b"" at its end),
+    PTH_CHUNK at a time (pth_stream)."""
+    state, lines, cuts = None, [], []
+    while True:
+        chunk = read()
+        got = pth_stream(state, chunk, not chunk)
+        state = got["state"]
+        lines += got["lines"]
+        cuts += got["cuts"]
+        if not chunk:
+            return {"lines": lines, "cuts": cuts}
+
+
+def pth_kept_issues(path, lines):
+    """pth_issues for the lines pth_stream kept ([[line, latin-1 text]]), at their lines. The engine's
+    (binary::pth_kept_issues)."""
+    if not lines:
+        return []
+    return engine._issues(path, _native.call("pth_kept", {"lines": lines, "redact": bool(REDACT_SECRETS),
+                                                          "neumaier": False}))
 
 
 def pyc_issues(path, header, has_source):
@@ -3962,7 +4288,7 @@ def _listing(path):
 def _listing_at(tree, parts):
     """_listing of the folder `parts` of a _Root (a probe: None when it cannot be listed, a link now among them)."""
     try:
-        return [[_fs_display(e.name), e.is_dir(follow_symlinks=False)] for e in tree.listdir(parts)]
+        return [[_fs_display(e.name), e.is_dir(follow_symlinks=False)] for e in tree.listdir(parts, identify=False)]
     except OSError:
         return None
 
@@ -4087,22 +4413,110 @@ def link_target_text(target):
     return target
 
 
+def _open_regular(path, expect=None):
+    """A descriptor of the REGULAR file `path` (O_NOFOLLOW | O_NONBLOCK; the caller closes it), as _read_prefix opens
+    one: `path` a path, or (a _Root, the file's names), opened from the root's descriptor and held to `expect` as
+    _Root.open holds it (LZ-03). Raises OSError (incl. _NotRegularFile, _PathChanged)."""
+    fd = path[0].open(path[1], expect) if isinstance(path, tuple) else os.open(path, _OPEN_FLAGS)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            raise _NotRegularFile(f"{_special_kind(st.st_mode)}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _read_ranges(path, ranges, expect=None):
+    """[(offset, bytes)] of the REGULAR file `path` for [[offset, length]] (fewer bytes where it is shorter), read
+    as _read_prefix reads (no symlink followed, no FIFO blocked on; a _Root's file from its descriptor, held to
+    `expect`: _open_regular). Raises OSError (incl. _NotRegularFile, _PathChanged)."""
+    fd = _open_regular(path, expect)
+    try:
+        out = []
+        for off, length in ranges:
+            os.lseek(fd, off, os.SEEK_SET)           # (lseek and read: os.pread is not Windows')
+            chunks, remaining = [], length
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            out.append((off, b"".join(chunks)))
+        return out
+    finally:
+        os.close(fd)
+
+
+def _stream_pth(path, expect=None):
+    """pth_stream_file for the REGULAR file `path`, read as _read_prefix reads one (_open_regular). Raises OSError
+    (incl. _NotRegularFile, _PathChanged)."""
+    fd = _open_regular(path, expect)
+    try:
+        return pth_stream_file(lambda: os.read(fd, PTH_CHUNK))
+    finally:
+        os.close(fd)
+
+
+def _stream_media(path, expect=None):
+    """media_stream_file for the REGULAR file `path`, read as _read_prefix reads one (_open_regular; FP-OPAQUE-MEDIA:
+    a file too large to read whole, walked by its structure). Raises OSError (incl. _NotRegularFile, _PathChanged)."""
+    fd = _open_regular(path, expect)
+    try:
+        st = os.fstat(fd)
+
+        def read_at(offset, n):
+            os.lseek(fd, offset, os.SEEK_SET)          # (lseek and read: os.pread is not Windows')
+            return os.read(fd, n)
+        return media_stream_file(read_at, st.st_size)
+    finally:
+        os.close(fd)
+
+
 def _collect_file(path, rel, st, in_dep, col):
     """Classify and read one regular file (the engine's decisions: collect.rs, collect_file, asked again with what
-    it needs read). `path`: (a _Root, the file's names), read from the root's descriptor (LZ-03) and held to `st`, the
-    walk's lstat of it: _PathChanged (the file is a link, another kind of file, another file or gone now, or a folder
-    on its way is a link or no folder) is the caller's to record, and nothing of it is kept."""
+    it needs read; a zip model file's ranges, read by range: FP-MODEL-FILES). `path`: (a _Root, the file's names), read
+    from the root's descriptor (LZ-03) and held to `st`, the walk's lstat of it: _PathChanged (the file is a link,
+    another kind of file, another file or gone now, or a folder on its way is a link or no folder) is the caller's to
+    record, and nothing of it is kept."""
     disp = _fs_display(rel)
     args = {"rel": disp, "name": _fs_display(os.path.basename(rel)), "size": st.st_size, "dep": _dep_arg(in_dep),
             "cap": SOURCE_SIZE_CAP, "configCap": configsecrets.CONFIG_SCAN_CAP, "windows": _WINDOWS_PATHS,
-            "neumaier": False, "redact": bool(REDACT_SECRETS)}
-    answers, text = {}, ""
+            "neumaier": False, "redact": bool(REDACT_SECRETS), "ranges": True}
+    answers, text, pieces = {}, "", []
     while True:
         got = _native.call("collect_file", dict(args, answers=answers), text)
         need = got.get("need")
         if need is None:
             break
         what = need["read"]
+        if what in ("pth", "media"):             # (a file too large to read whole, in chunks: a .pth file's lines
+            try:                                 # pth_stream, another's structure media_stream)
+                answers[what] = _stream_pth(path, st) if what == "pth" else _stream_media(path, st)
+            except _PathChanged:
+                raise
+            except OSError as exc:
+                answers[what] = {"error": str(exc) if isinstance(exc, _NotRegularFile)
+                                 else exc.strerror or type(exc).__name__}
+            continue
+        if what == "sibling":                    # (FP-GRADLE-WRAPPER: the file beside it, a wrapper's properties)
+            answers[what] = _read_sibling(path, need["name"], need["limit"])
+            continue
+        if what == "ranges":                     # (every range read so far, their bytes as the text)
+            try:
+                pieces.extend(_read_ranges(path, need["ranges"], st))
+            except _PathChanged:
+                raise
+            except OSError as exc:
+                answers[what] = {"error": str(exc) if isinstance(exc, _NotRegularFile)
+                                 else exc.strerror or type(exc).__name__}
+                continue
+            answers[what] = [[off, len(b)] for off, b in pieces]
+            answers["rounds"] = answers.get("rounds", 0) + 1
+            text = _bytes_text(b"".join(b for _, b in pieces))
+            continue
         try:
             data = _bytes_text(path[0].read(path[1], need["limit"], expect=st) if isinstance(path, tuple)
                                else _read_prefix(path, need["limit"]))
@@ -4125,6 +4539,8 @@ def _collect_file(path, rel, st, in_dep, col):
         entry = {"path": f["path"], "content": f["content"], "lang": f["lang"], "dep": f["dep"]}
         if "vendor" in f:
             entry["vendor"] = f["vendor"]          # (its module or crate is read whole: _vendored_code)
+        if "goContent" in f:
+            entry["goContent"] = f["goContent"]    # (F-06: the Go reader's text, where Go reads the bytes otherwise)
         col["files"].append(entry)
     if "manifest" in got:
         m = got["manifest"]
@@ -4133,6 +4549,11 @@ def _collect_file(path, rel, st, in_dep, col):
         col["configs"].append(got["config"])
     if got.get("pth"):
         col["pth"].append(disp)
+    if "model" in got:                           # (FP-MODEL-FILES: a model file read; its imports and calls, model_own_issues')
+        col["models"].append([disp, bool(in_dep), got["model"]["imports"], got["model"].get("calls", [])])
+    for key in ("holder", "resolver"):           # (FP-B64-PROTOBUF: what the descriptors' pass reads, b64_descriptor_pass)
+        if key in got:
+            col[key + "s"].append(got[key])
 
 
 def _collect(root, excludes=(), include_deps=False):
@@ -4155,7 +4576,8 @@ def _collect(root, excludes=(), include_deps=False):
     and not read; with a path for `root`, those are SC-TRUNCATED findings in
     `issues` (scan_project, which gives a _Root, reports them itself)."""
     excludes = sorted(_fs_display(x) for x in set(excludes or ()))
-    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": []}
+    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": [], "models": [],
+           "holders": [], "resolvers": []}
     issues = col["issues"]
     try:
         tree, own = _as_root(root)
@@ -4164,8 +4586,9 @@ def _collect(root, excludes=(), include_deps=False):
                               f"{exc.strerror or type(exc).__name__}") from None
     try:
         _walk(tree, excludes, include_deps, col)
+        _go_vendor_data(tree, col, excludes)    # (F-06; its modules.txt read through the same root)
         if own:
-            issues.extend(changed_issues(tree))
+            col["issues"].extend(changed_issues(tree))      # (_go_vendor_data gave col a new list)
     finally:
         if own:
             tree.close()
@@ -4218,7 +4641,11 @@ def _walk_tree(tree, excludes, include_deps, col):
             if _stat.S_ISLNK(mode) or (_stat.S_ISDIR(mode) and _is_reparse_point(st)):
                 listed.append([name, "link", _readlink((tree, parts + (e.name,)))])
             elif _stat.S_ISDIR(mode):
-                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino else None
+                # (a loop is a folder met again by its identity, as before on POSIX, however the tree is read; on
+                # Windows no link is followed and NTFS has no hard-linked folders, and a file ID there (_Root.listdir's)
+                # need not tell folders apart: 3.10's and 3.11's 64-bit one of ReFS's 128-bit IDs is not unique, so
+                # none is used)
+                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino and os.name != "nt" else None
                 listed.append([name, "dir", key, key in seen_dirs])
             elif not _stat.S_ISREG(mode):
                 listed.append([name, "special", next((c for test, c in _SPECIAL_CODES if test(mode)), "other")])
@@ -4261,6 +4688,70 @@ def _walk_tree(tree, excludes, include_deps, col):
         stack.extend(reversed(push))       # pop order = sorted, depth-first (like os.walk)
 
 
+#: The findings of a file's reading that a file found to be data takes with it (_go_vendor_data).
+_READING_RULES = frozenset({"Q-ENCODING", "SC-UTF7", "SC-ESCAPE-CODEC", "SC-TRUNCATED"})
+
+
+def _go_vendor_data(root, col, excludes=()):
+    """(F-06) A Go vendor tree's .go files that are data: one in a testdata/ folder, or a folder named with "_" or
+    "." first, of a package vendor/modules.txt does not list and no Go file read imports. `go mod vendor` copies a
+    package's files and the files its //go:embed patterns match, which may be .go files below it; it lists every
+    package a build imports, and a main module whose go.mod says `go 1.23` or later builds no other, while one below
+    that builds a vendored package modules.txt does not list when an import names it (cmd/go's importFromModules).
+    So a candidate folder an import of a file read names (the project's Go or a vendor tree's) is code, and the files
+    of its package are read and their imports followed in turn (go_imports); the rest is not read as Go, as the
+    registry reads a module's unimported testdata/ (_package_code): its entries are dropped from col's files, and
+    their reading's findings (_READING_RULES) from col's issues. A vendor tree whose modules.txt cannot be read, or
+    lists no package, keeps every file."""
+    roots = sorted({_slash(f["vendor"]) for f in col["files"] if f.get("vendor") and f["lang"] == "go"},
+                   key=len, reverse=True)
+    if not roots:
+        return
+    tree = _DependencyTree(root, col["files"], col["manifests"], excludes)
+    listed = {}
+    for top in roots:
+        text = _vendor_text(tree, f"{top}/modules.txt")
+        listed[top] = (frozenset(engine.go_vendored_packages(text)) or None) if text is not None else None
+
+    def candidate(path):
+        """The folder (below its vendor tree, its import path) of a file that is data unless an import names it."""
+        rel = _slash(path)
+        top = next((t for t in roots if rel.startswith(t + "/")), None)
+        if top is None or listed[top] is None or not rel.endswith(".go"):
+            return None
+        folder = posixpath.dirname(rel[len(top) + 1:])
+        if (any(d == "testdata" or d[:1] in ("_", ".") for d in folder.split("/"))
+                and folder not in listed[top]):
+            return folder
+        return None
+    folders = {}                                # folder -> its entries, while no import names it
+    read = []
+    for f in col["files"]:
+        folder = candidate(f["path"]) if f.get("vendor") and f["lang"] == "go" else None
+        if folder is not None:
+            folders.setdefault(folder, []).append(f)
+        elif f["lang"] == "go":
+            read.append(f)
+    named = set()
+    while read and folders:
+        imports, refused = set(), False
+        for paths in engine.go_imports([(f["path"], f.get("goContent", f["content"])) for f in read]):
+            if paths is None:
+                refused = True                  # (a file the parser refuses may import any of them: all are code)
+            else:
+                imports.update(paths)
+        read = []
+        for folder in sorted(set(folders) if refused else set(folders) & imports):
+            named.add(folder)
+            read.extend(folders.pop(folder))
+
+    def data(path):
+        folder = candidate(path)
+        return folder is not None and folder not in named
+    col["files"] = [f for f in col["files"] if not (f.get("vendor") and f["lang"] == "go" and data(f["path"]))]
+    col["issues"] = [i for i in col["issues"] if not (i["rule"] in _READING_RULES and data(i["file"]))]
+
+
 def collect_files(root, extra_excludes, include_deps=False):
     """Legacy API: returns (files, manifests, binary_issues) — binary_issues
     being every collection finding (see _collect) — and records the pruned
@@ -4276,10 +4767,11 @@ def collect_files(root, extra_excludes, include_deps=False):
 def _scan_manifest_entry(mf):
     """binding.gyp and every other .gyp / .gypi file -> scan_gyp (G11);
     package.json -> scan_manifest. A manifest inside a detected dependency
-    tree gets the registry hook set."""
+    tree gets the registry hook set. Its path is the walk's: os.sep-separated
+    (`windows` on Windows, WIN-DEP-PATHS)."""
     if os.path.splitext(mf["path"])[1].lower() in GYP_EXTS:
         return scan_gyp(mf["path"], mf["content"])
-    return scan_manifest(mf["path"], mf["content"], registry=mf.get("dep"))
+    return scan_manifest(mf["path"], mf["content"], registry=mf.get("dep"), windows=_WINDOWS_PATHS)
 
 
 # ---------------- --deps: what a dependency runs ----------------
@@ -4582,18 +5074,35 @@ _CGO_EXTS = (".c", ".h")
 
 def never_built(kind, rel):
     """Is `rel` ('/'-separated, below a Go module's root for "go", a crate's
-    for "crate") a file no build of a dependent compiles, as the readers say
-    (goread/rsread never_built): a Go *_test.go file, a name with "_" or "."
-    first, one under testdata/ or vendor/; a crate's tests/, benches/ and
-    examples/. Neither the readers nor the file rules read it."""
+    for "crate") a file the file rules leave out as no build of a dependent
+    compiles it (goread/rsread never_built): a Go *_test.go file, a name
+    with "_" or "." first, one under testdata/ or below a vendor/ folder's
+    own folders; a crate's tests/, benches/ and examples/. A test file's
+    name ends in `_test.go` exactly, as Go reads it: `x_TEST.go` is built.
+    A package in vendor/ itself (`m/vendor`) is the module's and is built;
+    one in testdata/ is built when an import names it: the Go reader is
+    given those files (go_testdata) and reads such a package (F-06); a
+    vendor tree's are its modules.txt's (_go_vendor_data)."""
     if kind == "go":
         parts = rel.split("/")
-        name = parts[-1]
-        return (name[:1] in ("_", ".") or name.lower().endswith("_test.go")
-                or any(p in ("testdata", "vendor") for p in parts[:-1]))
+        name, dirs = parts[-1], parts[:-1]
+        return (name[:1] in ("_", ".") or name.endswith("_test.go") or "testdata" in dirs
+                or "vendor" in dirs[:-1])
     if kind == "crate":
         return rel.split("/", 1)[0] in ("tests", "benches", "examples")
     return False
+
+
+def go_testdata(rel):
+    """Is `rel` ('/'-separated, below a Go module's root) a .go file that only
+    its testdata/ folder keeps from the file rules (never_built)? Such a file
+    is given to the Go reader all the same: a package in testdata/ is built
+    when an import names it, and the reader reads it then, and the file
+    rules too (F-06)."""
+    parts = rel.split("/")
+    name, dirs = parts[-1], parts[:-1]
+    return (name.lower().endswith(".go") and "testdata" in dirs and "vendor" not in dirs[:-1]
+            and not (name[:1] in ("_", ".") or name.endswith("_test.go")))
 
 
 _LAYOUT_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
@@ -4688,6 +5197,65 @@ def _disk_reader(root, files, manifests, excludes=()):
     return read
 
 
+_B64_MARKS = {}
+
+
+def b64_mark(name):
+    """What the descriptors' pass reads a file of this name as (b64_descriptor_pass): "holder" (a kind that holds
+    script the file scan does not read: _SCRIPT_HOLDER_EXTS), "resolver" (it says where modules are: tsconfig*.json,
+    jsconfig*.json, _B64_RESOLVER_CONFIGS), or None. The engine's collect_file says so for a walk (collect.rs)."""
+    if not _B64_MARKS:
+        _B64_MARKS.update(holders=frozenset(engine.pack_value("_SCRIPT_HOLDER_EXTS")),
+                          resolvers=frozenset(engine.pack_value("_B64_RESOLVER_CONFIGS")))
+    low = posixpath.basename(_slash(name)).lower()
+    if os.path.splitext(low)[1] in _B64_MARKS["holders"]:
+        return "holder"
+    if (low.startswith(("tsconfig", "jsconfig")) and low.endswith(".json")) or low in _B64_MARKS["resolvers"]:
+        return "resolver"
+    return None
+
+
+def b64_descriptor_pass(issues, files, manifests, holders, resolvers, read, stopped, package, unread=()):
+    """FP-B64-PROTOBUF (the review of Oct 27): drop from `issues`, in place, the SC-B64 findings of JavaScript files
+    whose every run is a protobuf file's descriptor handed to its runtime's loader and used only as generated code
+    uses it, decided over the whole scan by the engine (b64_descriptors: protodesc/usage.rs). `files` and `manifests`:
+    the scan's, as collected; `holders`, `resolvers`: the paths of the files that may hold script or say where modules
+    are (collect_file's "holder" and "resolver"), read by `read(rel)` ('/'-separated; None when it cannot be read);
+    `stopped`: the scan stopped before its end; `package`: a package's scan; `unread`: the paths of what it did not
+    read whole besides its SC-TRUNCATED, Q-UNREADABLE and Q-SYMLINK findings' ("." for the scan). Fails closed: when
+    the engine cannot answer every finding stays, and the reason is returned (None otherwise)."""
+    js = {}
+    for f in files:
+        if f.get("lang") == "js" and isinstance(f.get("content"), str):
+            js.setdefault(_slash(f["path"]), f["content"])
+    found = [i for i in issues if i.get("rule") == "SC-B64" and _slash(i.get("file") or "") in js
+             and isinstance(i.get("line"), int)]
+    # (a finding can be dropped only in a file that calls the loader's fileDesc: when none does, every one stays
+    # and the scan's text need not be handed over)
+    if not any("fileDesc" in js[_slash(i["file"])] for i in found):
+        return None
+    try:
+        kinds = set(engine.pack_value("_B64_DESCRIPTOR_UNREAD"))
+        args = {
+            "files": [[p, t] for p, t in js.items()],
+            "holders": [[_slash(h), read(_slash(h))] for h in holders],
+            "manifests": [[_slash(m["path"]), m["content"]] for m in manifests
+                          if posixpath.basename(_slash(m["path"])) == "package.json"],
+            "configs": [[_slash(c), read(_slash(c))] for c in resolvers],
+            "findings": [[_slash(i["file"]), i["line"]] for i in found],
+            "unread": sorted({_slash(i.get("file") or ".") for i in issues if i.get("rule") in kinds}
+                             | {_slash(x) for x in unread}),
+            "stopped": bool(stopped), "package": bool(package)}
+        got = _native.call("b64_descriptors", args)["findings"]
+        if len(got) != len(found):
+            raise ValueError(f"{len(got)} answers for {len(found)} findings")
+    except Exception as exc:                    # every finding stays
+        return f"SC-B64: protobuf descriptors were not checked ({type(exc).__name__}: {_safe_text(exc)})"
+    drop = {id(i) for i, (_, _, why) in zip(found, got) if why is None}
+    issues[:] = [i for i in issues if id(i) not in drop]
+    return None
+
+
 def _vendored_modules(text):
     """The module paths vendor/modules.txt says are vendored, longest first
     (engine.go_vendored_modules: a `# path version …` line followed by its
@@ -4731,7 +5299,10 @@ def _vendored_code(tree, files, should_stop=None):
     section comment) -> (issues, stopped): each module vendor/modules.txt
     lists (a file of none is read with its package's directory), each crate
     of a cargo vendor tree. A module or a crate over PACKAGE_CODE_CHARS is
-    SC-TRUNCATED, and so is one the engine could not answer about."""
+    SC-TRUNCATED, and so is one the engine could not answer about. A Go file
+    is given as the Go toolchain reads it (goContent, where that is not its
+    content), and every package given is one modules.txt lists, built
+    (`listed`: one in testdata/ too; _go_vendor_data dropped the others)."""
     units = {}
     listed = {}
     for f in files:
@@ -4756,7 +5327,8 @@ def _vendored_code(tree, files, should_stop=None):
                 return out, stopped
         base = f"{top}/{unit}" if unit else top
         members = sorted(members, key=lambda f: f["path"].replace(os.sep, "/"))
-        named = [(f["path"], f["path"].replace(os.sep, "/")[len(base) + 1:], f["content"]) for f in members]
+        named = [(f["path"], f["path"].replace(os.sep, "/")[len(base) + 1:], f.get("goContent", f["content"]))
+                 for f in members]
         if lang == "go":
             for folder in sorted({posixpath.dirname(f["path"].replace(os.sep, "/")) for f in members}):
                 named.extend((_fs_display(rel.replace("/", os.sep)), rel[len(base) + 1:], text)
@@ -4772,7 +5344,7 @@ def _vendored_code(tree, files, should_stop=None):
             if lang == "go":
                 answer = engine.go_package([(r, t) for _p, r, t in named], module=module,
                                            use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS,
-                                           what=what, names=order)
+                                           what=what, names=order, listed=True)
             else:
                 script, lib, proc_macro = cargo_layout(_vendor_text(tree, f"{base}/Cargo.toml"),
                                                        [r for _p, r, _t in named])
@@ -4846,7 +5418,10 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             if engine.unanswered(answer):
                 out.append(engine.error_issue(f["path"], answer))
             else:
-                out.extend(engine._issues(f["path"], [a for a in answer if a is not None]))
+                out.extend(engine._issues(f["path"], [a for a in answer[:2] if a is not None]))
+                if len(answer) > 2 and answer[2]:
+                    # (BIG-BUNDLE-TAIL: the file not read whole, beside what was found)
+                    out.append(truncated_issue(f["path"], answer[2]))
     # (0.1.9, Part C) the vendored Go modules' and crates' code, by the
     # engine's readers (_vendored_code)
     found, stopped = _vendored_code(tree, files, should_stop)
@@ -5087,12 +5662,14 @@ def _scan_project(tree, root, exclude, include_deps, taint_config, redact_secret
                             _dedupe(get_taint_config_warnings() + flow_warnings))
         col = _collect(tree, exclude, include_deps=include_deps)
         files, manifests, configs = col["files"], col["manifests"], col["configs"]
-        if not files and not manifests and not configs and not col["pth"] and not col["issues"] and not tree.changed \
-                and not tree.too_deep and not allow_empty:
+        if not files and not manifests and not configs and not col["pth"] and not col["issues"] and not col["models"] \
+                and not tree.changed and not tree.too_deep and not allow_empty:
             raise ScanTargetError(
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
         issues = list(extra_issues) + list(col["issues"])
+        # (FP-MODEL-FILES) the globals of the project's own modules, or a dependency's, its model files import
+        issues.extend(model_own_issues(col["models"], model_own_files(col["models"], files)))
         # findings numbered by their file's scan lines and built outside the engine's scan of it, which redacted
         # its own with the file's redaction (mk_issue's): the flows' and the dependency checks' (redact_file_issues)
         numbered = []
@@ -5185,6 +5762,14 @@ def _scan_project(tree, root, exclude, include_deps, taint_config, redact_secret
                 ".", f"{stopped}: {total - len(scanned) - checked} of {total} files "
                      f"not scanned"))
             files = scanned
+        # FP-B64-PROTOBUF: the SC-B64 findings that are protobuf descriptors generated code alone uses, over the
+        # whole scan (its files, and what else could read them or remap their loader)
+        if any(i.get("rule") == "SC-B64" for i in issues):
+            disk = _disk_reader(root, files, manifests, exclude)
+            note = b64_descriptor_pass(issues, files, manifests, col["holders"], col["resolvers"],
+                                       lambda rel: disk(rel), stopped, package=False)
+            if note:
+                warnings.append(note)
         # G10: skipped-directory accounting — INFO findings make the coverage
         # gap visible instead of silent.
         issues.extend(skipped_tree_issues(col["skipped"]))
@@ -5840,10 +6425,11 @@ def scan_twins(twins, exclude=(), include_deps=False, redact_secrets=True, shown
     with more beside it, and merge_findings keeps it once. -> (the trees' findings, merged, at their paths in the
     commit; {path: the tree its own file is in}; why a scan was not whole, [str]; how many trees held something to
     read; what the trees hold of their own for the metrics, {"files": [file], "configs": how many config files}). A
-    tree holding nothing Lazaret reads adds nothing."""
+    tree holding nothing Lazaret reads adds nothing. (`overlaid` holds the commit's paths, '/'-separated; they are
+    compared with the scan's in the scan's form, os.sep-separated as _fs_display shows them.)"""
     issues, where, why, read, own = [], {}, [], 0, {"files": [], "configs": 0}
     for twin in twins:
-        given, collected = (overlaid or {}).get(twin, set()), {}
+        given, collected = {_fs_display(p.replace("/", os.sep)) for p in (overlaid or {}).get(twin, ())}, {}
         try:
             got = scan_project(twin, exclude, include_deps=include_deps, redact_secrets=redact_secrets, shown=shown,
                                collected=collected)

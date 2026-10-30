@@ -300,7 +300,13 @@ class IsolationTests(unittest.TestCase):
                 env.pop("PIP_BUILD_TRACKER", None)                            # (pip's own, outside the checkout)
                 self.assertEqual(sorted(env), ["PYTHONNOUSERSITE", "PYTHONPATH"])   # (pip's isolated build)
                 venv = os.path.join(self.temp, "lazaret-action") + os.sep
-                self.assertFalse([p for p in built["sys_path"] if os.path.realpath(p).startswith(venv)])
+                # (but the folder of pip's own hook runner, the script pip runs the backend in: pyproject_hooks
+                # before 1.1, in pip 24.0 and before, the pip of Python 3.10's and 3.11's venvs, leaves it on
+                # sys.path, and it holds that script and its package's __init__.py; 1.1 removes it. CI's
+                # python-unit, Oct 29)
+                runner = os.sep + os.path.join("site-packages", "pip", "_vendor", "pyproject_hooks", "_in_process")
+                self.assertFalse([p for p in built["sys_path"] if os.path.realpath(p).startswith(venv)
+                                  and not os.path.normpath(p).endswith(runner)])
         self.assertFalse(os.path.exists(self.pip_target))
         self.assertNoMarker()
 

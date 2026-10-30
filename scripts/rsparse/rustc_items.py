@@ -13,8 +13,11 @@ import threading
 # rustc's dumps nest deeply, so the reading runs on a thread with a large stack and a recursion limit to match
 # (`deep`); both are put back after, never set when the module is imported: the tests load this file, and a raised
 # limit there was every later test's (tomllib then read TOML nested 200,000 deep, which a test expects it to refuse).
-DEEP_RECURSION = 1_000_000
-DEEP_STACK = 512 * 1024 * 1024
+# Windows' Python takes a thread stack under 256 MiB only (its THREAD_MAX_STACKSIZE; 512 MiB is "ValueError: size not
+# valid"): 255 MiB there, and the recursion limit cut in proportion, so a dump too deep for it is a RecursionError
+# (the file's error) and not the stack run out.
+DEEP_STACK = 255 * 1024 * 1024 if sys.platform == "win32" else 512 * 1024 * 1024
+DEEP_RECURSION = 1_000_000 * DEEP_STACK // (512 * 1024 * 1024)
 
 TOKEN = re.compile(r'\s*(?:(?P<span>\S+?:\d+:\d+: \d+:\d+ \(#\d+\))|(?P<str>"(?:[^"\\]|\\.)*")|(?P<root>\{\{root\}\}#\d+)|(?P<p>[{}()\[\],:])|(?P<atom>[^\s{}()\[\],:"]+))')
 

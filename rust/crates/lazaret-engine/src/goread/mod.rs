@@ -23,9 +23,20 @@
 //! its text read by the text test as well.
 //!
 //! A module is its packages, one per folder, each read as one unit, as Go compiles it. Files no build of a
-//! dependent reads are not: `_test.go` files, files and folders whose names start with `_` or `.`, `testdata/`,
-//! `vendor/` (other modules, read on their own), and files constrained to `ignore`. A file the parser refuses could
-//! not be built, so nothing in it runs: it is listed (`unparsed`) for the text rules.
+//! dependent reads are not ([`never_built`]): `_test.go` files (the name ending so exactly), files whose names start
+//! with `_` or `.`, files below a `vendor/` folder's own folders (`vendor/x` is imported as `x`, another module's;
+//! a package in `vendor/` itself is the module's), and files a build constraint certainly confines to `ignore`
+//! ([`build_ignored`]: the header read as `go/build` reads it; a constraint it cannot be sure of leaves the file
+//! read). Folders named with `_` or `.` first are read: an import can name them. A package in a `testdata/` folder is
+//! read when an import of a file read names it, as Go then builds it (F-06), and so is every package of a vendor
+//! tree's modules.txt (`listed`). The text read is the file as the Go toolchain reads it (`decode::go_source`); the
+//! line numbers are the text rules' (a lone "\r" ends a line). A file the parser refuses is listed (`unparsed`;
+//! `refused`, its line and why, for one a build compiles: not one in a `_`, `.` or `testdata/` folder no import
+//! names): what it does is not read, and the reader's issues say so (SC-TRUNCATED: a build may compile what this
+//! parser refuses). An import of the module's own `testdata/` package of which no file was given is `wanted` (the
+//! registry gives it and asks again), and one of another module's `testdata/` package, which that module's reading
+//! leaves out, is SC-GO-TESTDATA-IMPORT (`testdata_imports`): a nested module's too, its path the module's own (the
+//! registry says which `testdata/` folders the module has: `testdata_dirs`).
 
 pub mod cread;
 pub mod eval;
@@ -55,17 +66,23 @@ pub const MAX_FILES: usize = 60_000;
 /// What a module's reading is told: its module path (go.mod's `module`; when it is not given, the module's own
 /// imports are recognized by the folders they end in), and the bounds of the use-time test's reading (as the
 /// registry's for Python and JavaScript: a file of more characters is not read, and the files read, smallest first,
-/// hold at most `use_chars`).
+/// hold at most `use_chars`). `listed` (F-06): every package of the files given is one a vendor tree's modules.txt
+/// lists, which a build compiles (a --deps scan's): one in a `testdata/` or a `_` or `.` folder is read as any other.
+/// `testdata_dirs` (F-06): the module's `testdata/` folders that hold `.go` files, given or not (the registry gives
+/// their files only when asked): an import of a `testdata/` package that names none of them is another module's,
+/// a nested module's too (a module zip leaves nested modules out), and is `testdata_imports`, not `wanted`.
 #[derive(Clone, Debug)]
 pub struct Options {
     pub module: Option<PyStr>,
     pub use_file_chars: usize,
     pub use_chars: usize,
+    pub listed: bool,
+    pub testdata_dirs: Option<Vec<PyStr>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { module: None, use_file_chars: 8_000_000, use_chars: 24_000_000 }
+        Options { module: None, use_file_chars: 8_000_000, use_chars: 24_000_000, listed: false, testdata_dirs: None }
     }
 }
 
@@ -78,8 +95,18 @@ pub struct Answer {
     pub uses: Vec<Found>,
     /// The files read.
     pub read: Vec<usize>,
-    /// The `.go` files the parser refused (no build reads them; the text rules do).
+    /// The `.go` files the parser refused (what they do is not read; the text rules read their text).
     pub unparsed: Vec<usize>,
+    /// Those of them a build compiles (all but one in a `testdata/`, `_` or `.` folder no import names), each with the
+    /// 1-based line where the parser stopped and why: (file, line, message). The module is not cleared.
+    pub refused: Vec<(usize, usize, PyStr)>,
+    /// (F-06) The imports of the files read that name a package of the module's in a `testdata/` folder of which no
+    /// file was given: the caller gives those files and asks again (the registry keeps them till then).
+    pub wanted: Vec<PyStr>,
+    /// (F-06) The imports of the files read that name a package in another module's `testdata/` folder, which that
+    /// module's own reading leaves out (no import of its own names it), a nested module's included (`testdata_dirs`):
+    /// (file, 1-based line, the import path).
+    pub testdata_imports: Vec<(usize, usize, PyStr)>,
     /// `//go:generate` commands and `//go:linkname` directives: (file, 1-based line, its text).
     pub generate: Vec<(usize, usize, PyStr)>,
     pub linkname: Vec<(usize, usize, PyStr)>,
@@ -119,46 +146,397 @@ fn normalize(p: &[u32]) -> PyStr {
     pystr::join(&u("/"), &parts)
 }
 
-/// Is a file one no build of a dependent reads by its name or place?
+/// Is a file one no build of a dependent reads by its name or place (`path`: below the module's root)? A test file, a
+/// name with `_` or `.` first, or a file below a `vendor/` folder's own folders: `vendor/x` is imported as `x` (Go:
+/// "must be imported as"), another module's, while a package in `vendor/` itself (`m/vendor`) is the module's own.
 fn never_built(path: &[u32]) -> bool {
     let parts = split_path(path);
     let Some((base, dirs)) = parts.split_last() else { return true };
     if base.first().is_some_and(|&c| c == '_' as u32 || c == '.' as u32) || pystr::ends_with(base, "_test.go") {
         return true;
     }
-    dirs.iter().any(|d| pystr::eq(d, "testdata") || pystr::eq(d, "vendor"))
+    dirs.iter().rev().skip(1).any(|d| pystr::eq(d, "vendor"))
 }
 
-/// Is a Go file constrained to `ignore` (`//go:build ignore`, `// +build ignore`): never built?
-fn build_ignored(src: &[u32]) -> bool {
-    let text: String = src.iter().take(64 * 1024).filter_map(|&c| char::from_u32(c)).collect();
-    for line in text.lines() {
-        let l = line.trim();
-        if l.is_empty() {
-            continue;
+/// Is a file in a `testdata/` folder (below the module's root)? Go's wildcards leave such a package out, but an import
+/// can name it, and a build then compiles it.
+fn in_testdata(path: &[u32]) -> bool {
+    let parts = split_path(path);
+    parts.split_last().is_some_and(|(_, dirs)| dirs.iter().any(|d| pystr::eq(d, "testdata")))
+}
+
+/// Is a file in a folder whose name starts with `_` or `.` (below the module's root)? Go's wildcards leave such a
+/// package out too; it is read (an import can name it), but a file of it the parser refuses holds the module only
+/// when an import names it.
+fn in_hidden(path: &[u32]) -> bool {
+    let parts = split_path(path);
+    parts.split_last().is_some_and(|(_, dirs)| dirs.iter().any(|d| d.first().is_some_and(|&c| c == '_' as u32 || c == '.' as u32)))
+}
+
+/// Go's reader of a file's package clause and imports (`go/build`'s `importReader` and `readGoInfo`, which a build reads
+/// before it asks the constraints): does it meet a NUL, its error? It reads the leading comments, the package clause
+/// and the import declarations, a byte past them; after a syntax error there, the whole file. A NUL elsewhere is no
+/// error to a build that leaves the file out.
+fn go_reader_meets_nul(src: &[u32]) -> bool {
+    if !src.contains(&0) {
+        return false;
+    }
+    struct R<'a> {
+        s: &'a [u32],
+        i: usize,
+        peek: u32,
+        eof: bool,
+        syntax: bool,
+        nul: bool,
+    }
+    const SP: u32 = ' ' as u32;
+    impl R<'_> {
+        fn err(&self) -> bool {
+            self.syntax || self.nul
         }
-        if let Some(expr) = l.strip_prefix("//go:build") {
-            let e: String = expr.split_whitespace().collect();
-            if e.contains("||") || e.contains('!') {
+        fn read(&mut self) -> u32 {
+            match self.s.get(self.i) {
+                Some(&c) => {
+                    self.i += 1;
+                    self.nul |= c == 0;
+                    c
+                }
+                None => {
+                    self.eof = true;
+                    0
+                }
+            }
+        }
+        fn ident(c: u32) -> bool {
+            matches!(char::from_u32(c), Some('a'..='z' | 'A'..='Z' | '0'..='9' | '_')) || c >= 0x80
+        }
+        fn peek_byte(&mut self, skip: bool) -> u32 {
+            if self.err() {
+                return 0;
+            }
+            let mut c = if self.peek == 0 { self.read() } else { self.peek };
+            while !self.err() && !self.eof {
+                if skip {
+                    if matches!(c, SP | 0x0C | 9 | 13 | 10) || c == ';' as u32 {
+                        c = self.read();
+                        continue;
+                    }
+                    if c == '/' as u32 {
+                        c = self.read();
+                        if c == '/' as u32 {
+                            while c != 10 && !self.err() && !self.eof {
+                                c = self.read();
+                            }
+                        } else if c == '*' as u32 {
+                            let mut c1 = 0;
+                            while (c != '*' as u32 || c1 != '/' as u32) && !self.err() {
+                                if self.eof {
+                                    self.syntax = true;
+                                }
+                                c = c1;
+                                c1 = self.read();
+                            }
+                        } else {
+                            self.syntax = true;
+                        }
+                        c = self.read();
+                        continue;
+                    }
+                }
+                break;
+            }
+            self.peek = c;
+            c
+        }
+        fn next_byte(&mut self, skip: bool) -> u32 {
+            let c = self.peek_byte(skip);
+            self.peek = 0;
+            c
+        }
+        fn keyword(&mut self, kw: &str) {
+            self.peek_byte(true);
+            for k in kw.chars() {
+                if self.next_byte(false) != k as u32 {
+                    self.syntax = true;
+                    return;
+                }
+            }
+            if Self::ident(self.peek_byte(false)) {
+                self.syntax = true;
+            }
+        }
+        fn name(&mut self) {
+            if !Self::ident(self.peek_byte(true)) {
+                self.syntax = true;
+                return;
+            }
+            while Self::ident(self.peek_byte(false)) {
+                self.peek = 0;
+            }
+        }
+        fn string(&mut self) {
+            match self.next_byte(true) {
+                q if q == '`' as u32 => {
+                    while !self.err() {
+                        if self.next_byte(false) == '`' as u32 {
+                            break;
+                        }
+                        if self.eof {
+                            self.syntax = true;
+                        }
+                    }
+                }
+                q if q == '"' as u32 => {
+                    while !self.err() {
+                        let c = self.next_byte(false);
+                        if c == '"' as u32 {
+                            break;
+                        }
+                        if self.eof || c == 10 {
+                            self.syntax = true;
+                        }
+                        if c == '\\' as u32 {
+                            self.next_byte(false);
+                        }
+                    }
+                }
+                _ => self.syntax = true,
+            }
+        }
+        fn import(&mut self) {
+            let c = self.peek_byte(true);
+            if c == '.' as u32 {
+                self.peek = 0;
+            } else if Self::ident(c) {
+                self.name();
+            }
+            self.string();
+        }
+    }
+    let mut r = R { s: src, i: 0, peek: 0, eof: false, syntax: false, nul: false };
+    r.keyword("package");
+    r.name();
+    while r.peek_byte(true) == 'i' as u32 {
+        r.keyword("import");
+        if r.peek_byte(true) == '(' as u32 {
+            r.next_byte(false);
+            while r.peek_byte(true) != ')' as u32 && !r.err() {
+                r.import();
+            }
+            r.next_byte(false);
+        } else {
+            r.import();
+        }
+    }
+    if r.syntax && !r.nul {
+        // (Go consumes the whole file after a syntax error there)
+        while !r.nul && !r.eof {
+            r.read();
+        }
+    }
+    r.nul
+}
+
+/// The most terms (tags, and parenthesized groups) a constraint read for `ignore` may have (Go: 1,000 for a
+/// `//go:build` expression, 100 operators for a `// +build` line).
+const MAX_CONSTRAINT_TERMS: usize = 100;
+
+/// ASCII white space, as Go's `bytes.TrimSpace` reads it.
+fn go_space(c: u32) -> bool {
+    matches!(c, 9..=13 | 32)
+}
+
+/// A line without the ASCII white space around it; None when what is left begins with a character outside ASCII,
+/// which Go may read as white space (U+00A0, U+3000) or as code: only ASCII white space is read as Go reads it here.
+fn go_trim(s: &[u32]) -> Option<&[u32]> {
+    let a = s.iter().position(|&c| !go_space(c)).unwrap_or(s.len());
+    let b = s.iter().rposition(|&c| !go_space(c)).map_or(a, |k| k + 1);
+    let t = &s[a..b];
+    if t.first().is_some_and(|&c| c >= 0x80) {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+/// A build tag's character, as this reading takes it: an ASCII letter or digit, `_` or `.` (Go's are any letter or
+/// digit, `_` and `.`).
+fn tag_char(c: u32) -> bool {
+    char::from_u32(c).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// Space or tab: what separates a constraint's prefix and its terms here.
+fn blank(c: u32) -> bool {
+    c == ' ' as u32 || c == '\t' as u32
+}
+
+/// May Go read a line as a `//go:build` line (`isGoBuildComment`: `//go:build`, then nothing or white space)? A
+/// character outside ASCII after the prefix may be white space: yes.
+fn go_build_line(line: &[u32]) -> bool {
+    pystr::starts_with(line, "//go:build") && line.get(10).map_or(true, |&c| go_space(c) || c >= 0x80)
+}
+
+/// May Go read a line as a `// +build` line (`splitPlusBuild`: `//`, white space or none, `+build`, then nothing or
+/// white space)? A character outside ASCII is taken for white space: yes.
+fn plus_build_line(line: &[u32]) -> bool {
+    let Some(rest) = line.strip_prefix(&[47, 47][..]) else { return false };
+    let k = rest.iter().position(|&c| !(go_space(c) || c >= 0x80)).unwrap_or(rest.len());
+    let rest = &rest[k..];
+    pystr::starts_with(rest, "+build") && rest.get(6).map_or(true, |&c| go_space(c) || c >= 0x80)
+}
+
+/// Is a `//go:build` line's expression `ignore` and'd with other tags, false for every build that does not set the
+/// tag `ignore`? `//go:build`, a space or a tab, then Go's grammar (`go/build/constraint`'s parser) with only `&&` and
+/// parentheses: tags separated by spaces and tabs, as Go's lexer separates them. `||`, `!`, any other character, an
+/// unbalanced parenthesis, an empty expression or more than MAX_CONSTRAINT_TERMS terms: no.
+fn ignore_conjunction(line: &[u32]) -> bool {
+    let Some(expr) = line.strip_prefix(&pystr::u("//go:build")[..]) else { return false };
+    if !expr.first().is_some_and(|&c| blank(c)) {
+        return false;
+    }
+    let (mut depth, mut terms, mut operand, mut ignore) = (0usize, 0usize, true, false);
+    let mut i = 0;
+    while i < expr.len() {
+        let c = expr[i];
+        if blank(c) {
+            i += 1;
+        } else if operand && c == '(' as u32 {
+            depth += 1;
+            terms += 1;
+            i += 1;
+        } else if operand {
+            let start = i;
+            while i < expr.len() && tag_char(expr[i]) {
+                i += 1;
+            }
+            if i == start {
                 return false;
             }
-            return e.split("&&").any(|t| t.trim_matches(|c| c == '(' || c == ')') == "ignore");
+            ignore |= pystr::eq(&expr[start..i], "ignore");
+            terms += 1;
+            operand = false;
+        } else if c == ')' as u32 && depth > 0 {
+            depth -= 1;
+            i += 1;
+        } else if c == '&' as u32 && expr.get(i + 1) == Some(&('&' as u32)) {
+            operand = true;
+            i += 2;
+        } else {
+            return false;
         }
-        if let Some(opts) = l.strip_prefix("// +build") {
-            if opts.split_whitespace().all(|o| o.split(',').any(|t| t == "ignore")) && !opts.trim().is_empty() {
-                return true;
-            }
-            continue;
+        if terms > MAX_CONSTRAINT_TERMS {
+            return false;
         }
-        if l.starts_with("//") {
-            continue;
-        }
-        if l.starts_with("/*") {
-            continue;
-        }
-        break;
     }
-    false
+    !operand && depth == 0 && ignore
+}
+
+/// Is a `// +build` line one option of tags joined by `,`, one of them `ignore`, false for every build that does not
+/// set `ignore` (`parsePlusBuildExpr`: options separated by white space are or'd, a `,` and's)? `//`, spaces or tabs,
+/// `+build`, a space or a tab, then the option. A `!`, a second option, an empty tag or one of other characters, or
+/// more than MAX_CONSTRAINT_TERMS tags: no.
+fn plus_ignore(line: &[u32]) -> bool {
+    let Some(rest) = line.strip_prefix(&[47, 47][..]) else { return false };
+    let k = rest.iter().position(|&c| !blank(c)).unwrap_or(rest.len());
+    let Some(opts) = rest[k..].strip_prefix(&pystr::u("+build")[..]) else { return false };
+    if !opts.first().is_some_and(|&c| blank(c)) {
+        return false;
+    }
+    let mut options = opts.split(|&c| blank(c)).filter(|o| !o.is_empty());
+    let (Some(option), None) = (options.next(), options.next()) else { return false };
+    let tags: Vec<&[u32]> = option.split(|&c| c == ',' as u32).collect();
+    tags.len() <= MAX_CONSTRAINT_TERMS
+        && tags.iter().all(|t| !t.is_empty() && t.iter().all(|&c| tag_char(c)))
+        && tags.iter().any(|t| pystr::eq(t, "ignore"))
+}
+
+/// Is a Go file certainly constrained to `ignore`, so that no build reads it (F-06)? Its header is read as `go/build`
+/// reads it (`parseFileHeader`, `shouldBuild`; `go/build/constraint`'s `splitGoBuild` and `splitPlusBuild`), and the
+/// file is left out only where that is certain; anything else, and anything this cannot read, is read as code:
+///
+/// - the text is the file as the Go toolchain reads it (`decode::go_source`: UTF-8, its byte order mark already
+///   dropped once, "\r\n" folded, a lone "\r" kept). A byte order mark left at the start is code to Go (a second one
+///   is its error), so the file is read; so is one holding a NUL where Go's reader of the package clause and the
+///   imports meets it (`go_reader_meets_nul`: Go's error, before the constraints are asked; a file of UTF-16 is one;
+///   a NUL past them is no error to a build that leaves the file out), or a "\r" in its header (a lone one is no
+///   line end to Go: the lines would not be Go's);
+/// - the header is the lines before the first that holds code: blank lines, `//` comments and `/* … */` comments,
+///   split at "\n" as Go splits them (after a last "\n" there is no line). A constraint inside a block comment is
+///   none;
+/// - a `//go:build` line is one whose text after `//go:build` is empty or begins with white space (`//go:buildignore`
+///   is a comment). With one, it decides: the file is left out when the line is in the leading run of blank lines and
+///   line comments (as Go's documentation says; Go also reads one after a closed block comment, which is read here)
+///   and its expression is `ignore` and'd with other tags (`ignore_conjunction`). Two are Go's error ("multiple
+///   //go:build comments"): read;
+/// - without one, the `// +build` lines of that leading run up to its last blank line decide (Go's fallback): the
+///   file is left out when one of them is `ignore` and'd with other tags
+///   (`plus_ignore`). The toolchains read are Go 1.17's and later, whose `//go:build` decides; a `//go:build ignore`
+///   beside `// +build` lines of which none says so is read all the same: the two disagree (`go vet`'s error), and
+///   one of them says the file builds;
+/// - only ASCII is read as Go reads it: a line, or what follows a block comment's end, that begins with a character
+///   outside ASCII (Go may read it as white space or as code) leaves the file read.
+fn build_ignored(src: &[u32]) -> bool {
+    if go_reader_meets_nul(src) {
+        return false;
+    }
+    // Go's lines: no empty one after a last "\n"
+    let body = src.strip_suffix(&['\n' as u32][..]).unwrap_or(src);
+    if body.is_empty() {
+        return false;
+    }
+    // the `//go:build` lines, each with whether it is in the leading run; that run's possible `// +build` lines, and
+    // how many of them come before its last blank line
+    let mut go_build: Vec<(&[u32], bool)> = Vec::new();
+    let mut plus: Vec<&[u32]> = Vec::new();
+    let mut counted = 0;
+    let mut ended = false;
+    let mut in_block = false;
+    'lines: for raw in body.split(|&c| c == '\n' as u32) {
+        if raw.contains(&('\r' as u32)) {
+            return false;
+        }
+        let mut rest = raw;
+        if !in_block {
+            let Some(line) = go_trim(raw) else { return false };
+            if line.is_empty() {
+                if !ended {
+                    counted = plus.len();
+                }
+                continue;
+            }
+            if !pystr::starts_with(line, "//") {
+                ended = true;
+            } else if go_build_line(line) {
+                go_build.push((line, !ended));
+            } else if !ended && plus_build_line(line) {
+                plus.push(line);
+            }
+            rest = line;
+        }
+        // the line's comments: text after them is code, and the header ends before it
+        loop {
+            if in_block {
+                let Some(k) = pystr::find(rest, &[42, 47], 0) else { continue 'lines };
+                in_block = false;
+                let Some(after) = go_trim(&rest[k + 2..]) else { return false };
+                rest = after;
+            }
+            if rest.is_empty() || pystr::starts_with(rest, "//") {
+                continue 'lines;
+            }
+            if !pystr::starts_with(rest, "/*") {
+                break 'lines;
+            }
+            in_block = true;
+            rest = &rest[2..];
+        }
+    }
+    let plus = &plus[..counted];
+    match go_build.as_slice() {
+        [] => plus.iter().any(|l| plus_ignore(l)),
+        [(line, leading)] => *leading && ignore_conjunction(line) && (plus.is_empty() || plus.iter().any(|l| plus_ignore(l))),
+        _ => false,
+    }
 }
 
 fn is_c(path: &[u32]) -> bool {
@@ -188,8 +566,26 @@ fn default_name(path: &[u32]) -> PyStr {
     name.into_iter().map(|c| if c == '-' as u32 { '_' as u32 } else { c }).collect()
 }
 
+/// Is the character at `k` a lone "\r" (none follows it): a line end to the text rules, white space to Go?
+fn lone_cr(text: &[u32], k: usize) -> bool {
+    text[k] == 13 && text.get(k + 1) != Some(&10)
+}
+
+/// The 1-based line of an offset, as the text rules number lines (F-06: the Go text keeps a lone "\r", which they
+/// read as a line end).
 fn line_of(text: &[u32], at: usize) -> usize {
-    text[..at.min(text.len())].iter().filter(|&&c| c == 10).count() + 1
+    let at = at.min(text.len());
+    (0..at).filter(|&k| text[k] == 10 || lone_cr(text, k)).count() + 1
+}
+
+/// `text` with each lone "\r" a "\n" (offsets kept): what the model's facts and the text tests number lines in, as
+/// the text rules do; the text itself when it holds none.
+fn lined(text: &[u32]) -> std::borrow::Cow<'_, [u32]> {
+    if (0..text.len()).any(|k| lone_cr(text, k)) {
+        std::borrow::Cow::Owned((0..text.len()).map(|k| if lone_cr(text, k) { 10 } else { text[k] }).collect())
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 /// Does a comment written `//go:embed …` lead the code at `start` (only white space and other comments between)?
@@ -219,39 +615,154 @@ struct GoFile {
     name: PyStr,
 }
 
+/// The import paths a parsed file names, each with where its literal starts.
+fn imports_of(tree: &goparse::Tree, src: &[u32]) -> Vec<(u32, PyStr)> {
+    let mut out = Vec::new();
+    for &decl in tree.items(tree.node(tree.root).f[1]) {
+        let d = tree.node(decl);
+        if d.kind != K::GenDecl || d.op != Tok::Import as u8 {
+            continue;
+        }
+        for &spec in tree.items(d.f[0]) {
+            let s = tree.node(spec);
+            if s.f[1] == NONE {
+                continue;
+            }
+            let lit = tree.node(s.f[1]);
+            if let Some(path) = lit::string_lit(&src[lit.start as usize..lit.end as usize]) {
+                out.push((lit.start, path));
+            }
+        }
+    }
+    out
+}
+
+/// The import paths a Go file's build names (F-06: the `--deps` scan's vendored folders an import names): none for a
+/// file a build constraint certainly leaves out, None for one the parser refuses (what it imports is not known).
+pub fn file_imports(src: &[u32]) -> Option<Vec<PyStr>> {
+    if build_ignored(src) {
+        return Some(Vec::new());
+    }
+    let tree = goparse::parse(src).ok()?;
+    Some(imports_of(&tree, src).into_iter().map(|(_, path)| path).collect())
+}
+
+/// Does an import path hold a `testdata` element (a package in a `testdata/` folder)?
+fn testdata_import(imp: &[u32]) -> bool {
+    imp.split(|&c| c == '/' as u32).any(|e| pystr::eq(e, "testdata"))
+}
+
+/// Does an import name the module's folder `dir` (below its root)? With the module's path: that path and the folder;
+/// without it, any path that ends in the folder (more than the module's own, never fewer).
+fn names_dir(imp: &[u32], dir: &[u32], module: Option<&[u32]>) -> bool {
+    match module {
+        Some(m) => imp.len() == m.len() + 1 + dir.len() && imp.starts_with(m) && imp[m.len()] == '/' as u32 && imp.ends_with(dir),
+        None => imp == dir || (imp.len() > dir.len() && imp.ends_with(dir) && imp[imp.len() - dir.len() - 1] == '/' as u32),
+    }
+}
+
+/// A Go file parsed for the reading (its tree, comments, hooks and package name, and the imports it names), or the
+/// parser's refusal listed: the line where it stopped and why.
+fn parse_go(k: usize, src: &[u32], gofiles: &mut Vec<GoFile>, trees: &mut Vec<(usize, goparse::Tree)>, answer: &mut Answer,
+            imported: &mut Vec<(usize, u32, PyStr)>) {
+    match goparse::parse(src) {
+        Ok(tree) => {
+            let comments = crate::lex::structure(src, "go", false).map(|s| s.comments).unwrap_or_default();
+            let hooks = goparse::hooks(&tree, src, &comments);
+            let root = tree.node(tree.root);
+            let name = if root.f[0] != NONE {
+                let n = tree.node(root.f[0]);
+                src[n.start as usize..n.end as usize].to_vec()
+            } else {
+                Vec::new()
+            };
+            imported.extend(imports_of(&tree, src).into_iter().map(|(at, path)| (k, at, path)));
+            gofiles.push(GoFile { index: k, comments, hooks, name });
+            trees.push((k, tree));
+        }
+        Err(e) => {
+            answer.unparsed.push(k);
+            answer.refused.push((k, line_of(src, e.pos as usize), pystr::u(e.msg)));
+        }
+    }
+}
+
 /// A module's files read: what runs when a program that imports its packages starts, and the rest when used.
 pub fn read_module(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer {
     let mut answer = Answer::default();
     let paths: Vec<PyStr> = files.iter().map(|(path, _)| normalize(path)).collect();
-    // ---- the files a build reads, parsed
+    // ---- the files a build reads, parsed; then the packages in `testdata/` folders an import of a file read names,
+    // as Go builds them (F-06), till none is added (an imported one's imports too), or all with `listed`
     let mut gofiles: Vec<GoFile> = Vec::new();
     let mut trees: Vec<(usize, goparse::Tree)> = Vec::new();
     let mut cfiles: Vec<usize> = Vec::new();
+    let mut testdata: Vec<usize> = Vec::new();
+    let mut imported: Vec<(usize, u32, PyStr)> = Vec::new();
     for (k, (_, src)) in files.iter().enumerate().take(MAX_FILES) {
         let path = &paths[k];
         if pystr::ends_with(&pystr::lower(path), ".go") {
             if never_built(path) || build_ignored(src) {
                 continue;
             }
-            match goparse::parse(src) {
-                Ok(tree) => {
-                    let comments = crate::lex::structure(src, "go", false).map(|s| s.comments).unwrap_or_default();
-                    let hooks = goparse::hooks(&tree, src, &comments);
-                    let root = tree.node(tree.root);
-                    let name = if root.f[0] != NONE {
-                        let n = tree.node(root.f[0]);
-                        src[n.start as usize..n.end as usize].to_vec()
-                    } else {
-                        Vec::new()
-                    };
-                    gofiles.push(GoFile { index: k, comments, hooks, name });
-                    trees.push((k, tree));
-                }
-                Err(_) => answer.unparsed.push(k),
+            if in_testdata(path) {
+                testdata.push(k);
+                continue;
             }
+            parse_go(k, src, &mut gofiles, &mut trees, &mut answer, &mut imported);
         } else if is_c(path) && !never_built(path) {
             cfiles.push(k);
         }
+    }
+    let own = opts.module.clone().filter(|m| !m.is_empty());
+    let mut taken = vec![false; testdata.len()];
+    loop {
+        let mut added = false;
+        for (j, &k) in testdata.iter().enumerate() {
+            if taken[j] {
+                continue;
+            }
+            let dir = dir_of(&paths[k]);
+            if opts.listed || imported.iter().any(|(_, _, imp)| names_dir(imp, &dir, own.as_deref())) {
+                taken[j] = true;
+                added = true;
+                parse_go(k, files[k].1, &mut gofiles, &mut trees, &mut answer, &mut imported);
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    // (a package's cgo C is read with its Go, a package read: `cgo_dirs` below, one in `testdata/` too)
+    // a refused file in a `_` or `.` folder holds the module only when an import names its package (a testdata one is
+    // parsed only then)
+    let named = |k: usize| opts.listed || imported.iter().any(|(_, _, imp)| names_dir(imp, &dir_of(&paths[k]), own.as_deref()));
+    answer.refused.retain(|&(k, _, _)| !in_hidden(&paths[k]) || named(k));
+    answer.unparsed.sort_unstable();
+    answer.refused.sort_unstable();
+    // the imports of a package in a `testdata/` folder no file given is in: the module's own (`wanted`: given, it is
+    // read; with no module path, any such import), another module's (`testdata_imports`: that module's own reading
+    // leaves it out, as no import of its own names it), a nested module's among them (its path the module's, its
+    // folder none of `testdata_dirs`); none for `listed` (a vendor tree's modules.txt lists what is built, and each
+    // module is read)
+    if !opts.listed {
+        let given: Vec<PyStr> = testdata.iter().map(|&k| dir_of(&paths[k])).collect();
+        for (k, at, imp) in &imported {
+            if !testdata_import(imp) || given.iter().any(|d| names_dir(imp, d, own.as_deref())) {
+                continue;
+            }
+            // (with the module's folders known: one that names none of them is not the module's)
+            let known = opts.testdata_dirs.as_ref().map(|ds| ds.iter().any(|d| names_dir(imp, &normalize(d), own.as_deref())));
+            let mine = own.as_deref().map_or(true, |m| imp.len() > m.len() + 1 && imp.starts_with(m) && imp[m.len()] == '/' as u32);
+            if known != Some(false) && mine {
+                answer.wanted.push(imp.clone());
+            } else {
+                answer.testdata_imports.push((*k, line_of(files[*k].1, *at as usize), imp.clone()));
+            }
+        }
+        answer.wanted.sort_unstable();
+        answer.wanted.dedup();
+        answer.testdata_imports.sort_unstable();
+        answer.testdata_imports.dedup();
     }
     // ---- packages: one per folder
     let mut dirs: Vec<PyStr> = gofiles.iter().map(|g| dir_of(&paths[g.index])).collect();
@@ -270,27 +781,7 @@ pub fn read_module(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answe
     // that ends in a folder's path
     let mut by_path: HashMap<PyStr, u32> = HashMap::new();
     let mut module = opts.module.clone().filter(|m| !m.is_empty());
-    let mut all_imports: Vec<PyStr> = Vec::new();
-    for (gi, g) in gofiles.iter().enumerate() {
-        let (_, tree) = &trees[gi];
-        let src = files[g.index].1;
-        for &decl in tree.items(tree.node(tree.root).f[1]) {
-            let d = tree.node(decl);
-            if d.kind != K::GenDecl || d.op != Tok::Import as u8 {
-                continue;
-            }
-            for &spec in tree.items(d.f[0]) {
-                let s = tree.node(spec);
-                if s.f[1] == NONE {
-                    continue;
-                }
-                let lit = tree.node(s.f[1]);
-                if let Some(path) = lit::string_lit(&src[lit.start as usize..lit.end as usize]) {
-                    all_imports.push(path);
-                }
-            }
-        }
-    }
+    let all_imports: Vec<PyStr> = imported.into_iter().map(|(_, _, imp)| imp).collect();
     if module.is_none() {
         for imp in &all_imports {
             for (k, d) in dirs.iter().enumerate() {
@@ -699,13 +1190,13 @@ fn go_view(k: &Module, fi: usize, comments: &[(usize, usize)], keep: &dyn Fn(Nod
         spans.extend(dr.iter().copied());
     }
     spans.sort_unstable();
-    crate::signs::blank(f.src, &spans)
+    crate::signs::blank(&lined(f.src), &spans)
 }
 
 /// The import-time test's finding for a file: its events and its text (and, for a reading cut short, the text
 /// test's). `fi` is the file's place among the reading's, `index` among the files given.
 fn finding(p: &Pack, src: &[u32], text: &[u32], evs: &[events::Ev], fi: usize, index: usize, cut: bool) -> Option<Found> {
-    let fx = facts::facts(p, src, evs, fi);
+    let fx = facts::facts(p, &lined(src), evs, fi);
     let _gate = crate::textgate::open(text);
     let (mut reasons, mut line) = crate::signs::import_time_risk_model(p, text, &fx.facts);
     if cut {

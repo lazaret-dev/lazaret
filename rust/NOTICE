@@ -88,6 +88,21 @@ pratique's Mozilla root store (crates/pratique/roots/mozilla.pem, under the
 Mozilla Public License 2.0, as NSS is) is for a feature Lazaret does not
 use; no package of Lazaret's carries it.
 
+Gradle's wrapper checksums
+--------------------------
+
+crates/lazaret-engine/rules/lazaret-rules.json holds, as
+GRADLE_WRAPPER_CHECKSUMS, the SHA-256 of each Gradle release's wrapper jar,
+as Gradle publishes them (https://services.gradle.org, each release's
+wrapperChecksumUrl) and as gradle/actions lists them
+(https://github.com/gradle/actions,
+sources/src/wrapper-validation/wrapper-checksums.json); written by
+scripts/update_gradle_wrapper_checksums.py. A checksum is a fact computed
+from a file, not a work of authorship: the list is named here for where it
+came from, and no licence applies to it. The rule pack is compiled into the
+engine, the native library's and the WebAssembly build's alike, so both
+carry the list.
+
 
 Unicode data
 ------------
@@ -108,7 +123,13 @@ coding cookie can give, facts about Python), written by
 scripts/make_codec_tables.py from Python's own decoders; CPython made those
 codecs' mappings for the most part from the Unicode Consortium's mapping
 tables and the vendors' published ones (Microsoft's cp932, cp936, cp949 and
-cp950). All three are distributed under the Unicode License v3
-(LICENSE-UNICODE):
+cp950). The archive readers' table, fold_table.rs in
+crates/lazaret-archive/src/, holds data of the Unicode Character Database
+15.1 — the case foldings, decompositions and canonical combining classes
+the readers use to find names that a file system writes to one path,
+taken from Python 3.13's unicodedata, and the Default_Ignorable_Code_Point
+ranges of DerivedCoreProperties.txt, which the generator lists itself —
+written by crates/lazaret-archive/tests/fixtures/generate_fold_table.py.
+All four are distributed under the Unicode License v3 (LICENSE-UNICODE):
 
     Copyright © 1991-2026 Unicode, Inc.

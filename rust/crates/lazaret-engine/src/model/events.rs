@@ -90,6 +90,7 @@ pub fn map_text(v: &Val, f: impl Fn(&[u32]) -> PyStr) -> Val {
     match &v.s {
         Some(s) => {
             let mut out = Val::text(f(s));
+            if let Some(w)=&v.path_win {out.set_windows(f(w));}
             out.add_kinds(v);
             out
         }
@@ -99,24 +100,6 @@ pub fn map_text(v: &Val, f: impl Fn(&[u32]) -> PyStr) -> Val {
 
 pub fn cat(parts: &[&[u32]]) -> PyStr {
     pystr::concat(parts)
-}
-
-
-/// `a` joined to `b` as a path: `a/b` (b absolute: b).
-pub fn path_join(a: &Val, b: &Val) -> Val {
-    let bt = b.text_or_unknown();
-    if bt.first() == Some(&('/' as u32)) || bt.first() == Some(&('~' as u32)) {
-        return b.clone().with_kinds(a);
-    }
-    let mut s = a.text_or_unknown();
-    if !s.is_empty() && s.last() != Some(&('/' as u32)) && s.last() != Some(&('\\' as u32)) {
-        s.push('/' as u32);
-    }
-    s.extend(bt);
-    let mut v = Val::text(val::collapse(s));
-    v.add_kinds(a);
-    v.add_kinds(b);
-    v
 }
 
 
@@ -389,6 +372,14 @@ pub fn env_var(p: &Pack, name: &[u32], at: u32) -> Val {
 
 /// What a file read gives: data read from the machine when the path is outside the package.
 pub fn file_read(p: &Pack, path: &Val, at: u32) -> Val {
+    let mut v=file_read_one(p,path,at);
+    if let Some(s)=&path.path_win {
+        v.add_kinds(&file_read_one(p,&Val::text((**s).clone()).with_kinds(path),at));
+    }
+    v
+}
+
+fn file_read_one(p: &Pack, path: &Val, at: u32) -> Val {
     let text = path.text_or_unknown();
     let outside = path.kinds & K_PATH != 0 || outside_path(p, &text);
     if !outside {

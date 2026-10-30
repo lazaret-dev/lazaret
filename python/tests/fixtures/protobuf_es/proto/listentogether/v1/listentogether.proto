@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package listentogether.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/common.proto";
+
+option go_package = "example.invalid/listentogether/gen/go/listentogether/v1;listentogetherv1";
+
+// A room where people listen to the same track at once.
+message Room {
+  string id = 1;
+  string name = 2;
+  repeated Member members = 3;
+  Track now_playing = 4;
+  google.protobuf.Timestamp created_at = 5;
+  map<string, string> labels = 6;
+  oneof state {
+    Paused paused = 7;
+    Playing playing = 8;
+  }
+  common.Status status = 9;
+}
+
+message Member {
+  string user_id = 1;
+  string display_name = 2;
+  bool host = 3;
+}
+
+message Track {
+  string uri = 1;
+  string title = 2;
+  string artist = 3;
+  uint32 duration_ms = 4;
+}
+
+message Paused { uint32 position_ms = 1; }
+message Playing { uint32 position_ms = 1; google.protobuf.Timestamp since = 2; }
+
+message JoinRequest { string room_id = 1; string display_name = 2; }
+message JoinResponse { Room room = 1; }
+message SyncEvent { oneof kind { Room room = 1; Track track = 2; Member left = 3; } }
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_LISTENER = 1;
+  ROLE_HOST = 2;
+}
+
+service ListenTogetherService {
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc Sync(JoinRequest) returns (stream SyncEvent);
+}

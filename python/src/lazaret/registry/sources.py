@@ -818,9 +818,16 @@ class _Writer:
         if why is not None:
             return None, why
         folder, name = "/".join(parts[:-1]), parts[-1]
+        path = os.path.join(self.trees[k], *parts)
         try:
-            out = open(os.path.join(self.trees[k], *parts), "xb")
+            out = open(path, "xb")
         except (FileExistsError, IsADirectoryError):
+            return None, self._why(k, folder, name, is_folder=False)
+        except PermissionError:
+            # (Windows: a file where its disk has a folder of that name, `A` beside `a/`, is "access denied" there,
+            # not EEXIST: it was not written at all, where a twin tree keeps it)
+            if not os.path.isdir(path):
+                raise
             return None, self._why(k, folder, name, is_folder=False)
         self.entries[k].setdefault(folder, {})[name] = ("/".join(parts), False)
         return out, None

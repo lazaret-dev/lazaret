@@ -1,0 +1,12 @@
+syntax = "proto3";
+package common;
+option go_package = "example.invalid/listentogether/gen/go/common;common";
+option java_package = "com.example.listentogether.common";
+option java_multiple_files = true;
+option java_outer_classname = "CommonProto";
+option objc_class_prefix = "CXX";
+option csharp_namespace = "Example.Listentogether.Common";
+option php_namespace = "Example\\Listentogether\\Common";
+option ruby_package = "Example::Listentogether::Common";
+option swift_prefix = "LT";
+enum Status { STATUS_UNSPECIFIED = 0; STATUS_OK = 1; }

@@ -30,6 +30,7 @@ from unittest import mock
 from lazaret.registry import ghdiscover, sources, sourcescan
 from lazaret.scanner import engine
 from tests._folding_disk import apfs_fold, folding_disk, tells_names_apart
+from tests._support import native_rel
 from tests.registry.test_sources import Net, gh_answers
 
 SPEC = "github:o/r@v1"
@@ -142,8 +143,11 @@ class FoundAtTheirPaths(unittest.TestCase):
     def check(self, name):
         """Each disk: what `want` names is found at its path, and nothing at a path the commit does not have. On a
         disk that holds two paths as one: not read whole (the CLI's --ci fails on it, the registry says INCOMPLETE,
-        or SUSPICIOUS where this disk's scan is), and nothing this machine's disk finds is missed."""
+        or SUSPICIOUS where this disk's scan is), and nothing this machine's disk finds is missed. (A finding's path
+        is the checkout's file's, as a project scan reports it: os.sep-separated, the commit's '/' a backslash on
+        Windows.)"""
         files, want = CASES[name]
+        want = {(rule, native_rel(path)) for rule, path in want}
         got = {}
         for disk, fold in DISKS.items():
             with self.subTest(disk=disk):
@@ -153,7 +157,7 @@ class FoundAtTheirPaths(unittest.TestCase):
                 self.assertLessEqual(want, {(r, f) for r, _, f, _ in cli}, said)
                 self.assertLessEqual(want, {(r, f) for r, _, f, _ in reg}, res["verdictReason"])
                 # every finding at a path of the commit: none at a twin tree's, none at a merged folder's
-                self.assertLessEqual({f for _, _, f, _ in cli | reg}, set(files))
+                self.assertLessEqual({f for _, _, f, _ in cli | reg}, {native_rel(f) for f in files})
                 self.assertEqual(code, 1, said)                     # the finding fails the gate
                 got[disk] = cli, reg, res["verdict"], report["metrics"]
                 if fold is None and self.apart:
@@ -239,6 +243,33 @@ class FoundAtTheirPaths(unittest.TestCase):
         self.assertTrue(report["incomplete"])
         self.assertTrue(any("were not given the commit's other files" in n for n in report["source"]["notes"]))
         self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
+
+
+@unittest.skipUnless(engine.available(), "the scan needs the native engine")
+class ScanTwins(unittest.TestCase):
+    def test_what_a_twin_tree_was_given_is_not_its_own(self):
+        # (core.scan_twins: the commit's other files a twin tree was given, '/'-separated paths of the commit, are
+        # left out of what it holds of its own, its metrics' files and configs, and of where its findings are, at
+        # the scan's os.sep-separated paths: on Windows a nested one was counted twice, the root's and the twin's)
+        from lazaret.scanner import core
+        twin = tempfile.mkdtemp(prefix="lazaret-twin-")
+        self.addCleanup(shutil.rmtree, twin, ignore_errors=True)
+        files = dict(CASES["a tainted call into a helper of the root, from a twin folder"][0],
+                     **{"conf/settings.yaml": b"region: us-east-1\n"})
+        del files["Lib/x.js"]                           # (the root's own, one name there with lib/: not given)
+        for rel, data in files.items():
+            path = os.path.join(twin, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(data)
+        given = {"util/h.js", "conf/settings.yaml"}
+        issues, where, _why, read, own = core.scan_twins([twin], overlaid={twin: given})
+        self.assertEqual(read, 1)
+        self.assertEqual([f["path"] for f in own["files"]], [native_rel("lib/run.js")])
+        self.assertEqual(own["configs"], 0)
+        self.assertIn(("X-CMD", native_rel("lib/run.js")), {(i["rule"], i["file"]) for i in issues})
+        self.assertIn(("S-EXEC-JS", native_rel("util/h.js")), {(i["rule"], i["file"]) for i in issues})
+        self.assertEqual(where, {native_rel("lib/run.js"): twin})
 
 
 class MergeFindings(unittest.TestCase):

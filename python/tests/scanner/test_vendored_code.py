@@ -47,8 +47,8 @@ class VendoredCodeTests(unittest.TestCase):
         for rel, text in files.items():
             path = os.path.join(root, *rel.split("/"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(text)
+            with open(path, "wb") as fh:
+                fh.write(text if isinstance(text, bytes) else text.encode("utf-8"))
         return root
 
     def scan(self, files, deps=True):
@@ -84,11 +84,154 @@ class GoVendorTests(VendoredCodeTests):
 
     def test_what_a_build_never_compiles_is_not_read(self):
         bad = go_file("evil", samples.INIT_GO) + f'\nvar blob = "{BLOB}"\n'
-        for name in ("e_test.go", "testdata/t.go", "_x.go", ".x.go"):
+        for name in ("e_test.go", "_x.go", ".x.go"):
             with self.subTest(name=name):
                 files = dict(GO_PROJECT, **{"vendor/example.test/evil/ok.go": go_file("evil", samples.CLEAN_GO),
                                             f"vendor/example.test/evil/{name}": bad})
                 self.assertEqual(self.scan(files), [])
+        # (F-06's third round) a .go file in a testdata/ folder, or one named with "_" or "." first, is Go code only
+        # as a package modules.txt lists: `go mod vendor` copies the files a package's //go:embed patterns match, .go
+        # files below it too, and a build compiles only the packages it lists; another is data, as in the registry
+        for folder in ("testdata", "testdata/fx", "_examples", ".hidden/x"):
+            with self.subTest(folder=folder):
+                path = f"vendor/example.test/evil/{folder}/t.go"
+                files = dict(GO_PROJECT, **{"vendor/example.test/evil/ok.go": go_file("evil", samples.CLEAN_GO),
+                                            path: bad})
+                self.assertEqual(self.scan(files), [])
+                files["vendor/modules.txt"] = MODULES_TXT.replace("example.test/evil\n",
+                                                                  f"example.test/evil\nexample.test/evil/{folder}\n")
+                self.assertEqual(self.scan(files), [("SC-IMPORT-RISK", "CRITICAL", path, 9), ("SC-B64", "MAJOR", path, 12)])
+
+    def test_a_build_constraint_go_does_not_read_as_ignore_leaves_the_file_read(self):
+        # F-06 (the registry's twin: test_package_code): `//go:buildignore` and `// +buildignore` are comments to Go
+        bad = go_file("evil", samples.DELETE_GO)
+        for header, want in (("//go:buildignore\n\n", True), ("// +buildignore\n", True), ("// +build ignore\n", True),
+                             ("//go:build ignore || linux\n\n", True), ("//go:build ignore\n\n", False),
+                             ("// +build ignore\n\n", False)):
+            with self.subTest(header=header):
+                files = dict(GO_PROJECT, **{"vendor/example.test/evil/d.go": header + bad})
+                line = header.count("\n") + 5                                  # (the init's line)
+                self.assertEqual(self.scan(files),
+                                 [("SC-IMPORT-RISK", "CRITICAL", "vendor/example.test/evil/d.go", line)] if want else [])
+        # and a test file's name ends in `_test.go` exactly: `e_TEST.go` is built
+        files = dict(GO_PROJECT, **{"vendor/example.test/evil/e_TEST.go": go_file("evil", samples.INIT_GO)})
+        self.assertEqual(self.scan(files), [("SC-IMPORT-RISK", "CRITICAL", "vendor/example.test/evil/e_TEST.go", 9)])
+
+    def test_a_file_is_read_as_the_go_toolchain_reads_its_bytes(self):
+        # F-06's review (the registry's twin: test_package_code): a lone "\\r" is no line end to Go, a second byte
+        # order mark is code to it, a "\\r" in a string is Go's; a file Go refuses (UTF-16, a //go:build line that
+        # does not parse) is never left out, and one the parser refuses is SC-TRUNCATED
+        body = go_file("evil", samples.DELETE_GO).encode()
+        rest = body[len(b"package evil\n\n"):]
+        path = "vendor/example.test/evil/d.go"
+        for data in (b"// c\r//go:build ignore\n\n" + body, b"// c\r// +build ignore\n\n" + body,
+                     b"\xef\xbb\xbf\xef\xbb\xbf//go:build ignore\n\n" + body,
+                     b'package evil\n\nimport "os"\n\nvar s = "a\rb"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n'):
+            with self.subTest(data=data[:40]):
+                self.assertEqual([(r, f) for r, _s, f, _l in self.scan(dict(GO_PROJECT, **{path: data}))],
+                                 [("SC-IMPORT-RISK", path)])
+        for data in (b"//go:build ignore\r\rpackage evil\r\r" + rest, b"package evil\n\nfunc (\n"):
+            with self.subTest(data=data[:24]):
+                self.assertEqual([(r, f) for r, _s, f, _l in self.scan(dict(GO_PROJECT, **{path: data}))],
+                                 [("SC-TRUNCATED", path)])
+        # UTF-16: the rules read the decoded text, as before (the third round); Go, and the reader, refuse the bytes
+        token = 'const k = "AKIA' + "Q7R2ZK9M4TXW8B3N" + '"\n'
+        text = "//go:build ignore\n\n" + go_file("evil", samples.DELETE_GO) + token
+        for data in (b"\xff\xfe" + text.encode("utf-16-le"), text.encode("utf-16-be")):
+            with self.subTest(data=data[:24]):
+                res = core.scan_project(self.tree(dict(GO_PROJECT, **{path: data})), include_deps=True)
+                self.assertEqual([(i["rule"], i["file"].replace(os.sep, "/"), i["line"]) for i in res["issues"]
+                                  if i["rule"] in ("S-TOKEN", "SC-TRUNCATED", "SC-IMPORT-RISK")],
+                                 [("S-TOKEN", path, text.count("\n"))])
+        # a lone "\r": the reader's lines are the rules' (Go's line 1 holds the comments)
+        data = (b'package evil\n\n// one\r// two\r// three\n\nimport "os"\n\nconst k = "AKIA' + b"Q7R2ZK9M4TXW8B3N"
+                + b'"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n')
+        res = core.scan_project(self.tree(dict(GO_PROJECT, **{path: data})), include_deps=True)
+        self.assertEqual({i["rule"]: i["line"] for i in res["issues"] if i["rule"] in ("S-TOKEN", "SC-IMPORT-RISK")},
+                         {"S-TOKEN": 9, "SC-IMPORT-RISK": 11})
+
+    def test_a_module_path_holding_testdata_or_vendor_is_read(self):
+        # F-06's review: the directory rules are the module's (below its root): example.test/testdata and
+        # example.test/vendor are modules, a package in a module's own vendor/ is built, and so is a testdata package
+        # the module imports
+        mods = ("# example.test/testdata v1.0.0\n## explicit\nexample.test/testdata\n"
+                "# example.test/vendor v1.0.0\n## explicit\nexample.test/vendor\n"
+                "# example.test/vd v1.0.0\n## explicit\nexample.test/vd\nexample.test/vd/vendor\n"
+                "# example.test/td v1.0.0\n## explicit\nexample.test/td\nexample.test/td/testdata/x\n")
+        bad = lambda pkg: samples.DELETE_GO.replace("package m", f"package {pkg}")
+        files = dict(GO_PROJECT, **{"vendor/modules.txt": mods,
+                                    "vendor/example.test/testdata/t.go": bad("testdata"),
+                                    "vendor/example.test/vendor/v.go": bad("vendor"),
+                                    "vendor/example.test/vd/a.go": 'package vd\n\nimport _ "example.test/vd/vendor"\n',
+                                    "vendor/example.test/vd/vendor/v.go": bad("vendor"),
+                                    "vendor/example.test/td/lib.go": 'package td\n\nimport _ "example.test/td/testdata/x"\n',
+                                    "vendor/example.test/td/testdata/x/x.go": bad("x")})
+        self.assertEqual(sorted((r, f) for r, _s, f, _l in self.scan(files)),
+                         [("SC-IMPORT-RISK", "vendor/example.test/td/testdata/x/x.go"),
+                          ("SC-IMPORT-RISK", "vendor/example.test/testdata/t.go"),
+                          ("SC-IMPORT-RISK", "vendor/example.test/vd/vendor/v.go"),
+                          ("SC-IMPORT-RISK", "vendor/example.test/vendor/v.go")])
+
+    def test_a_testdata_package_modules_txt_lists_is_read(self):
+        # F-06's third round (the review's appx): example.test/tb imports example.test/ta's testdata/x, which the
+        # build compiles and modules.txt lists: read, whoever imports it; an unlisted one is data (the review's
+        # app-1.21: a fixture's token is no finding)
+        mods = ("# example.test/ta v1.0.0\n## explicit; go 1.21\nexample.test/ta/testdata/x\n"
+                "# example.test/tb v1.0.0\n## explicit; go 1.21\nexample.test/tb\n")
+        x = go_file("x", samples.DELETE_GO)
+        token = 'package fx\n\nconst k = "AKIA' + "Q7R2ZK9M4TXW8B3N" + '"\n'
+        files = dict(GO_PROJECT, **{"vendor/modules.txt": mods, "vendor/example.test/ta/testdata/x/x.go": x,
+                                    "vendor/example.test/ta/testdata/fx/f.go": token,
+                                    "vendor/example.test/tb/tb.go": 'package tb\n\nimport _ "example.test/ta/testdata/x"\n'})
+        self.assertEqual(self.scan(files), [("SC-IMPORT-RISK", "CRITICAL", "vendor/example.test/ta/testdata/x/x.go", 5)])
+        res = core.scan_project(self.tree(files), include_deps=True)
+        self.assertEqual([i for i in res["issues"] if i["rule"].startswith("S-")], [])
+        # (its reading's findings go with it: a fixture that is not text is no SC-TRUNCATED)
+        files["vendor/example.test/ta/testdata/fx/bin.go"] = bytes(range(1, 9)) * 60
+        self.assertEqual(self.scan(files), [("SC-IMPORT-RISK", "CRITICAL", "vendor/example.test/ta/testdata/x/x.go", 5)])
+        del files["vendor/example.test/ta/testdata/fx/bin.go"]
+        # a modules.txt that lists no package (none a build reads): every file is read
+        files["vendor/modules.txt"] = "garbage\n## nonsense\nexample.test/ta/testdata/x\n"
+        self.assertIn(("S-TOKEN", "vendor/example.test/ta/testdata/fx/f.go"),
+                      {(i["rule"], i["file"].replace(os.sep, "/")) for i in
+                       core.scan_project(self.tree(files), include_deps=True)["issues"]})
+        # a refused file in a `_` folder modules.txt does not list is data; listed, it holds the module
+        files = dict(GO_PROJECT, **{"vendor/example.test/evil/_tmpl/t.go": "package {{.Name}}\n\nfunc F() {}\n",
+                                    "vendor/example.test/evil/ok.go": go_file("evil", samples.CLEAN_GO)})
+        self.assertEqual(self.scan(files), [])
+        files["vendor/modules.txt"] = MODULES_TXT.replace("example.test/evil\n", "example.test/evil\nexample.test/evil/_tmpl\n")
+        self.assertEqual(self.scan(files), [("SC-TRUNCATED", "CRITICAL", "vendor/example.test/evil/_tmpl/t.go", 1)])
+
+    def test_an_unlisted_folder_an_import_names_is_code(self):
+        # F-06's fourth round (the review's appv-tamper): a main module below `go 1.23` builds a vendored package
+        # modules.txt does not list when an import names it, so an unlisted testdata/, `_` or `.` folder that an
+        # import of a file read names is code (the project's or a vendor tree's, through a chain, an escaped path);
+        # one no import names stays data
+        x = lambda pkg: go_file(pkg, samples.DELETE_GO)
+        files = dict(GO_PROJECT, **{"vendor/example.test/evil/evil.go":
+                                        'package evil\n\nimport (\n\t_ "example.test/evil/testdata/td"\n\t_ "example.test/evil/\\x5fu"\n)\n',
+                                    "vendor/example.test/evil/testdata/td/td.go":
+                                        'package td\n\nimport _ "example.test/evil/.hidden/h"\n',
+                                    "vendor/example.test/evil/.hidden/h/h.go": x("h"),
+                                    "vendor/example.test/evil/_u/u.go": x("u"),
+                                    "vendor/example.test/evil/_m/m.go": x("m"),
+                                    "vendor/example.test/evil/_quiet/q.go": x("q"),
+                                    "main.go": 'package main\n\nimport _ "example.test/evil/_m"\n\nfunc main() {}\n'})
+        self.assertEqual(sorted(f for r, _s, f, _l in self.scan(files) if r == "SC-IMPORT-RISK"),
+                         ["vendor/example.test/evil/.hidden/h/h.go", "vendor/example.test/evil/_m/m.go",
+                          "vendor/example.test/evil/_u/u.go"])
+        # (a test file of the vendored module imports nothing a build reads; nor does a file a constraint leaves out)
+        files = dict(GO_PROJECT, **{"vendor/example.test/evil/ok.go": go_file("evil", samples.CLEAN_GO),
+                                    "vendor/example.test/evil/gen.go": '//go:build ignore\n\npackage evil\n\nimport _ "example.test/evil/_u"\n',
+                                    "vendor/example.test/evil/_u/u.go": x("u")})
+        self.assertEqual(self.scan(files), [])
+        # (the review's appv-refmain: a file the parser refuses may import any of them, so every unlisted folder
+        # is code)
+        files = dict(GO_PROJECT, **{"vendor/example.test/evil/ok.go": go_file("evil", samples.CLEAN_GO),
+                                    "vendor/example.test/evil/_u/u.go": x("u"),
+                                    "main.go": 'package main\n\nimport _ "example.test/evil/_u"\n\nfunc main() {}\n\nfunc (\n'})
+        found = {(r, f) for r, _s, f, _l in self.scan(files)}
+        self.assertIn(("SC-IMPORT-RISK", "vendor/example.test/evil/_u/u.go"), found)
 
     def test_a_file_of_no_listed_module_is_read_with_its_package(self):
         files = dict(GO_PROJECT, **{"vendor/example.test/other/x/e.go": go_file("x", samples.INIT_GO)})

@@ -15,8 +15,11 @@ files, a camera's .mts videos, config files (UTF-16 ones, Lazaret's own reports,
 limits, links, named pipes, folders seen twice, .git, excluded names, node_modules, venvs with and without
 pyvenv.cfg, Go and cargo vendor trees, __pycache__ folders with .pyc headers, with --deps and without; and the npm
 package's walk to the Python package's. Two answers changed on purpose (0.1.9, rule set 2.85.0: SECRET-FP): Rust's
-tests.rs and *_test.rs are test files, and a secret (S-SECRET, S-TOKEN) in test code is listed as INFO. All content
-is inert.
+tests.rs and *_test.rs are test files, and a secret (S-SECRET, S-TOKEN) in test code is listed as INFO; and one more
+(F-06): a file of a Go vendor tree is left out by its name alone (a test file, `_` or `.` first), since the path below
+vendor/ begins with a module's path, which may hold a `testdata` or a `vendor`; and the collection's `models`
+(FP-MODEL-FILES: the model files read, none in these trees), `holders` and `resolvers` (FP-B64-PROTOBUF: the files
+the descriptors' pass reads, each held to its name's kind). All content is inert.
 """
 import copy
 import json
@@ -32,7 +35,7 @@ from lazaret.scanner import _native, core, engine
 from lazaret.scanner.core import (
     ScanTargetError, _NotRegularFile, _count_skipped_tree, _fs_display, _is_reparse_point, _mpeg_ts, _read_prefix,
     _readlink, _special_kind, classify_binary, decode_member, decode_source, disguised_binary, looks_binary,
-    normalize_newlines, pth_issues, pyc_issues, script_source_lang, truncated_issue, _safe_text)
+    normalize_newlines, pyc_issues, script_source_lang, truncated_issue, _safe_text)
 from tests import _support
 from tests.architecture.test_js_parity import NPM_READY, NPM_SKIP
 
@@ -259,10 +262,14 @@ def _collect_file(path, rel, st, in_dep, col):
         col["manifests"].append({"path": disp, "dep": bool(in_dep),
                                  "content": normalize_newlines(data.decode("utf-8", "replace"))})
         return
-    if pth:                # only the .pth check runs on it (decoded as the registry does)
+    if pth:                # only the .pth check runs on it (byte-wise, as a .pth read in chunks is: the external review's M1)
         col["pth"].append(disp)
         try:
-            issues.extend(pth_issues(disp, data.decode("utf-8-sig", "replace")))
+            got = core.pth_stream_file(iter([data, b""]).__next__)
+            issues.extend(core.pth_kept_issues(disp, got["lines"]))
+            if got["cuts"]:
+                more = f" (and {len(got['cuts']) - 1} more)" if len(got["cuts"]) > 1 else ""
+                issues.append(truncated_issue(disp, got["cuts"][0] + more))
         except _native.NativeError as exc:
             issues.append(engine.error_issue(disp, exc))
         return
@@ -400,7 +407,9 @@ def _vendor_lang(vendor, rel, ext):
         return None
     below = rel[len(vendor[1]) + 1:].replace(os.sep, "/")
     if vendor[0] == "go":
-        return None if never_built("go", below) else "go"
+        # (F-06, changed on purpose: by the file's name alone, as the path below vendor/ begins with a module's path)
+        name = below.rsplit("/", 1)[-1]
+        return None if name[:1] in ("_", ".") or name.endswith("_test.go") else "go"
     _crate, _, inside = below.partition("/")
     return None if not inside or never_built("crate", inside) else "rs"
 
@@ -561,6 +570,13 @@ def ref_collect(root, excludes, deps):
 def comparable(col):
     col = copy.deepcopy(col)
     col["manifests"] = [{k: m[k] for k in ("path", "dep", "content")} for m in col["manifests"]]
+    # (FP-MODEL-FILES) the model files the walk read: these trees hold none, so core's walk as it was is the engine's
+    assert col.pop("models", []) == [], "a generated tree held a model file"
+    # (FP-B64-PROTOBUF) the files the descriptors' pass reads, which core's walk as it was did not list: a file of a
+    # kind that holds script ("holder") or that says where modules are ("resolver"), each by its name (core.b64_mark)
+    for key in ("holders", "resolvers"):
+        for rel in col.pop(key, []):
+            assert core.b64_mark(rel) == key[:-1], (key, rel)
     return col
 
 

@@ -692,6 +692,97 @@ fn lookalike_name(p: &Pack, code: &[u32], lang: Lang, word_in: &dyn Fn(&[u32]) -
     None
 }
 
+/// FP-HOMOGLYPH-ORDINAL: is the run at `[a, b)` of the file's text `s` an ordinal, digits or one ASCII letter and
+/// then one ordinal indicator (U+00AA ª, U+00BA º): `1º`, `2ª`, `Nº`, `nº`, `Mª`, with no identifier character
+/// before or after it (the review of Oct 27, ruling 1)? `evªl`, `aºb`, `nºs`, `xNº` and any longer name holding one
+/// are not, anywhere.
+fn ordinal_token(s: &[u32], a: usize, b: usize) -> bool {
+    use crate::jsparse::scan::is_id_part;
+    if b < a + 2 || b > s.len() || !matches!(s[b - 1], 0xAA | 0xBA) {
+        return false;
+    }
+    let body = &s[a..b - 1];
+    let digits = body.iter().all(|&c| (0x30..=0x39).contains(&c));
+    let letter = body.len() == 1 && ((0x41..=0x5A).contains(&body[0]) || (0x61..=0x7A).contains(&body[0]));
+    // (an identifier's character: a letter, a digit, `$`, `_`, ZWNJ/ZWJ, any other non-blank character past ASCII,
+    // and `\`, which begins an escape that may spell one)
+    let id = |c: u32| is_id_part(c) || c == 0x5C || c == 0x200C || c == 0x200D;
+    (digits || letter) && !(a > 0 && id(s[a - 1])) && !(b < s.len() && id(s[b]))
+}
+
+/// FP-HOMOGLYPH-ORDINAL: the spans of what a JSX reading of the file holds as display text, by the parser
+/// (jsparse): its JSX text, its strings (a JSX attribute's among them) and its templates' text. Some only when the
+/// file is not JavaScript without JSX (its plain parse fails, as a script and as a module: Node runs a .js, .mjs or
+/// .cjs file so, and a file that parses so has no JSX text) and its JSX reading parses (as JavaScript's, or as
+/// TypeScript's for a .tsx file): what the lexer's JSX reading takes for text is then the parser's too.
+fn jsx_display_spans(content: &[u32]) -> Option<Vec<(usize, usize)>> {
+    let owned = content.to_vec();
+    crate::api::on_own_stack(move || {
+        use crate::jsparse::tree::{Kind, L_STRING};
+        if crate::jsparse::parse_with(&owned, false, false, true).is_ok() || crate::jsparse::parse_with(&owned, false, false, false).is_ok() {
+            return None;
+        }
+        let tree = crate::jsparse::parse(&owned, false, true).or_else(|_| crate::jsparse::parse(&owned, true, true)).ok()?;
+        let mut spans: Vec<(usize, usize)> = tree
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, Kind::JSXText | Kind::TemplateElement) || (n.kind == Kind::Literal && n.op == L_STRING))
+            .map(|n| (n.start as usize, n.end as usize))
+            .collect();
+        spans.sort_unstable();
+        Some(spans)
+    })
+}
+
+/// Is `[a, b)` inside one of `spans` (sorted by their start, none inside another)?
+fn inside_spans(spans: &[(usize, usize)], a: usize, b: usize) -> bool {
+    let k = spans.partition_point(|&(s, _)| s <= a);
+    k > 0 && b <= spans[k - 1].1
+}
+
+/// FP-HOMOGLYPH-ORDINAL: the spans (in the file's text) of line i's ordinals ([`ordinal_token`]) that the file's
+/// JSX reading holds as text, as the lexer reads it (JSX text, a JSX attribute's string, a string, a template's text,
+/// a comment: `display`) and as the parser reads it ([`jsx_display_spans`]: `tree`), each not a look-alike of a
+/// dangerous name itself. A file that may hold JSX is read with JSX and without, and the literals both readings agree
+/// on are what the rules leave out of names; JSX text is code to the reading without JSX, where it would not parse (an
+/// element begins where an expression may, `<` there being no operator), so `<p>Nº 5</p>` was read as a name `Nº`. A
+/// look-alike matters where a name is resolved; an ordinal in a label is display text, the usual way to write
+/// "number" in Spanish, Portuguese and Italian. Any other look-alike there (`pаypal` with a Cyrillic а in JSX text),
+/// a name that holds an ordinal (`evªl`), and an ordinal in a file JavaScript reads without JSX, in a name, an
+/// import, a URL or a command, are read as before.
+fn ordinal_display_runs(
+    p: &Pack,
+    ctx: &FileCtx,
+    i: usize,
+    display: &OnceCell<Vec<(usize, usize)>>,
+    tree: &OnceCell<Option<Vec<(usize, usize)>>>,
+    word_in: &dyn Fn(&[u32]) -> bool,
+) -> Vec<(usize, usize)> {
+    use crate::lex::Kind;
+    let base = ctx.starts[i];
+    let runs: Vec<(usize, usize)> = p
+        .re("_NAME_RUN_RE")
+        .finditer(ctx.line(i))
+        .map(|m| (base + m.start(), base + m.end()))
+        .filter(|&(a, b)| ordinal_token(&ctx.content, a, b))
+        .filter(|&(a, b)| lookalike_name(p, &ctx.content[a..b], Lang::Js, word_in).is_none_or(|f| !f.critical))
+        .collect();
+    if runs.is_empty() {
+        return runs;
+    }
+    let spans = display.get_or_init(|| {
+        crate::lex::js::tokens(&ctx.content, true)
+            .iter()
+            .filter(|t| matches!(t.kind, Kind::JsxText | Kind::JsxStr | Kind::Str | Kind::Template | Kind::Comment))
+            .map(|t| t.span())
+            .collect()
+    });
+    let Some(parsed) = tree.get_or_init(|| jsx_display_spans(&ctx.content)).as_deref() else {
+        return Vec::new();
+    };
+    runs.into_iter().filter(|&(a, b)| inside_spans(spans, a, b) && inside_spans(parsed, a, b)).collect()
+}
+
 /// The column of the first quoted run B64_BLOB_RE finds in `line` that can be
 /// base64 data (G-5): not digits alone, hex digits alone (after a `0x` or
 /// not) or letters alone (a table of names: Go's stringer writes them) up to
@@ -724,7 +815,7 @@ const B64_DATA_HEADS: [&str; 4] = ["AGFzbQ", "iVBORw0KGgo", "R0lGOD", "UklGR"];
 /// format code keeps as data, read by its structure (datafmt: a WebAssembly module, a PNG, GIF or WebP image, WAV
 /// audio)? N-4: the WebAssembly HTTP parser every action bundling the Actions toolkit carries (undici's llhttp),
 /// and what made 5 of the popular set's 32 WARNs, were such files.
-fn b64_data(body: &[u32]) -> bool {
+pub(crate) fn b64_data(body: &[u32]) -> bool {
     if body.len() % 4 == 1 || !B64_DATA_HEADS.iter().any(|h| pystr::starts_with(body, h)) {
         return false;
     }
@@ -739,7 +830,7 @@ fn b64_data(body: &[u32]) -> bool {
 /// off) one of the runs b64_blob_col passes over? A period is checked from
 /// the shortest, each stopping at its first mismatch; a period carries no
 /// more than one period's characters, however long the run.
-fn b64_plain(body: &[u32], plain_max: usize, period_max: usize) -> bool {
+pub(crate) fn b64_plain(body: &[u32], plain_max: usize, period_max: usize) -> bool {
     let digit = |c: u32| (0x30..=0x39).contains(&c);
     let hex = |c: u32| digit(c) || (0x41..=0x46).contains(&c) || (0x61..=0x66).contains(&c);
     let letter = |c: u32| (0x41..=0x5a).contains(&c) || (0x61..=0x7a).contains(&c);
@@ -1020,7 +1111,7 @@ fn tree_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>) -> O
     };
     let p = ctx.p;
     let content = &ctx.content;
-    let mut have: HashSet<usize> = out.iter().filter(|f| is(&f.rule.id, "SC-EVAL-DECODE")).map(|f| f.line).collect();
+    let mut have: HashSet<usize> = out.iter().filter(|f| decode_run(f, rule)).map(|f| f.line).collect();
     let flow_msg = p.text("_DECODE_FLOW_MSG");
     let same_call_msg = p.text("_DECODE_SAME_CALL_MSG");
     let line_of = |at: usize| pystr::count_char(content, '\n' as u32, 0, at.min(content.len())) + 1;
@@ -1056,14 +1147,22 @@ fn dep_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>, decod
     dep_decode_flow_text(ctx, rule, out, &mut found, decode, gates, g_decode);
     // (a text over the trees' limit is read on its text alone)
     let limit = if ctx.lang == Lang::Py { crate::pyflow::supply::MAX_TEXT } else { crate::jsflow::MAX_FILE };
-    if matches!(ctx.lang, Lang::Py | Lang::Js)
+    if !(matches!(ctx.lang, Lang::Py | Lang::Js)
         && ctx.content.len() <= limit
         && (!found.is_empty() || may_run_written_decoder(ctx))
-        && tree_decode_flow(ctx, rule, out).is_some()
+        && tree_decode_flow(ctx, rule, out).is_some())
     {
-        return;
+        out.extend(found);
     }
-    out.extend(found);
+    // a line a decoded payload's flow reaches is that finding's, not a round trip's (FP-PDFJS-DECODE)
+    let runs: HashSet<usize> = out.iter().filter(|f| decode_run(f, rule)).map(|f| f.line).collect();
+    out.retain(|f| !is(&f.rule.id, "SC-EVAL-DECODE") || decode_run(f, rule) || !runs.contains(&f.line));
+}
+
+/// Is `f` SC-EVAL-DECODE's finding of a decoded payload run (at the rule's own severity), not of a round trip the
+/// file writes (`seen_finding`)?
+fn decode_run(f: &Finding, rule: &RuleText) -> bool {
+    is(&f.rule.id, "SC-EVAL-DECODE") && f.rule.sev == rule.sev
 }
 
 /// dep_decode_flow on the text: names followed within DEP_FLOW_WINDOW to a
@@ -1072,7 +1171,7 @@ fn dep_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>, decod
 fn dep_decode_flow_text(ctx: &FileCtx, rule: &RuleText, existing: &[Finding], out: &mut Vec<Finding>, decode: &Regex, gates: &Gates, g_decode: usize) {
     let p = ctx.p;
     let ident = p.map_re("_IDENT_RUN_RE", if ctx.lang == Lang::Py { "py" } else { "js" });
-    let mut have: HashSet<usize> = existing.iter().filter(|f| is(&f.rule.id, "SC-EVAL-DECODE")).map(|f| f.line).collect();
+    let mut have: HashSet<usize> = existing.iter().filter(|f| decode_run(f, rule)).map(|f| f.line).collect();
     // (read when a sink needs them: core reads them first, and they depend on
     // nothing the pass changes)
     let cp_aliases: OnceCell<HashSet<PyStr>> = OnceCell::new();
@@ -1401,6 +1500,241 @@ fn exec_js_regex(p: &Pack, ctx: &FileCtx, i: usize, col: usize, names: &OnceCell
     names.get_or_init(|| regex_names(p, ctx)).contains(&line[start..end])
 }
 
+// ---------------- SC-EVAL-DECODE on a JavaScript line (FP-PDFJS-DECODE, 0.1.9) ----------------
+
+/// A match of SC-EVAL-DECODE's pattern on a JavaScript line that runs nothing hidden.
+enum NotHidden {
+    /// `exec` is a RegExp's own: `i.exec(decodeURIComponent(a))`, `i` bound to a regex literal (pdf.js)
+    RegexExec,
+    /// the decoded text is text the file writes, encoded on the way (a round trip): read as code there
+    Seen(Seen),
+}
+
+/// A round trip the file runs: the text's line, what the install-script test says of it as code, and the severity
+/// the finding takes (INFO when the test says nothing: report-only).
+struct Seen {
+    line: usize,
+    reasons: Vec<PyStr>,
+    sev: &'static str,
+}
+
+/// SC-EVAL-DECODE's reading of a JavaScript file's lines: which matches of the rule run nothing hidden. The line
+/// shows a sink handed a decoder's result; two things it does not show are read on the text's tree
+/// (`jsflow::decodeuse`: whether `exec` is a RegExp's, and what a name in a template's hole holds), and a literal
+/// regex receiver on the text itself, so a file over the tree's limit keeps every finding but those.
+struct EvalDecodeJs<'c, 'p> {
+    ctx: &'c FileCtx<'p>,
+    marks: OnceCell<Option<std::rc::Rc<crate::jsflow::decodeuse::Marks>>>,
+    /// the text writes a member named `exec` or touches RegExp.prototype (`_EXEC_PATCH_RE`, strings too): no
+    /// receiver is proven a RegExp's then
+    patched: OnceCell<bool>,
+}
+
+impl<'c, 'p> EvalDecodeJs<'c, 'p> {
+    fn new(ctx: &'c FileCtx<'p>) -> EvalDecodeJs<'c, 'p> {
+        EvalDecodeJs { ctx, marks: OnceCell::new(), patched: OnceCell::new() }
+    }
+
+    fn marks(&self) -> Option<&crate::jsflow::decodeuse::Marks> {
+        self.marks.get_or_init(|| crate::jsflow::decodeuse::marks(&self.ctx.content)).as_deref()
+    }
+
+    fn patched(&self) -> bool {
+        *self.patched.get_or_init(|| {
+            self.ctx.p.re("_EXEC_PATCH_RE").search(&self.ctx.content).is_some()
+                || if self.ctx.content.len() > 2_000_000 {
+                    !crate::jsflow::decodeuse::large_literal_safe(&self.ctx.content)
+                } else {
+                    !self.marks().is_some_and(|m| m.literal_exec_safe)
+                }
+        })
+    }
+
+    /// The first match on line i that may run hidden code (its column in the match text), and every accepted round
+    /// trip it runs; the line offsets of the matches that run nothing hidden go into `quiet`. A match is read on
+    /// the line itself (`FileCtx::js_text_offsets`: the match text decodes a name's escapes, `\u0065val`), and one
+    /// the match text decodes an escape in is not passed over.
+    fn on_line(&self, i: usize, re: &Regex, quiet: &mut Vec<usize>) -> (Option<usize>, Vec<(usize, Seen)>) {
+        let ctx = self.ctx;
+        let text = ctx.mline(i);
+        let offsets: OnceCell<Vec<usize>> = OnceCell::new();
+        let at = |x: usize| if ctx.mline_differs(i) { offsets.get_or_init(|| ctx.js_text_offsets(i, false))[x] } else { x };
+        let mut seen: Vec<(usize, Seen)> = Vec::new();
+        let mut hidden = None;
+        let mut pos = 0usize;
+        while pos <= text.len() {
+            let Some(m) = re.search_at(text, pos as isize, text.len() as isize) else { break };
+            let s = m.start();
+            pos = s + 1;
+            let (ls, le) = (at(s), at(m.end()));
+            if le - ls != m.end() - s {
+                hidden.get_or_insert(s);
+                continue;
+            }
+            match self.not_hidden(i, ls, le) {
+                None => { hidden.get_or_insert(s); },
+                Some(NotHidden::RegexExec) => quiet.push(ls),
+                Some(NotHidden::Seen(v)) => {
+                    quiet.push(ls);
+                    seen.push((s, v));
+                }
+            }
+        }
+        (hidden, seen)
+    }
+
+    /// core._joined_eval_decode for JavaScript: the first match over the statement that starts on line i and
+    /// continues on the next, that starts on line i, at none of the starts `quiet` holds and not a RegExp's exec.
+    /// `quiet` is sorted (a binary search per match keeps a long line with many quiet matches linear).
+    fn joined(&self, j: &Join, i: usize, re: &Regex, quiet: &[usize]) -> Option<usize> {
+        let ctx = self.ctx;
+        let p = ctx.p;
+        let code = ctx.mcode(i);
+        if j.prefilter && !sink_word_possible(code) {
+            return None;
+        }
+        j.sink_word.search(code)?;
+        let mut depth = paren_balance(p, code);
+        if depth <= 0 {
+            let tail = pystr::rstrip(code);
+            if !j.sink_names.iter().any(|n| tail.ends_with(n)) {
+                return None;
+            }
+        }
+        let mut joined: Vec<u32> = code.to_vec();
+        let mut added = 0;
+        for k in i + 1..ctx.len().min(i + 1 + j.max_lines) {
+            if ctx.cmask[k] {
+                continue;
+            }
+            let nxt = ctx.mcode(k);
+            joined.push(' ' as u32);
+            joined.extend_from_slice(nxt);
+            added += nxt.len();
+            depth += paren_balance(p, nxt);
+            if (depth <= 0 && !is_blank(nxt)) || added > j.max_chars {
+                break;
+            }
+        }
+        // (a start on line i, on the line itself: its comments were cut out of the text read, its escapes decoded)
+        let offsets: OnceCell<Vec<usize>> = OnceCell::new();
+        let at = |x: usize| if ctx.mcode_differs(i) { offsets.get_or_init(|| ctx.js_text_offsets(i, true))[x] } else { x };
+        for m in re.finditer(&joined) {
+            let s = m.start();
+            if s >= code.len() {
+                break;
+            }
+            let p = at(s);
+            if quiet.binary_search(&p).is_ok() || self.regex_exec(i, p) {
+                continue;
+            }
+            return Some(s);
+        }
+        None
+    }
+
+    /// Does the match at [s, e) of line i (offsets on the line) run nothing hidden?
+    fn not_hidden(&self, i: usize, s: usize, e: usize) -> Option<NotHidden> {
+        if self.regex_exec(i, s) {
+            return Some(NotHidden::RegexExec);
+        }
+        self.round_trip(i, s, e).map(NotHidden::Seen)
+    }
+
+    /// Is the sink at column s of line i a call of `exec` on a receiver proven a RegExp: a regex literal the lexer
+    /// read (`/…/.exec(…)`), or one the tree proves (decodeuse::Marks::regex_exec)?
+    fn regex_exec(&self, i: usize, s: usize) -> bool {
+        let ctx = self.ctx;
+        let line = ctx.line(i);
+        if !pystr::starts_with(&line[s..], "exec") {
+            return false;
+        }
+        let mut k = s + 4;
+        while k < line.len() && unicode::is_space(line[k]) {
+            k += 1;
+        }
+        if line.get(k) != Some(&('(' as u32)) {
+            return false; // execSync
+        }
+        let back = |mut k: usize| {
+            while k > 0 && unicode::is_space(line[k - 1]) {
+                k -= 1;
+            }
+            k
+        };
+        let dot = back(s);
+        if dot == 0 || line[dot - 1] != '.' as u32 || (dot >= 2 && line[dot - 2] == '?' as u32) {
+            return false; // a free call, `x?.exec(…)`
+        }
+        if self.patched() {
+            return false;
+        }
+        regex_literal_before(ctx, ctx.starts[i] + back(dot - 1)) || self.marks().is_some_and(|m| m.regex_exec_at(ctx.starts[i] + s))
+    }
+
+    /// The round trip the match at [s, e) of line i runs, read as code: the match is in a literal (a command line's
+    /// text, a script's: the code a child runs, where the decoder is the runtime's own), its sink runs JavaScript
+    /// (eval, Function, vm's runIn…Context, an indirect eval: not exec, which runs a command), its decoder is one
+    /// of JavaScript's (`atob`, `Buffer.from(…, 'base64' | 'base64url' | 'hex')`, `decodeURIComponent`,
+    /// `unescape`, the global object's or none's) and is handed exactly a name in a template's hole
+    /// (`_DECODE_HOLE_ARG_RE`), that name a round trip of the same encoding (decodeuse::Marks::round_trips), and
+    /// the text it holds is JavaScript the parser reads.
+    fn round_trip(&self, i: usize, s: usize, e: usize) -> Option<Seen> {
+        let ctx = self.ctx;
+        let p = ctx.p;
+        let line = ctx.line(i);
+        let at = ctx.starts[i] + s;
+        if ctx.in_code(at) || pystr::starts_with(&line[s..], "exec") || pystr::starts_with(&line[s..], "compile") {
+            return None;
+        }
+        let decoder = p.re("_DECODE_JS_DECODER_RE").search(&line[s..e])?;
+        let name = decoder.group(1)?;
+        let arg = p.re("_DECODE_HOLE_ARG_RE").match_at(line, e as isize, line.len() as isize)?;
+        let g = (1..=4).find(|&g| arg.start_of(g) >= 0)?;
+        let hole = ctx.starts[i] + arg.start_of(g) as usize;
+        let enc = arg.group(5);
+        use crate::jsflow::decodeuse::Enc;
+        let ok = |rt: Enc| match (pystr::eq(name, "atob"), pystr::eq(name, "decodeURIComponent"), pystr::eq(name, "unescape")) {
+            (true, _, _) => enc.is_none() && rt == Enc::Base64,
+            (_, true, _) => enc.is_none() && rt == Enc::Uri,
+            (_, _, true) => enc.is_none() && rt == Enc::Escape,
+            _ => match enc {
+                Some(x) if pystr::eq(x, "base64") || pystr::eq(x, "base64url") => matches!(rt, Enc::Base64 | Enc::Base64Url),
+                Some(x) if pystr::eq(x, "hex") => rt == Enc::Hex,
+                _ => false,
+            },
+        };
+        let rt = self.marks()?.round_trip_at(hole)?;
+        if !ok(rt.enc) {
+            return None;
+        }
+        // the text, read as code: JavaScript the parser reads, given the install-script test (the strongest the
+        // engine has: what a hook's `node -e` code gets)
+        let _js = crate::jsflow::supply::read_as(crate::jsflow::supply::Dialect::Js);
+        if crate::jsflow::supply::parse_refusal(&rt.script).is_some() {
+            return None;
+        }
+        let reasons = signs::install_script_risk(p, &rt.script, Some("js"));
+        let sev = signs::install_script_severity(p, &reasons).unwrap_or("INFO");
+        Some(Seen { line: rt.line, reasons, sev })
+    }
+}
+
+/// SC-EVAL-DECODE's finding for a round trip the line runs: report-only (INFO) when its text, read as code, is no
+/// sign; else at the install-script test's severity, with what the test says.
+fn seen_finding(p: &Pack, rule: &RuleText, line: usize, col: usize, seen: Seen) -> Finding {
+    let mut text = rule.clone();
+    text.sev = pystr::u(seen.sev);
+    if seen.reasons.is_empty() {
+        text.msg = findings::format(&p.text("_DECODE_SEEN_MSG"), &[("line", Arg::I(seen.line as i64))]);
+        text.why = p.text("_DECODE_SEEN_WHY");
+    } else {
+        let reasons = pystr::join(&pystr::u("; and "), &seen.reasons.iter().map(|r| r.as_slice()).collect::<Vec<_>>());
+        text.msg = findings::format(&p.text("_DECODE_SEEN_RISK_MSG"), &[("line", Arg::I(seen.line as i64)), ("reasons", Arg::S(reasons))]);
+    }
+    Finding::new(text, line, Some(col))
+}
+
 /// The names a file assigns a regex and nothing else (S-EXEC-JS): every assignment to a name (_ASSIGN_NAME_RE: `=`,
 /// a declaration's too, and `&&=`, `+=`…) is a plain `=` whose right side is a whole regex: a literal the lexer read as
 /// one, or `new RegExp(…)` / `RegExp(…)` closed on its line, and the expression ending there.
@@ -1581,6 +1915,8 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
             .contains(w)
     };
     let runs_code: OnceCell<bool> = OnceCell::new();
+    let display: OnceCell<Vec<(usize, usize)>> = OnceCell::new(); // the JSX reading's text (ordinal_display_runs)
+    let display_tree: OnceCell<Option<Vec<(usize, usize)>>> = OnceCell::new(); // and the parser's (jsx_display_spans)
     let exec_js_names: OnceCell<HashSet<PyStr>> = OnceCell::new(); // S-EXEC-JS's (exec_js_regex)
     let hexstr_text = RuleText::of(p, "_HEXSTR_TEXT_RULE");
     let hexstr_name = RuleText::of(p, "_HEXSTR_NAME_RULE");
@@ -1613,6 +1949,7 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
     let entropy_filter = written_for(p, "ENTROPY_VALUE_RE", ENTROPY_VALUE_TEXT);
     let js_name = if lang == Lang::Js { "js" } else { "py" };
     let join = Join::new(p);
+    let eval_decode_js = EvalDecodeJs::new(ctx);
     let offscreen_min = p.usize("_OFFSCREEN_MIN"); // (offscreen_code reads no shorter line)
     let preview = |t: &[u32]| -> PyStr {
         let max = p.usize("PREVIEW_MAX");
@@ -1646,15 +1983,38 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
                 continue;
             }
             let r = a.rule;
+            // (SC-EVAL-DECODE in JavaScript: the matches that run nothing hidden are passed over, FP-PDFJS-DECODE)
+            let ed_js = a.kind == Kind::EvalDecode && lang == Lang::Js;
+            let mut quiet: Vec<usize> = Vec::new();
+            let mut seen: Vec<(usize, Seen)> = Vec::new();
             let mut col = if !own_text && !gates.may(i, j) {
                 None
             } else if a.kind == Kind::EqEq {
                 r.re.search(&string_lit.sub(mline, &pystr::u("\"\""), 0)).map(|s| s.0)
+            } else if ed_js {
+                match &r.re {
+                    Matcher::Re(re) => {
+                        let (run, s) = eval_decode_js.on_line(i, re, &mut quiet);
+                        seen = s;
+                        run
+                    }
+                    other => other.search(mline).map(|s| s.0),
+                }
             } else {
                 r.re.search(mline).map(|s| s.0)
             };
             if col.is_none() && a.kind == Kind::EvalDecode && !cm {
-                col = joined_eval_decode(ctx, &join, i, &r.re);
+                col = match (&r.re, ed_js) {
+                    (Matcher::Re(re), true) => {
+                        quiet.sort_unstable();
+                        quiet.dedup();
+                        eval_decode_js.joined(&join, i, re, &quiet)
+                    }
+                    _ => joined_eval_decode(ctx, &join, i, &r.re),
+                };
+            }
+            for (c, s) in seen {
+                out.push(seen_finding(p, &r.text, i + 1, c, s));
             }
             let col = match col {
                 None => continue,
@@ -1716,7 +2076,20 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
         if js_or_py && !cm {
             let code = ctx.mcode(i);
             if !pystr::is_ascii(code) {
-                if let Some(f) = lookalike_name(p, &ctx.names_code(i), lang, &word_in) {
+                let mut found = lookalike_name(p, &ctx.names_code(i), lang, &word_in);
+                // (an ordinal, `Nº` in a label, in what a file read with JSX holds as display text, by its lexer's
+                // and its parser's JSX reading, the file not being JavaScript without JSX; a look-alike of a
+                // dangerous name, CRITICAL, is never lowered so: FP-HOMOGLYPH-ORDINAL, the review of Oct 27)
+                if found.as_ref().is_some_and(|f| !f.critical && f.name.len() == 2 && matches!(f.name[1], 0xAA | 0xBA))
+                    && lang == Lang::Js
+                    && ctx.jsx
+                {
+                    let shown = ordinal_display_runs(p, ctx, i, &display, &display_tree, &word_in);
+                    if !shown.is_empty() {
+                        found = lookalike_name(p, &ctx.names_code_with(i, &shown), lang, &word_in);
+                    }
+                }
+                if let Some(f) = found {
                     let mut rule = lookalike.clone();
                     if !f.critical {
                         rule.sev = pystr::u("MAJOR");
@@ -1856,4 +2229,113 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
         }
     }
     out
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    //! FP-HOMOGLYPH-ORDINAL: an ordinal indicator after a letter or digit in display text is not a look-alike name.
+    use super::*;
+
+    /// (line, severity) of each SC-HOMOGLYPH of `src`, read as JavaScript (with JSX and without when `jsx`).
+    fn homoglyphs(src: &str, jsx: bool) -> Vec<(i64, String)> {
+        let p = crate::pack::current();
+        let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+        let opts = Options { dep: false, redact: true, neumaier: false };
+        scan_file(&p, &text, Some("js"), jsx, &opts)
+            .iter()
+            .filter_map(|i| match i {
+                Value::Arr(a) if a.first().and_then(|r| r.as_str()) == Some(pystr::u("SC-HOMOGLYPH").as_slice()) => {
+                    let line = if let Some(Value::Int(n)) = a.get(8) { *n } else { 0 };
+                    Some((line, a.get(3).and_then(|s| s.as_string()).unwrap_or_default()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_ordinal_is_digits_or_one_letter_then_the_indicator() {
+        // (each case: the text, and the name run that is asked)
+        let t = |s: &str, a: usize, b: usize| ordinal_token(&pystr::u(s), a, b);
+        assert!(t("Nº", 0, 2) && t(" 1º ", 1, 3) && t("(21ª)", 1, 4) && t("nº:", 0, 2) && t("Mª.", 0, 2));
+        assert!(t("Nº\u{a0}5", 0, 2) && t("<p>Nº</p>", 3, 5));
+        // a longer name that holds one, an identifier's character before or after it, two indicators, none
+        assert!(!t("evªl", 0, 4) && !t("aºb", 0, 3) && !t("nºs", 0, 3) && !t("xNº", 0, 3) && !t("Nº1", 0, 3));
+        assert!(!t("_Nº", 0, 3) && !t("$Nº", 0, 3) && !t("\\Nº", 1, 3) && !t("Nºº", 0, 3) && !t("ºeval", 0, 5));
+        assert!(!t("Nºé", 0, 3) && !t("Nº\u{301}", 0, 2) && !t("éNº", 1, 3) && !t("No", 0, 2) && !t("ab1º", 2, 4));
+        assert!(!t("NNº", 0, 3) && !t("º", 0, 1));
+    }
+
+    #[test]
+    fn display_text_ordinals_are_quiet_names_are_not() {
+        let major = |l: i64| (l, "MAJOR".to_string());
+        let critical = |l: i64| (l, "CRITICAL".to_string());
+        // JSX text, an attribute, a string, a template, a comment, after an apostrophe: quiet
+        for src in [
+            "export const A = () => <span className=\"n\">Nº {index + 1}</span>;\n",
+            "export const B = () => <p>1º lugar, 2ª vez, Mª José</p>;\n",
+            "export const C = () => <p>it's Nº {n}</p>;\n",
+            "export const D = () => <p title=\"Nº\">{'Nº'} {`Nº ${n}`} {/* Nº */}</p>;\n",
+            "export const E = () => <p>Nº\u{a0}5, (Nº), Nº: 3</p>;\n",
+        ] {
+            assert_eq!(homoglyphs(src, true), vec![], "{src}");
+        }
+        // a name that holds an ordinal is no ordinal, in JSX text too: evªl reads as eval (CRITICAL), the others MAJOR
+        assert_eq!(homoglyphs("export const E = () => <p>evªl</p>;\n", true), vec![critical(1)]);
+        for src in ["export const F = () => <p>aºb</p>;\n", "export const G = () => <p>nºs</p>;\n", "export const H = () => <p>xNº</p>;\n"] {
+            assert_eq!(homoglyphs(src, true), vec![major(1)], "{src}");
+        }
+        // in a name, declared and used; in a file read without JSX; another look-alike in JSX text; an ordinal after
+        // no letter; a look-alike name after a display ordinal on the line
+        assert_eq!(homoglyphs("const Nº = 1;\nexport const y = Nº + 1;\n", true), vec![major(1), major(2)]);
+        assert_eq!(homoglyphs("const Nº = 1;\nexport const L = () => <p>{Nº}</p>;\n", true), vec![major(1), major(2)]);
+        assert_eq!(homoglyphs("const evªl = eval;\nevªl('1');\n", true), vec![critical(1), critical(2)]);
+        assert_eq!(homoglyphs("export const K = () => <a>Visit pаypal</a>;\n", true), vec![major(1)]);
+        assert_eq!(homoglyphs("export const M = () => <p>ºeval x</p>;\n", true), vec![major(1)]);
+        assert_eq!(homoglyphs("export const N = () => <p>Nº {isАdmin}</p>;\nconst isAdmin = 1;\n", true), vec![critical(1)]);
+        // TypeScript (no JSX): an ordinal outside a literal is a name
+        assert_eq!(homoglyphs("let x = a <b> Nº;\n", false), vec![major(1)]);
+        // a broken element JavaScript and JSX both refuse (a type assertion's shape): not display text
+        assert_eq!(homoglyphs("const x = <number>Nº;\n", true), vec![major(1)]);
+    }
+
+    #[test]
+    fn the_reviews_comparisons_are_code() {
+        // the review of Oct 27 (H1): valid JavaScript, two comparisons, read with JSX as an element; and the controls
+        let critical = |l: i64| (l, "CRITICAL".to_string());
+        let major = |l: i64| (l, "MAJOR".to_string());
+        for src in [
+            "const of=1,b=2;\nof <b> evªl(\"1\");\n",
+            "const obj={return:1},b=2;\nobj.return <b> evªl(\"1\");\n",
+            "// @jsx h\nconst of=1,b=2;\nof <b> evªl(\"1\");\n",
+            "const a=1,b=2;\na <b> evªl(\"1\");\n",
+        ] {
+            let line = if src.starts_with("//") { 3 } else { 2 };
+            for jsx in [true, false] {
+                assert_eq!(homoglyphs(src, jsx), vec![critical(line)], "{src} jsx={jsx}");
+            }
+        }
+        // an ordinal a comparison holds is a name: the file parses without JSX
+        assert_eq!(homoglyphs("const of=1,b=2;\nof <b> Nº;\n", true), vec![major(2)]);
+        assert_eq!(homoglyphs("const obj={return:1},b=2;\nobj.return <b> Nº;\n", true), vec![major(2)]);
+        // and beside real JSX in the same file (the file does not parse without JSX): the parser reads the
+        // comparison, so the ordinal is still a name
+        let mixed = "export const A = () => <p>Nº 1</p>;\nconst of=1,b=2;\nof <b> Nº;\n";
+        assert_eq!(homoglyphs(mixed, true), vec![major(3)]);
+        // the contextual words, and a keyword as a property's name (after `.` and `?.`)
+        for w in ["of", "yield", "await", "async", "get", "set", "let", "static", "as", "from", "target", "meta", "type", "declare", "satisfies", "keyof", "readonly", "infer", "is", "asserts", "accessor", "using"] {
+            let src = format!("var {w}=1,b=2;\n{w} <b> evªl(\"1\");\n");
+            assert_eq!(homoglyphs(&src, true), vec![critical(2)], "{src}");
+            let src = format!("var {w}=1,b=2;\n{w} <b> Nº;\n");
+            assert_eq!(homoglyphs(&src, true), vec![major(2)], "{src}");
+        }
+        for w in ["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "yield", "await", "extends", "default", "else", "do", "try", "finally", "if", "for", "while", "with"] {
+            for dot in [".", "?."] {
+                let src = format!("const o={{}},b=2;\no{dot}{w} <b> evªl(\"1\");\n");
+                assert_eq!(homoglyphs(&src, true), vec![critical(2)], "{src}");
+                let src = format!("const o={{}},b=2;\no{dot}{w} <b> Nº;\n");
+                assert_eq!(homoglyphs(&src, true), vec![major(2)], "{src}");
+            }
+        }
+    }
 }

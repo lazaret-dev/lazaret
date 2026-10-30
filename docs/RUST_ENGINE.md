@@ -4,6 +4,18 @@ RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and 
 
 RA-6 follow-up (rule set 2.99.0) exempts fully literal paths at least two components below home outside protected personal-data and credential subtrees. This is a lexical path rule, not proof that a package owns a folder. Home itself, whole top-level home folders, roots/drives, repository deletion and unknown/globbed home paths still trigger. Protected paths include personal folders, cloud storage, browser profiles, Mail/Messages/Photos and credentials; their ancestors are protected too because deleting an ancestor deletes that data. Matching is case-insensitive independent of the scanning host. Dot components and separators are normalized before classification, and unknown components cannot disappear through `..` to gain the new exemption. The existing named-cache exemption retains precedence, including unknown descendants under a known owner; whole caches and unknown owners are not exempt. Unknown paths without an identified home/root/repository target remain outside this detector's evidence. Import-risk attribution preserves the deleting call's line when another call adds no finding. No filesystem paths are accessed and no cleanup is executed.
 
+RA-6 rework (rule set 2.101.0) restores protection for whole application-data containers and listed wallet, messenger, password-manager, keyring, mail, browser and developer-credential paths on macOS, Linux and Windows. Container ancestors remain protected; literal tool children outside the protected lists remain exempt. The names come from data categories, not benchmark or holdout samples. APPDATA/LOCALAPPDATA paths are recognized, and an unknown child directly under a root/drive remains dangerous.
+
+A separate bounded provenance check can exempt a direct entry of the same exempt directory returned by a Node or Python directory listing, with optional literal suffixes. It follows single-source bindings, collection iteration, inline Node callbacks, filtering, indexing/destructuring and Python loops/comprehensions; Dirent and pathlib path forms retain the directory anchor. Reassignments, mutations, object escape, mismatched directories, extra unknown components, recursive listings, globs and visible API/symlink changes do not earn the new exemption. A Python comprehension's provenance stays within its expression. Provenance uses a separate work budget and reads its directory in literal-only mode; cycles cannot consume the original path reader's budget. This checks lexical containment and modeled native API origins, not filesystem ownership, absence of pre-existing symlinks, or API replacement outside the scanned source. The exempt directory is the boundary of the listed-name exception: an unknown entry name is not itself compared with protected basenames such as `.git` or vault-file suffixes. General import/use-time reachability is unchanged. The holdout is not inspected or scored here; John performs the one aggregate acceptance run against stack-0.1.9-b, then decides whether further narrowing or a revert is needed.
+
+The native listing callee must have one unambiguous binding, followed through aliases without reassignment or escape; a conditional callee does not qualify. Name-array filters use the same mutation and escape checks as Dirent filters, including callback rest/third arguments, arguments, closures and helper calls. Python escape checks include positional and keyword values and star expansions. Its writes and escapes are keyed by lexical binding, including global/nonlocal writes, so an unrelated local with the same spelling does not invalidate a listing. Unknown scope ownership or an escaped native namespace keeps the original deletion reading.
+
+Directory expressions at the listing and join also require single-write, scope-qualified literal/native provenance. Augmented, annotated, destructuring and other unsupported writes cannot reuse an earlier decoy value. Global/nonlocal declarations, dynamic namespace access and star imports conservatively disable listing exemptions in that source; failed provenance retains the may-resolve deletion reading. JavaScript global-object access similarly prevents an exemption.
+
+F-05 (rule set 2.102.0) gives the path readers separate operations for Node join and resolve, Python POSIX and Windows joins, Go path/filepath joins, and Rust path pushes/joins. Later absolute components append in Node/Go joins; Python joins can reset the root or drive. Native-platform operations retain two correlated POSIX/Windows interpretations; either can add a deletion or credential-read finding, and a listing exemption requires the directory interpretations to agree. No target cwd or filesystem is consulted. A home API supplies an absolute symbolic anchor; a literal tilde component is not expanded by joining. Dot normalization retains unknown components when their cancellation would discard uncertainty. The shared path helper is removed. The regression matrix compares inert strings with Node/Python path libraries, plus Go standard-library tests selected for the running platform.
+
+Path assembly checks a conservative MAX_TEXT bound before allocating intermediates, retains a bounded prefix plus unknown interpretation on overflow, and charges the engine work budget by text length. Callers collect each part once and evaluate the whole API operation only at completion (or once to check a listed-name prefix); resolve selects components before joining instead of repeatedly prepending strings. Shared input conversions and fixed-platform operations avoid duplicate work. These bounds preserve uncertainty instead of exempting truncated paths.
+
 Status, October 2, 2026: since the Rust-first refactor (phase 1 of §8) the
 native engine is Lazaret's only engine. The Python reference engine is
 retired — its detectors, the per-file rules and the cross-file follower are
@@ -226,9 +238,30 @@ rust/
     src/datafmt.rs           a whole file of a data format, read by its structure (a WebAssembly
                              module, a PNG, GIF or WebP image, WAV audio): SC-B64 passes over its
                              base64 (0.1.9)
+    src/protodesc.rs         a protobuf file's descriptor as protoc-gen-es embeds it: a
+                             FileDescriptorProto read to its end by descriptor.proto's structure,
+                             with no source information, no JSON name but the derived one and no
+                             long default value (file_descriptor); protodesc/usage.rs: the scan's
+                             pass over its SC-B64 findings (the call b64_descriptors, asked once a
+                             project, a --deps tree or a package is read): a descriptor handed whole
+                             to the runtime's loader (_B64_DESCRIPTOR_LOADERS), used only as
+                             generated code uses it in every file of the scan
+                             (_B64_DESCRIPTOR_CONSUMERS; the files that hold script,
+                             _SCRIPT_HOLDER_EXTS, read too), its module read for its members alone
+                             wherever a specifier may lead to it (Resolver: paths, tsconfig paths and
+                             baseUrl, packages), no code running text or loading _B64_RUNNER_MODULES,
+                             the loader not remapped (package.json, tsconfig/jsconfig,
+                             _B64_RESOLVER_CONFIGS), nothing unread (_B64_DESCRIPTOR_UNREAD): its
+                             finding is dropped (0.1.9, FP-B64-PROTOBUF); each reading indexed once
+                             (Index), linear; collect.rs names the holders and the module maps
+                             ("holder", "resolver") for it
     src/strarr.rs            javascript-obfuscator's string arrays and proxy objects, for the
                              decoded view
     src/jcstr.rs             JS-Confuser's string concealing, for the decoded view (D-11, 0.1.9)
+    src/evalcode.rs          the strings a text hands an eval call (eval, Function, a global
+                             object's by a computed name; Python's eval, exec, compile), which
+                             the import-time and install-script tests read as code (§24,
+                             EVAL-LITERAL, 0.1.9)
     src/lex/                 the lexers (§15): js.rs (JavaScript, TypeScript, JSX: templates and
                              their holes, regular expressions), py.rs (Python, with pyparse's
                              tokenizer), go.rs and rs.rs (Go and Rust: raw strings, runes and
@@ -242,7 +275,12 @@ rust/
                              match text (NFKC, JS escapes), names
     src/scanfile.rs          scan_file in dependency mode, scan_rules (project mode's rules
                              part), family by family; per-line gates; scan_file in project mode
-                             (scan_project: the rules part, then project.rs)
+                             (scan_project: the rules part, then project.rs); SC-HOMOGLYPH leaves
+                             out an ordinal (digits or one letter, then ª or º: ordinal_token) that
+                             the lexer's and the parser's JSX readings hold as display text, in a
+                             file that does not parse without JSX (ordinal_display_runs,
+                             jsx_display_spans, FileCtx::names_code_with: 0.1.9,
+                             FP-HOMOGLYPH-ORDINAL)
     src/project.rs           project mode after the rules (core's _project_passes, 0.1.9): SQL
                              statements without WHERE, the SQL built from strings into execute(),
                              the function metrics (functions), then the suppression markers and
@@ -257,7 +295,10 @@ rust/
                              PEP 263 cookies, every text codec Python has (utf.rs: UTF-8, -16, -32,
                              -7; escape.rs; cjk.rs: the stateless CJK codecs' tables, gb18030's
                              four-byte and EUC-KR's make-up forms; iso2022.rs: the ISO-2022 family
-                             and HZ), the encoding findings (decode_source, encoding_issues, decode)
+                             and HZ), the encoding findings (decode_source, encoding_issues, decode);
+                             for the Go reader, Go source as the Go toolchain reads it where that is
+                             not the rules' text (F-06, go_text: UTF-8 only, one BOM dropped,
+                             "\r\n" folded and a lone "\r" kept)
     src/generated/codecs.rs  the codecs' tables, from Python's decoders (make_codec_tables.py)
     src/result.rs            a scan's result (BR-7 step 4 a, 0.1.9; core.build_result, regrade
                              and compute_metrics and their npm twins until then): the findings'
@@ -327,7 +368,9 @@ rust/
                              scan_gyp, and supplychain.js, pyjson.js and pycompat.js until then):
                              mod.rs (load: SC-MANIFEST-DEPTH and -UNPARSEABLE; a package.json's
                              install hooks, SC-INSTALL-HOOK, where its keys are, and its
-                             dependencies from an insecure source, SC-DEP-URL), gyp.rs (a
+                             dependencies from an insecure source, SC-DEP-URL, read from a
+                             package's root manifest only: `windows`, a Windows walk's path,
+                             whose backslashes separate folders, WIN-DEP-PATHS), gyp.rs (a
                              binding.gyp's actions and command expansions, the walk's bounds),
                              pyjson.rs (json.loads as CPython's C scanner reads a str, with core's
                              parse_int), pylit.rs (ast.literal_eval on pyparse's tree, mode="eval"),
@@ -380,7 +423,148 @@ rust/
                              program (`binary_check`), SC-BINARY, SC-NESTED-ARCHIVE and
                              SC-OPAQUE-BLOB (`binary_classify`), a program under a source file's
                              name (`binary_disguised`), SC-PYC-* (`pyc_issues`), SC-PTH-EXEC
-                             (`pth_issues`)
+                             (`pth_issues`; a .pth file too large to read whole read in chunks
+                             for the lines site.py runs, `pth_stream` with the host keeping its
+                             state, and those lines checked at their lines, `pth_kept`; bounded by
+                             `PTH_MAX_LINE` a line and `PTH_MAX_KEPT` in all: FP-MODEL-FILES);
+                             FP-OPAQUE-MEDIA: `classify_more`, with what the caller can give past
+                             the first bytes (`More`: the whole file, a walk of its stream, or asked
+                             for: `Need`), makes a near-random file quiet when media/ walks it to
+                             its end and a keystore S-SECRET (and SC-OPAQUE-BLOB beside it,
+                             `Classified::Issues`, when its unread parts are more than a
+                             keystore's); the formats no walker reads keep their first-bytes
+                             exemption (`UNWALKED_MAGIC`); FP-GRADLE-WRAPPER: a Gradle wrapper
+                             jar asks for itself whole and its properties (`More::Wrapper`,
+                             `Classified::Wrapper`) and is judged by gradle/;
+                             FP-BINARY-BY-NAME: a compiled artifact's name (`COMPILED_EXTS`) is
+                             dropped only when the whole file is text, read to the cap
+                             (`whole_text`: no NUL, no binary window anywhere; a zip's end
+                             record keeps a `.jar`, `.war`, `.ear` or `.apk`, a `koly` trailer a
+                             `.dmg`), never for an ar archive's (`COMPILED_TEXT_MAGIC`); in text,
+                             a DEX's whole magic; 0xCAFEBABE a universal Mach-O or a Java class
+                             by the number after it; a container document is quiet only in its
+                             container's bytes (`container_bytes`)
+    src/gradle/              a Gradle wrapper jar judged by Gradle's published wrapper checksums
+                             (0.1.9, FP-GRADLE-WRAPPER): `mod.rs` (`wrapper_path`; `judge`: the
+                             jar's SHA-256 against GRADLE_WRAPPER_CHECKSUMS, quiet, CRITICAL or,
+                             what the list cannot judge yet, MAJOR: a wrapper jar (its main
+                             class in it) whose distribution, the last `distributionUrl`, is a
+                             release in Gradle's form that may well be the next one, `newer`
+                             (with properties naming a listed one, the jar manifest's version),
+                             or whose manifest names a version Gradle publishes no checksum
+                             for, GRADLE_WRAPPER_NO_CHECKSUM; the distribution's own check,
+                             `distribution_issue`: MAJOR over plain HTTP, INFO from another
+                             host without `distributionSha256Sum`; properties that can't be read
+                             as Java reads them, MAJOR (the re-review of Oct 27, N3);
+                             `read`, the properties read as java.util.Properties.load reads them,
+                             by Java 9's line reader and Java 17's escapes and by Java 8's, at
+                             most GRADLE_PROPERTIES_MAX_BYTES (`Unread`: longer, a malformed
+                             `\uXXXX`, read otherwise by Java 8); `Sibling`, the properties as a
+                             host found them; `distribution_version`; `Version`, Gradle's order of
+                             releases; `uncovered`; `manifest_version` through pickle's zip
+                             reader), `tests.rs` (tests/fixtures/gradle-wrapper's genuine jars,
+                             changed ones, versions, properties, the review's cases)
+    src/media/               sound, video, image and font files walked by their structure to their
+                             end (0.1.9, FP-OPAQUE-MEDIA): `mod.rs` (the walk, a state machine fed
+                             a file's bytes in order, `feed`, its state, `Walker`, carried by the
+                             host between chunks, `media_stream`; whole, `walk`, `media_walk`; the
+                             first bytes, `starts`; bytes it skips the host may pass over, `at`,
+                             never past the file's end: a part past it fails at `eof`;
+                             `MAX_CARRY` 1 MiB kept between chunks; `MAX_CLAIMS` 65,536 parts a
+                             directory read as its stream passes may name; the review of Oct 27's
+                             bounds: free-form parts at most `FREE_MAX` 64 KiB and a quarter of the
+                             file, `free`, a part walked as a format of its own counted in them,
+                             `walk_part`; raw samples whose differences' entropy is under
+                             `RAW_MAX_BITS`, `raw_samples`), `frames.rs` (MPEG audio and
+                             ADTS frames after ID3v2 tags and their frames, ID3v1, APEv2 and
+                             Lyrics3 after them;
+                             Ogg pages and their CRC; FLAC's metadata and frames, each found by
+                             its sync code, header CRC-8 and the CRC-16 of the frame before it; a
+                             transport stream's packets), `chains.rs` (ISO media boxes, RIFF, RF64,
+                             RIFX and AIFF chunks, Matroska and WebM elements of known and unknown
+                             size, PNG chunks and their CRC, GIF blocks, JPEG segments and
+                             entropy-coded scans with the images and motion photo after them, an
+                             Apple icon's elements), `tables.rs` (a directory's claimed parts, the
+                             bytes between them zero: TrueType and OpenType fonts and collections,
+                             WOFF, WOFF2, BMP as their stream passes, each part passed once, a
+                             table named once, the declared size checked at the end; ICO and CUR
+                             with their PNG and
+                             DIB images, TIFF and BigTIFF with their sub-directories, ICC profiles
+                             and TGA read whole, TIFF's entries and offsets bounded; IM Tools and
+                             Netpbm images), `keystore.rs` (PKCS#12's DER and bags, a signed one's
+                             content, JKS and JCEKS entries with a SealedObject's Java
+                             serialization, BKS: read to their last byte, each part in its shape,
+                             what they hold in the clear counted, the bytes no structure reads
+                             measured: a certificate whole toward the total, its signature and
+                             its bytes past `CERTIFICATE_MAX` one part, an alias's and any unread
+                             value's past `NAME_MAX`),
+                             `tests.rs` (the encoders' files of tests/fixtures/media, whole and in
+                             chunks of every size, appended to, cut (whole and in chunks), a byte
+                             changed, glued onto random bytes; the structures built there, the
+                             review's shapes, free-form parts and raw samples; keystores)
+    src/pickle/              model files read for what they would run (0.1.9, FP-MODEL-FILES), never
+                             unpickled: `mod.rs` recognizes one by its bytes (a zip whose first
+                             member is `<archive>/data.pkl`, an .npy or a pickle by its name,
+                             pandas' zip compression, PyTorch's legacy stream and
+                             tar, a PROTO opcode, zlib or gzip around a pickle, a protocol 0 GLOBAL
+                             that reads to its STOP; a pickle extension, `PICKLE_EXTS`, for the
+                             rest), reads its parts (`zip.rs`: the central directory, stored and
+                             deflated entries through lazaret-verify's `inflate`, pratique's, on
+                             `Bytes`, the whole file or the pieces of it a host read by range,
+                             what is missing noted as needed: `read_ranges` reads a zip model file
+                             of any size by its end records, directory and pickle members, never
+                             its storages, `model_file` with `pieces` and collect_file's
+                             `{"need": {"read": "ranges"}}`, byte ranges charged once; a zip's
+                             members the union of every common unpacker's views, `zip::entries`'
+                             `Listing` with its `ambiguous` reasons; the .npy
+                             header read by `ast.literal_eval`'s and numpy's dtype grammar,
+                             `npy.rs`; the legacy tar's storages and tensors, every copy; a
+                             member the format's only by its content, a pickle among the others
+                             read, a TorchScript archive's code scanned as Python), and judges
+                             each global by the pack's tables (`PICKLE_SAFE_GLOBALS`: PyTorch's
+                             weights-only set, numpy's pickling, pyarrow's, dateutil's and pytz's,
+                             plain data; `PICKLE_DATA_GLOBALS`, the data types of modules of code
+                             named exactly; `PICKLE_DATA_MEMBERS`, their enums' members by the
+                             names Python 3.10 and 3.11.0 to 3.11.4 write (signal.SIGTERM,
+                             ssl.TLSVersion.TLSv1_2) as exact (module, name) pairs, a dotted one
+                             only where Python walks it (getattr's, protocol 4's GLOBAL), data
+                             where they are only kept, code where called (APPEND calling the
+                             extend an object was given too: `Given`, and on any object the
+                             extend any dict, call or attribute state gave: `AnyGiven`, charged
+                             to `GIVE_WORK`, apart from `STATE_WORK`; past it, or past what a
+                             record keeps (64 globals, a container's items), an APPEND that
+                             cannot call what it was given is SC-TRUNCATED; a member under a key
+                             the pickle computes is passed over, a known limit, backlog
+                             PY311-MEMBER-PARITY), made (numpy's _reconstruct's class too) or
+                             changed, or in a pickle that calls what it computed
+                             (`Classes::is_member`, `Glob::member`, `Book::plain_lookup`:
+                             FP-MODEL-FILES-PY311); `PICKLE_CODE_MODULES`,
+                             `PICKLE_CODE_GLOBALS`, `PICKLE_CODE_ATTRS`; Python 2's names,
+                             `PICKLE_MODULE_ALIASES` and `PICKLE_NAME_ALIASES`) and by its use:
+                             SC-PICKLE-CODE, SC-PICKLE-GLOBAL, SC-TRUNCATED (`model_sniff`,
+                             `model_file`); `own_imports`, a model file's globals of the scanned
+                             package's own modules (`model_own`, once the scan knows its files:
+                             SC-PICKLE-GLOBAL as INFO, setting no verdict), and the calls with text
+                             model_file holds (`calls`), reported MAJOR whatever the scan's
+                             source says of the class.
+                             `vm.rs` is the reader: every opcode of protocols 0 to 5 in one pass on
+                             values standing for what the unpickler would build (a call is its
+                             callee and arguments), the memo, marks as CPython's fences, the
+                             format's own helpers modelled (copyreg's reconstructors, torch's
+                             `_rebuild_from_type_v2`, numpy's random-state constructors and
+                             `_ufunc_reconstruct`, `getattr(<a global>, '<a name>')` read as that
+                             dotted global (a bound method; getattr in any other use is code),
+                             `torch.storage._load_from_bytes`, whose bytes are
+                             read as a file of their own), joblib's `NumpyArrayWrapper` followed by
+                             its array's bytes (read again as plain `pickle.load` would read them,
+                             a fork, when they start with an opcode); bounded: a step of the call's
+                             budget per opcode, `MAX_MEMO`, `MAX_STACK`, `MAX_KEPT` items kept,
+                             `MAX_FORKS` forks of `MAX_FORK_OPS` opcodes, `MAX_DISPATCH` helpers
+                             deep, `PICKLE_MAX_INFLATED` bytes decompressed, `PICKLE_MAX_ENTRIES` zip
+                             entries, `PICKLE_MAX_DIRECTORY` bytes of central directory, a reading by
+                             range `PICKLE_MAX_READS` reads of at most `range_cap` bytes in all;
+                             values dropped in one loop (`Drop` for `Seq` and `Made`), no
+                             cycle made (`keepable`, `CYCLE_LOOK`; the book's suspects let go of)
     src/deps.rs              --deps' decisions (BR-7 step 3 e, 0.1.9; core's dependency_checks and
                              project_hook_checks, and the npm package's deps.js, until then): the
                              follow of a dependency's and a project's own install hooks
@@ -416,7 +600,9 @@ rust/
                              reading of a function), driver.rs (the fixpoint, the output);
                              supply.rs (its supply-chain model: local data followed to a
                              network send, and received data to code run, in an install
-                             script or a dependency's code, §18)
+                             script or a dependency's code, §18); decodeuse.rs (what
+                             SC-EVAL-DECODE's line reading asks the tree: a RegExp's own exec,
+                             a round trip in a template's hole, §20)
     src/jsloads.rs           what a JavaScript module loads when it runs (js_loads, 0.1.9, D-13): the
                              specifiers of its require() calls given a literal outside any function,
                              class body and try statement, of its import and export-from
@@ -1927,7 +2113,11 @@ a call there was not a call.
   expression may begin (after a punctuator but `)`, `]`, `}`, `.` and
   `?.`; after `return`, `typeof`, `case` and the other words an expression
   follows; after an `if`/`for`/`while` head's `)` or a block's `}`), and
-  divides elsewhere; a template's text runs to its backtick or `${`, the
+  divides elsewhere; a name after `.` or `?.` is a property's, an operand
+  whatever word it is, and `of` is the word an expression follows only in
+  a `for (…)` head after the binding, elsewhere a name (0.1.9, the review
+  of FP-HOMOGLYPH-ORDINAL: `of <b> x` and `obj.return <b> x` compare); a
+  template's text runs to its backtick or `${`, the
   hole is code to its `}` (braces counted, templates nested to any depth);
   with JSX, a `<` where an expression may begin, before a name or `>`,
   opens an element (not TypeScript's `<T,>` or `<T extends …>`), whose
@@ -2391,6 +2581,269 @@ characters of padding or 5,000 assignments before the payload hid it, and a
 name kept for a module (`const r = module.require; r('http')`) was not that
 module. On the tree a name is its binding: none of these happen, and code
 in a string, or a local object named `process`, is not what it looks like.
+
+**What the text follower still reads, and how it reads a function's names
+(FP-GITHUB-SCRIPT, 0.1.9).** A text over 2,000,000 characters is the text
+follower's whatever its language, and an action's or a CLI's bundle often is:
+actions/github-script's `dist/index.js` (2,228,144) was "reads the whole
+environment and sends data over the network" because @actions/exec's
+`_cloneExecOptions` has a `result` given a child's environment and
+TypeScript's `__importStar` helper, 12 KB on, has a `result` of its own,
+which the follower took for that one (then every module imported through
+the helper, a child's stdout callback's `data`, and @actions/http-client's
+`data` parameter at `req.write(data, 'utf8')`). `flow::local_data_sent_at`
+now gives a variable a function declares (`const`, `let`, `var`: a name, a
+destructuring's, a loop's; `declared_at`) and a callback's parameter (a
+receiver's `.on`/`.then`/`.forEach`… callback, a read's callback and
+`.then`; `callback_scope`) the scope parameters had: the function's body,
+the functions in it among it, where what it holds is read. The function is
+the innermost `_LD_FUNC_RE` sees around the declaration, and its body's end
+must be certain (`sure_block_end`): `ld_block_end` (a brace counter) and
+`js_block_end` close the `{` at the same `}`, and nothing in
+`js_block_end`'s reading was a guess. `js_block_end` reads a body as
+JavaScript does (strings, comments, templates and the code of their `${…}`,
+regular expressions told from divisions by what precedes the `/`: an
+operator, an opening bracket, `return` and its like, a `break`, `continue`
+(and a labeled one) or `debugger` a line's end ends, an
+`if`/`while`/`for`/`with` head's `)`, a block's `}`; a division after a name,
+a literal, `++`, an expression's `}`) and says where it cannot tell: a `/`
+after the `}` of a function's, an arrow's or a class's body or of a label's
+block, after `of`, `yield`, `await` and their like, a regular expression
+with no closing `/` on its line, V8's HTML-like comments (a script's, not a
+module's). Both readers read ECMAScript's line terminators (LF, CR,
+U+2028, U+2029: `js_line_end`; a line comment and a regular expression end
+at each, and each is a line break to ASI) and white space (space, tab, VT,
+FF, NBSP, U+FEFF, every Zs: `js_space`) as the grammar does, and a decision
+on a character `js_block_end` does not model is a guess (`lex_unsure`: one
+outside ASCII where it decides, a reserved word whose name goes on before
+it, `ñreturn`, an escape; a comment between `break` and its label): the
+review of Oct 20 found U+2028 after `debugger` read as code, the `/}/` after
+it as a division and its `}` as the function's end, by both readers, whose
+agreeing then proved nothing. So an end is sure when the JavaScript reading
+made no guess, and the brace counter closes the body at the same `}` (a
+check, not the proof). With no such function or no certain end (a module's
+top, an arrow's expression, a body either reader cannot close or whose end
+is a guess) a name reaches as before. What leaves a scoped function is followed:
+its return reaches its callers (`f()`, `this.f()`), and the calls of the
+script's functions in each scope that holds data (`scoped_calls`: a
+declaration's, a callback's, then each parameter's they give; at most
+`_LD_MAX` a scope and `_DD_MAX_ASSIGNS` in all) give their callees'
+parameters, past the text's first `_LD_MAX` functions and calls that
+`params` and `calls` keep. Where core's reading reached a send by the name
+alone through a method, the narrowing reading reaches it too, and no
+further (`core_near`): a member's call, `this.send(data)`, gives the
+parameter of the variable's name of the function of the method's name, and
+`const data = s.grab()` gives `data` what `grab` returns when that is a
+variable named `data`. The reading takes passes until nothing grows, up to
+four times `_DD_PASSES`. A reading that narrowed a name and met any of
+the follower's limits (`Reading.capped`: the 100 returns, the 200 calls,
+functions with parameters and matches of each kind, the 5,000 assignments,
+a pass that still grew at the last, a `.then` chain past `_DD_THEN_MAX`)
+reads the text again without narrowing, and that reading's answer is
+given (the narrowing one's when it has none): a list a limit cut short may
+not hold the path a
+narrowed name leaves by (the review of Oct 18 lost the 100th return, the
+198th call and the 200th function so, besides the bodies ended at a
+regular expression's `}` after a class body, a labeled block or a `break`
+a line's end ends). Unchanged: an assignment without a keyword, a member
+(`this.x`), Python's names, the `_LD_NEAR` reach in a long text.
+(github-script's bundle met those limits, so the follower alone reported it
+as core's reading did, until BIG-BUNDLE-TAIL, below.) On the bundle, which both readings read, the follower
+takes about twice core's time (0.85 to 0.92 s of CPU against 0.42 to 0.46
+s, best of three, twice, on a loaded machine).
+
+**A big text's tail (BIG-BUNDLE-TAIL, 0.1.9; D-8).** The supply-chain tree
+read a JavaScript or Python text up to 2,000,000 characters (jsflow's
+`MAX_FILE`, pyflow's `MAX_TEXT`); past that the text follower answered, and
+it read a text's first 5,000 assignments, 100 returns and callbacks on a
+name, 200 matches of each other kind, functions with parameters and calls
+of them, 10,000 calls for a file read, four passes and four links of a
+`.then` chain, and walked back over at most 200 functions to place a return
+— quietly, though an action's own code, which ncc puts at its bundle's end,
+was past them (the review of FP-GITHUB-SCRIPT, Oct 18: the whole
+environment sent after a bundle's 5,000th assignment was OK). Now the tree
+reads a text up to `SUPPLY_MAX_FILE` / `SUPPLY_MAX_TEXT`, 16,000,000
+characters, the largest source file the scans read, on its own budget
+(`WORK_BASE` + `WORK_PER_NODE` a node, the run limit of each function, the
+iteration cap): a reading past it (Q-FLOW-INCOMPLETE) or a text the parser
+refuses is the text follower's, as before, never an answer of nothing. The
+follower reads a text whole: each list holds the pack's limit or the text's
+length over `PER_MATCH` (8: the matches of each kind, functions with
+parameters, the calls of them), `PER_ASSIGN` (4), `PER_RETURN` (8: returns,
+callbacks on a name) or `PER_CALL` (2: the calls read for a file read),
+about what the text can hold; a return's function and a declaration's are
+found by one sweep of the functions open at each place (`owner`,
+`decl_scopes`); the calls of the script's functions, the chained calls of
+one that returns data, the connections and the clients written to are read
+name by name (`name_matches`: linre refuses one pattern of a few thousand
+names, which spends the call's budget, and a bundle's functions are tens of
+thousands); a function's parameter's calls in its body are read once
+(`param_calls`); the passes run until nothing grows, up to `MAX_PASSES`
+(256); a `.then` chain is read to its end; and what it reads by hand (a
+statement's end, a body's, a call's arguments, a span's names) is charged
+to the call's budget (`charge`: a step a character, 8 a name read; the
+review of Oct 20 found a sixteenth of a character, as the regex engines
+charge a scan, too little: a follower's reading could run minutes before
+the default budget ran out). A limit it meets before a text's end
+(`Reading::cap`: a text of little else, a chain past 256 passes) is a cut
+(`budget::cut`): the call answers as one that ran out, its error the
+limit's words (`budget::last_cut`), and both packages make the file
+SC-TRUNCATED in them; the import-time test asked with `unread` (the
+registry's) answers what it found with the cut beside it, and the action
+scan reports both. A member's call, whose receiver the follower does not
+resolve, is a call of each function of its name (`defs_of`: the review of
+Oct 20 found BIG-BUNDLE-TAIL's first version following it only where one
+function had the name, so a second object's `send` hid `a.send(data)`):
+github-script's bundle, which the tree reads quiet, is CRITICAL again
+through the follower alone (`core_near` reaches http-client's `write(data)`
+by the name), which answers for it only where the tree does not read it.
+The tree's not reading a text whole is a cut too (the review's HIGH 3;
+`signs::local_data_sent`, `jsflow::supply::unread_why`,
+`pyflow::supply::unread_why`): where the parser refused code V8 compiles
+(`nesting too deep`) or the model's reading stopped at its budget
+(Q-FLOW-INCOMPLETE, a function cut, the iteration cap), the text follower
+answers, and the call says the tree did not read it (`TREE_UNREAD`: "the
+supply-chain tree did not read it whole: …"), whatever the follower found,
+so a follower that cannot see a helper's return sent a megabyte on never
+makes such a file OK; a refusal of code no runtime runs (a syntax error)
+and a file past the scans' largest (by its size, already SC-TRUNCATED) are
+not cut. The hosts make the file SC-TRUNCATED (CRITICAL) in those words
+beside what the follower found where its code runs (the registry's
+import-time code and action scripts, `_install_risk` for its install
+scripts, both CLIs' dependency files: `dep_file_issues`' and
+`install_script_risk`'s `unread`); the registry's use-time pass, code that
+may never run, keeps the follower's answer. So the model's budget reads
+ordinary bundles whole: twice the taint pass's a node
+(`SUPPLY_WORK_PER_NODE` 48), at most `SUPPLY_WORK_MAX` (32,000,000), a
+function read again up to `SUPPLY_MAX_ITERS` (1,000) times: the four local
+bundles the tree gave up on met the iteration cap of 50 (one function of
+TypeScript's checker needed 367 readings; read in rounds, below, 11), and
+reach their fixpoint within it. And the follower's callbacks are read in
+linear time (the review's HIGH 4: 3,000 callbacks of one function, each its
+own `data`, took 9 s whatever the budget): a name's origins are kept by
+place and scope (`Origins`), `near` reads only those within reach and is
+charged for each it reads, each parameter's calls are kept once and read
+once while nothing the reading follows changed (`given`), and the passes
+stop where the budget is spent. And the tree knows two API clients' own
+sends (`sc_api_send`): @actions/http-client's `postJson`, `putJson` and
+`patchJson`, Octokit's REST methods (`<client>.rest.<scope>.<method>(…)`)
+and its `request` given a route (`request('POST /gists', …)`), whose sends
+Octokit makes through hooks and a table at run time; the follower's
+`_LD_SEND_RE` and `_LD_OPTIONS_SEND_RE` the same.
+
+**Its time and memory (John's decisions of Oct 21).** Read whole,
+TypeScript's compiler took 34 to 36 s natively for `typescript.js` and 27
+to 28 s for `_tsc.js` (1.5 and 0.8 s while the tree gave up on them), which
+every dependency scan of a project using TypeScript pays, and a 16 MB
+bundle peaked at 841 MB in WebAssembly, past its 512 MiB. Where the time
+went (`typescript.js`, 795,472 nodes, 21,718 functions): 153,997 readings
+of functions in 24,435,744 steps, nearly all of it; a function was read
+again whenever a callee's summary changed or a variable it reads grew, the
+busiest 350 times, 36 of them changing its summary; within a reading, the
+time went to its calls (their targets, the callees' summaries applied) and
+to values made, copied and dropped. Now a function is read again only for
+what changed of what it uses (request or local data returned, a parameter
+it gave a tainted value, a parameter of a function around it), and when:
+what a summary learns of a parameter written to a closure variable
+(`param_writes`) is written there by the pass, each caller's value as its
+last reading gave it (`pw_carry`: `pw_args`, `pw_grew`, `pw_new`), not by
+reading the callers again; a parameter's calls that grew (`param_calls`)
+run again only the calls kept of it, each caller's once (`pc_sites`,
+`replays`); and a function whose place in the order (callees first) is not
+past the one being read waits for the round's end (`Queue::again`), so a
+recursion or a cycle of calls or shared variables is read once a round, not
+at each change in it. The reporting pass reads only the functions whose
+readings came near a finding (`Func::emits`). Each reading costs less: the
+calls whose targets are none and the callees that name nothing the model
+asks of are a bit each (`tg_none`, `sc_names_none`), a value that covers
+another is not joined again (`V::covers`), the functions around a function
+are one shared slice (`anc`, `scope_fns`), a caller's uses a sorted vector.
+`typescript.js` is read in 47,840 readings and 3,504,659 steps (its busiest
+function 8 times), `_tsc.js` in 30,891 and 2,921,420 (11); the rounds read
+Claude Code's `cli.js` 7 per cent more (95,212 readings, 8,568,044 steps).
+The memory: a tree's node without its line (28 bytes: a line is found among
+the line ends from its block's, `Tree::line`), the tree compacted in place;
+one copy of the text, shared by the call, the tree and the model
+(`api::call_shared`, `texts::decode_wtf8_shared`; the WebAssembly build's
+request let go once read, its text encoded into the module's memory, not
+into a copy first); a text's tokens and decoded view kept once
+(`lex::js::tokens`, `signs::dv_view`); the model's per-node marks sparse
+once its module is resolved (`Sparse`: a bit a node and the marked nodes'
+marks, found by counting the bits before), the scopes' names and the
+objects' keys in rows (`ScopeNames`, `ObjProps`), a function's callers a
+sorted row (`Callers`), its rarer fields boxed (`FuncMore`), its summary's
+maps sorted vectors (`VecMap`), the functions and bindings kept in parts
+(`Chunked`: a vector grown by moving to a larger room leaves the old one in
+WebAssembly, whose memory never shrinks), a binding's lists grown by what
+they hold (`PushSlim`), the model's vectors at their size before the
+fixpoint. At 16,000,000 characters the import-time call now peaks at 440 MB
+in WebAssembly (841 before; its linear memory 314 MB) and 437 MB natively
+(950); at 2, 4 and 8 MB 171, 205 and 314 MB in WebAssembly and 84, 138 and
+260 MB natively; Claude Code's `cli.js` (11 MB of dense code) 559 MB in
+WebAssembly (673 before, and 585 on FP-GITHUB-SCRIPT's engine, whose tree
+did not read it) and 508 MB natively (745).
+
+Measured on the review's evidence (inert text, natively and in
+WebAssembly): its 296 cases (148 earlier ones, small, past 2,000,000 and
+past 16,000,000 characters; the 43 shapes; 105 new sources) answer as
+54cec46 did but for two precision controls quiet now
+(`independent-functions-safe`, `nested-name-safe-control`), and as this
+commit's first version did but where a refused text is asked without
+`unread` (it answers as one that ran out, by design: the action scan and
+the dependency check say CRITICAL and SC-TRUNCATED); `far-helper-refused`,
+`synthetic-budget-10000-far-helper` and the model's stress of 10,000
+declarations are SC-TRUNCATED (INCOMPLETE; those of 2,000 and 4,000, which
+send nothing, are read whole now and OK), the benign authentication probes
+OK and their refused copies SC-TRUNCATED, with no SC-IMPORT-RISK.
+The review's matrix (each of six sends at the start, the middle and the end
+of a 2, 4, 8 and 16 MB bundle, its far helper and the helper's refused
+copy, the sends' refused copies at 2 MB, a benign bundle; the action scan
+and the dependency check): every send CRITICAL, every refused copy CRITICAL
+and SC-TRUNCATED, the far helper's refused copy SC-TRUNCATED, the benign
+bundle OK, in both builds. The cost (the import-time test, a fresh process
+each, CPU, a shared machine; on FP-GITHUB-SCRIPT's engine, on this one
+before John's decisions of Oct 21, and now): a benign synthetic bundle of
+2, 4, 8 and 16 MB 0.16 to 1.04 s, 0.74 to 6.00 s, and 0.49, 0.84, 1.89 and
+3.93 s natively, 0.71 to 2.10 s, 2.08 to 12.43 s, and 1.63, 2.30, 3.63 and
+6.47 s in WebAssembly (its peak above); a 16 MB bundle that sends the
+environment, through the action scan, 14 to 16 s natively (21 to 26 before)
+and 17 to 19 s in WebAssembly (29 to 34); fourteen local bundles of 2 to 11
+MB 16.8, 77.5 and 25.9 s natively and 35.2, some 138 and 54.2 s in
+WebAssembly, the same answers but github-script's (quiet now), none cut;
+TypeScript's `typescript.js` and `_tsc.js`, read whole now, 1.4 and 0.6 s,
+28 to 36 and 23 to 28 s, and 3.4 and 2.1 s natively, 2.8 and 1.7 s, 46 and
+37 s, and 6.5 and 4.4 s in WebAssembly, peaking at 247 and 197 MB natively
+(456 and 332 before) and 352 and 280 MB in WebAssembly. The most one
+reading can cost is the tree's budget (32,000,000 steps: some 20 to 25 s
+natively and 40 s in WebAssembly at TypeScript's rate now) and then the
+follower's (its costliest input 18 s natively, 25 s in WebAssembly); the
+registry's deadline (120 s, natively) is checked between files, and the
+engine has no clock of its own: `budget::spend`, called in every long loop,
+is where one would go (natively a clock read every few million steps;
+`wasm32-unknown-unknown` has none, and the npm loader would have to give it
+one).
+
+The limits each path has for a big text, and what is past them (JS: the
+import-time test of a JavaScript file; Py: of a Python file; both packages):
+
+| Limit | Path | Before | Now |
+| --- | --- | --- | --- |
+| A source file's size, `SOURCE_SIZE_CAP` / `MAX_MEMBER` (16,000,000 bytes) | JS, Py | SC-TRUNCATED | the same |
+| The supply-chain tree's text, `MAX_FILE` / `MAX_TEXT` (2,000,000 characters) | JS, Py | the text follower answered | 16,000,000 (`SUPPLY_MAX_FILE`, `SUPPLY_MAX_TEXT`): every file read |
+| The tree's work: `WORK_BASE` + `WORK_PER_NODE` (24) a node, `RUN_BASE` + `RUN_PER_NODE` a function, `MAX_ITERS` (50) | JS, Py | the text follower answered (Q-FLOW-INCOMPLETE), quietly | JS: 48 a node (`SUPPLY_WORK_PER_NODE`), at most 32,000,000 (`SUPPLY_WORK_MAX`), a function's readings up to 1,000 (`SUPPLY_MAX_ITERS`); past it (JS, Py) the follower answers and the file is SC-TRUNCATED beside, in the pass's words |
+| A text the parser refuses | JS | the text follower answered (SC-UNPARSED-CODE noted; SC-NESTED-CODE for nesting), quietly | nesting past the parser's bound (code V8 compiles): the follower answers and the file is SC-TRUNCATED beside; a syntax error (code no runtime runs): as before |
+| The follower's `_LD_MAX` (200), `_DD_MAX_ASSIGNS` (5,000), `_DD_MAX_CALLS` (100), `_LD_MAX_CALLS` (10,000) | JS, Py | the rest unread, unsaid | the text's length over 8, 4, 8, 2, at least the pack's; past it a cut: SC-TRUNCATED |
+| The follower's `_DD_PASSES` (4), `_DD_THEN_MAX` (4), its walks (`_LD_MAX` functions) | JS, Py | the rest unread, unsaid | until nothing grows, up to 256 passes (past it a cut); every link; a sweep |
+| `_LD_NEAR` (20,000 characters a name reaches in a text over `_LD_LONG`, 262,144) | JS, Py | a flow farther unfollowed | the same (a rule of the follower's reading, not a list: the tree follows bindings) |
+| `_LD_STATEMENT_SPAN`, `_DD_ARG_SPAN` (2,000), `_LD_BODY_SPAN` (20,000) | JS, Py | a longer statement or call read to its span; a longer body's end unknown | the same |
+| `_LITERAL_SPANS_MAX` (20,000 string literals the follower tells from code) | JS, Py | later literals read as code (more read, not less) | the same |
+| The call's work, `DEFAULT_STEPS` (4,000,000,000 regex steps) | JS, Py | SC-TRUNCATED (its work budget spent) | the same; the follower's own reading charged to it too: a step a character and 8 a name it reads, a step an origin `near` reads (its costliest input runs the budget out in 18 s of CPU natively, 25 s in WebAssembly; real bundles spend at most 5 per cent of it) |
+| The scan's deadline, `SCAN_TIMEOUT` (120 s a package, between batches) | JS, Py | SC-TRUNCATED | the same; a tree past its own budget falls back to the follower, never passes |
+| Other import-time detectors' matches: `_SE_MAX`, `_CRED_SWEEP_MAX`, `_WS_MAX`, `_SELF_PUB_MAX` (200), `_DNS_LOOKUP_MAX`, `_SH_EXEC_MAX` (50), `_IP_LITERAL_MAX` (100), `_PS_EXEC_MAX_NAMES` (200), `_STAGER_MAX_LITERALS` (2,000), `_SELF_READ_MAX_ASSIGNS` (5,000) | JS, Py | the rest unread, unsaid | the same (a sign beside the data flow, which is read whole) |
+| The decoded view, `_DV_MAX_CHARS` (4,000,000); the string-array reading, `_SA_MAX_CHARS` (16,000,000) | JS | a longer text's literals not joined (but where an escape or a string array is read); no string array read | the same |
+| A decoded value's tree confirmation (`dep_decode_flow`, `MAX_TEXT` / `MAX_FILE`, 2,000,000) | JS, Py | past it the text's candidates stand | the same |
+| Findings of one line rule, `CAP_PER_RULE` (200) | JS, Py | the rest summed up in one finding | the same |
+| Use-time code, `USE_RISK_MAX_CHARS` (8,000,000 a file), `USE_RISK_CHARS` (24,000,000) | registry | not read, counted in `useTime` | the same |
 
 **The model.** The pass is jsflow's (§16) with values that carry kinds of
 local data instead of request data (`Sc`: the first read of each kind, in
@@ -2875,6 +3328,44 @@ run by `eval(compile(…))`), requests-darwin-lite and quasarlib; five more
 gain a reason. The holdout gains two PyPI releases
 (631 of 745), both sharing no code with the benchmark.
 
+SC-EVAL-DECODE keeps BLOCKER unless a narrow proof establishes the exemption.
+A RegExp receiver must be a literal, an intact global construction, or a single
+binding whose uses preserve that proof; members and optional calls are not
+proven. Both the literal fast path and tree path require file-wide integrity.
+Any direct eval (including `eval("require")`), unresolved dynamic code,
+reflection that can reach a regex, unknown computed property, or write to a
+protected constructor, prototype or encoder closes the exemption. The tree can
+prove a constructor/prototype read unrelated for primitive literals and fresh
+containers. Above 2 MB a conservative lexical guard replaces that proof.
+
+A round trip requires a single, unchanged encoding of literal source text and
+an untransformed template passed directly to child_process `exec`/`execSync`.
+The entire command must be plain `node`, one `-e`, `--eval` or `-p` flag, and
+one quoted argument. That argument is parsed as exactly one supported
+`eval`, `Function(…)()`, `new Function(…)()` or `vm.runInThisContext` expression
+with the matching built-in decoder. Bindings, additional statements, command
+options, shell transformations, tagged templates, stored commands, unknown
+computed keys and encoder mutations retain BLOCKER. Proof work is bounded;
+exhausting it leaves the warning intact.
+
+Visible source is checked for unresolved dynamic execution before the
+install-script risk heuristic is consulted. Nonliteral imports/require and
+child commands are refused; eval/Function/vm and timer facilities are
+conservatively refused even where a nested literal might eventually be
+provable. A proven benign source is INFO; a risky source retains its risk
+severity and reasons. Every accepted round trip on a line contributes its own
+finding, including those before or after an unproven BLOCKER. Order and
+minification do not discard a stronger result.
+
+This external-review amendment supersedes the original `eval("name.path")`
+relaxation and broad template-hole exemption. It intentionally gives up
+precision where integrity or the complete child program is uncertain. Real
+pdf.js files containing those facilities can therefore remain BLOCKER.
+Python behavior and the rule-set assignment are unchanged. Acceptance cases
+are shared in `rust/crates/lazaret-engine/tests/data/decode-review.json` and
+run from Rust, Python, npm and native/WASM parity tests, including both sides
+of the 2 MB boundary. Fixtures are inert text and are never executed.
+
 ## 21. The Rust reader (R-1)
 
 `rs_crate` reads a crate's `.rs` files for what their code does when the crate
@@ -2989,11 +3480,66 @@ it: a package's functions, methods, types and package-level names are found
 across its files, and a call of another of the module's packages (an import of
 the module's path, `module` in the call; or, with none given, an import that
 ends in one of the module's folders) is followed there. What no build of a
-dependent reads is left out: `_test.go` files, files whose names start with `_`
-or `.`, `testdata/`, `vendor/` (other modules, read on their own) and files
-constrained to `ignore`. A folder whose name starts with `_` or `.` is read: an
-import can name it. A `.go` file the parser refuses could not be built, so
-nothing in it runs; the answer lists it (`unparsed`) for the text rules.
+dependent reads is left out: `_test.go` files (the name ends so exactly, as
+Go's: `x_TEST.go` is built), files whose names start with `_` or `.`, files
+below a `vendor/` folder's own folders (`vendor/x` is imported as `x`, another
+module's, read on its own; a package in `vendor/` itself, `m/vendor`, is the
+module's and is read) and files a build constraint certainly confines to
+`ignore`. A folder whose name starts with `_` or `.` is read: an import can
+name it. A package in a `testdata/` folder is left out by Go's wildcards, not
+by an import: it is read when an import of a file read names it (with the
+module's path; without one, any import that ends in the folder), transitively,
+and with `listed` (a `--deps` vendor tree's modules: modules.txt lists every
+package given, or an import names it) every one given is. An import of the
+module's own `testdata/` package of which no file was given is `wanted` (the
+registry gives those files and asks again); one of another module's, which that
+module's reading leaves out, is `testdataImports`, and the reader's issues make
+it SC-GO-TESTDATA-IMPORT (MAJOR, once, with how many more); and so is one of a
+`testdata/` folder the module does not have under its own path (a nested
+module's: the call's `testdata`, the module's testdata folders given or not). A
+`.go` file the parser refuses is listed (`unparsed`, and `refused`: the line and why, for one
+a build compiles: not one in a `_`, `.` or `testdata/` folder no import names);
+what it does is not read, and since a build may compile what this parser
+refuses, the reader's issues make the module INCOMPLETE (one SC-TRUNCATED
+naming the first such file and how many more; not for a file whose text is not
+text, which its decoding's SC-TRUNCATED already says, or UTF-16, which Go
+refuses).
+
+The text is the file as the Go toolchain reads it (`decode::go_source`): the
+callers give `go_text` where it differs from the rules' text (`decode_source`'s
+answer's `goText`, collect's `goContent`): UTF-8 only (no UTF-16 or UTF-32:
+their NULs are Go's error), one leading UTF-8 byte order mark dropped, "\r\n"
+folded but a lone "\r" kept, white space to Go and no line end. The rules read
+`decode_source`'s text as before, and the reader numbers its lines as they do
+(a lone "\r" ends one: its findings, `refused`, `generate`, the issues'
+snippets). The
+constraint (`build_ignored`, F-06) is read as `go/build` reads it
+(`parseFileHeader`, `shouldBuild`, `go/build/constraint`), and a file is left
+out only where that is certain; anything else is read. The header is the blank
+lines and comments before the first code, split at "\n" (after a last "\n"
+there is no line); a constraint inside a `/* … */` comment is none. A
+`//go:build` line needs white space after its prefix (`//go:buildignore` and
+`// +buildignore` are comments, and the file builds); with one, it decides,
+and leaves the file out when it is in the leading run of blank lines and line
+comments and its expression is `ignore` and'd with other tags (`&&` and
+parentheses: `ignore && linux`, `(ignore)`); two of them are Go's error. Go
+also reads one after a closed block comment, which is read here. Without one,
+a `// +build` line of that run before its last blank line leaves the file out
+when it is one option of tags joined by `,` that holds `ignore`
+(`ignore,linux`). The rule is Go 1.17's and later's, whose `//go:build`
+decides; a `//go:build ignore` beside `// +build` lines of which none says so
+is read all the same: the file's own constraints disagree (`go vet`'s error),
+and one of them says it builds. Read too: `||`, `!`, a syntax error, more than
+100 terms, a constraint after the package clause, a file holding a NUL where
+Go's reader of the package clause and the imports meets it (`go_reader_meets_nul`,
+a port of `go/build`'s `importReader`: Go's error; a NUL past them is none, and
+such a file is left out as Go leaves it out), a "\r" in the header (a lone one
+is no line end to Go), a byte
+order mark left at the start (Go reads a second one as code), and a line (or a
+comment's rest) that begins with a character outside ASCII: only ASCII white
+space is read as Go reads it here (U+00A0 is white space to Go). Spaces and
+tabs separate a constraint's terms here; Go's other white space after a prefix
+makes the line a constraint that is read, not one that leaves the file out.
 
 `eval.rs` evaluates the code as the Rust reader does (§21), on the tree: a value
 is the text the code builds (`+`, `fmt.Sprintf` with `fmt`'s verbs,
@@ -3064,5 +3610,104 @@ module held; aws-sdk-go v1, 207 million characters, now peaks at 2.4 GB, from 3.
 - `go_vendored_modules` (text: a `vendor/modules.txt`) -> the module paths it says are vendored (a `# path version`
   line followed by its annotations or packages; a `# ` line with nothing after it is a replacement `go mod vendor`
   records but does not use), longest first: a file belongs to the module whose path is the longest prefix of its own.
+  With `{"packages": true}` (F-06) -> the packages it lists, read as cmd/go's `readVendorList` reads them (a line of
+  one field below a `# path version` or `# path =>` line; a `# ` line of fewer fields changes nothing), sorted: a
+  vendored `.go` file in a `testdata/`, `_` or `.` folder is Go code only as one of them or as a package an import
+  names (below).
+- `go_imports` (F-06; `{"files": [[path, length], …]}`, the texts concatenated) -> each file's import paths, as the
+  Go parser reads them (escapes unquoted), none for a file a build constraint certainly leaves out, null for one the
+  parser refuses: the unlisted vendored folders a `--deps` scan's Go files import (`core._go_vendor_data`, `deps.js`
+  `goVendorData`; a main module below `go 1.23` builds them), followed through the files of each folder named.
 
 Both are linear in the text, and nothing in them panics on any input (`vendor::tests`).
+
+## 24. Code an eval call runs from a string (EVAL-LITERAL)
+
+`eval("…")`, `Function("…")` and `new Function("a", "…")`, and a global object's eval or Function by a name the text
+computes (`globalThis["ev" + "al"]("…")`), run the string they are handed as code; so do Python's `eval("…")`,
+`exec("…")` and `compile("…", …)`. The import-time and install-script tests read a text's code, and a string is not
+code to them: the supply-chain tree reads a literal as a value, the text follower's patterns read what a text sends,
+not what a string holds, so a send written inside such a string was quiet, in every route the tests serve (found and
+first fixed by the external review agent, card 609dd639, Oct 21–22: its pass 5, `eval_literal_codes`, and the EOF
+guard of its integration pass). `evalcode.rs` finds those strings and `signs::eval_literal_reasons` has the test read
+each as a text of its own.
+
+**The calls** (`evalcode::codes`) are read on the text's tokens (§15's lexers, which the decoded view has already
+lexed, so the call costs a walk of them): a call in a comment, a string or a regular expression is none, and a comment
+between a name and its `(` changes nothing. The callee is `eval` or `Function` (Python: `eval`, `exec`, `compile`),
+bare or as a member of a global object (`_GLOBAL_EVAL_RECEIVERS`: `window.eval`, `globalThis.Function`,
+`builtins.exec`), parenthesized (`(0, eval)(…)`), called optionally (`eval?.(…)`) or through `call` (`eval.call(null,
+"…")`), its name written with JavaScript's escapes (`\u0065val`) or in a form Python's NFKC reads as the name; or a
+global object's member by a computed name (`self["Func" + "tion"]`), which runs what its name's value says, and any of
+its arguments when the name is not a constant (`window[k]("…")`); in Python `getattr(builtins, "exec")` and
+`__builtins__["exec"]`. Not a declaration (`function eval(`, `def exec(`) nor another object's member
+(`redis.eval(…)`, `re.compile(…)`). eval's string is its first argument, Function's its last (the ones before it name
+its parameters). An argument is a string when the runtime makes it of literals alone: a string literal or a template
+with no holes, several joined by `+` (in Python adjacent ones too), each read as its runtime reads it (`lex::value`:
+escaped quotes, `\x41`, `\u0041`, `\u{41}`, line continuations; Python's raw, bytes and triple-quoted strings,
+`\N{…}`). `_EVAL_CALL_RE` (the names, and an escape that may write one) gates the walk.
+
+**The reading** (`eval_literal_reasons`). The import-time test (`import_time_risk_with`) and the install-script test
+(`install_script_risk_text`) read each string, and each string the text's decoded view hands such a call (a string
+array's `globalThis[_0x1f(3)](_0x1f(4))`), with their own reading, as a text of its own in the text's language (the
+install-script test as a script: no shell reads it); each reason found is given once, with `_EVAL_NOTE` (" (in a
+string it runs as code)"; a view's with `_DV_NOTE` too), at the line of the call (the text's own reasons keep theirs,
+first; a reason the text gives itself is not given again: `exec("bash -i …")` read as Python is one reverse shell). A
+reason's strength is read by its start (`import_time_severity`, the action scan's `judge`), so the note changes no
+severity. Each string read is charged to the call's budget before it is read: a step a character, and a fixed amount
+for the reading itself (`signs::EVAL_STRING_STEPS_JS`, 50,000 steps; `EVAL_STRING_STEPS_PY`, 200,000), which runs the
+whole test on the string (its trees, text followers and decoded view: some 35 to 75 µs for a short JavaScript string,
+130 to 200 µs for a Python one, which its length did not cover). The default budget, `budget::DEFAULT_STEPS`
+(4,000,000,000 steps), covers 80,000 short JavaScript strings or 20,000 Python ones, and a text that hands more runs
+out rather than on (SC-TRUNCATED, its work budget spent). That step budget is the bound, not a time: a string costs its
+fixed amount and its length, so the time a text takes to spend the budget grows with its strings' lengths (the
+external review of Oct 28: 100,000 different payloads, 9 MB, ran out of budget in some 30 s on a debug build).
+A call's arguments are found stepping over the brackets in them, whose ends are found once for the
+text (`evalcode::pairs`), a step a token read: a text of calls nested in each other's arguments is read once, not once
+for each call (`eval(` nested 100,000 deep answers at once with the tree's "nesting too deep" cut, as it did before
+EVAL-LITERAL); each call's line is counted on from the one before, and the strings the decoded view adds are told from
+the text's in a set. The text's own
+readings, which each tree and the decoded view keep for the text's next test (one text a thread:
+`jsflow::supply::keep_last`, `pyflow::supply::keep_last`, the decoded view's `DvKept`), are kept aside while its
+strings are read and given back after: without that, the install-script test of an 11 MB bundle read after its
+import-time test took 10 s instead of 3, its tree and view read again. Strings in strings are read `_EVAL_DEPTH` (4)
+deep; a text that nests them deeper is a cut (`budget::cut`, "the strings eval calls run as code are read 4 deep
+(_EVAL_DEPTH), and this text nests them deeper"): the file is SC-TRUNCATED, beside what was found, never quiet, in
+those words (both packages read them as a cut: `engine.EVAL_CUT`, npm's `EVAL_CUT`). A text that ends inside a call
+(`eval(` at its end) is no call: nothing indexes past the tokens.
+
+**Not read**: a template with holes, a string joined with anything else (`"a" + x`), a name or a call that holds the
+string (`eval(code)`; `eval(atob("…"))` is the decoded view's and the received-code flows'), `Function.apply`,
+`Reflect.apply(eval, …)`, `[].constructor.constructor("…")`, Node's `vm.runInThisContext("…")` and a string timer
+(`setTimeout("…")`, which Node refuses).
+
+**Before and after.** Every form above, written in a synthetic inert file (the whole environment or the user's
+`.npmrc` sent with `fetch` or `https.request`, a download piped to `sh` with its name escaped), was quiet before in
+every route: the import-time test, the install-script test, the registry's import-time code (an npm package's main),
+its install script (a `postinstall`), the action scan, a wheel's module, and both CLIs' `--deps` (a dependency's file
+and its hook's script). Now each is found at the call's line, natively and in WebAssembly alike, CRITICAL (the
+download run through a shell is MAJOR in an action, as it is anywhere in one); strings nested five deep are
+SC-TRUNCATED and the release INCOMPLETE; benign strings (`eval("1+1")`, `new Function("a", "b", "return a+b")`,
+`Function("return this")`, a JSON text, a minified module's own code) are quiet. On 10,765 JavaScript files of popular
+packages (206 MB: the latest releases of 39 from npm, among them lodash, moment, jquery, three, webpack,
+@babel/standalone, core-js, mathjax, underscore, ejs, handlebars, doT, lodash.template, vue, angular, hogan.js and
+nunjucks; twenty local packages, typescript, pdfjs-dist and mermaid among them; and the fourteen local bundles), some
+280 of which hand such a call a string (hogan.js's compiled templates, mathjax's, underscore's, pdf.js's …), both
+tests answer as before for every file, and their CPU is the same (the import-time test 81.6 s before, 79.1 s now; the
+install-script test 37.2 and 38.2 s).
+
+**Amended after the gates (Oct 27).** The gates found the reading uncharged where it cost most, on synthetic inert
+texts of many short strings: each call's line counted from the text's start (F-1) and the decoded view's strings told
+from the text's one by one (F-3), so 40,000 `eval('var aN = N;')` took 8 s a test and 2 MB more than 45; with that
+fixed, each reading still ran the whole test for its length's steps alone (F-2: 2 MB of Python's `exec('aN = N')`, 15
+s); and a walk of each call to its end read `eval(` nested 100,000 deep once for each call, spending the budget in 8
+to 9 s where the tree's "nesting too deep" answered at once (F-4). Now, natively (CPU seconds a test, before the fix
+and after, on a shared machine): 40,000 evals 7.8 → 1.2 s and 40,000 Python execs 10.8 → 3.1 s (out of budget: 20,000
+are read); 2 MB of evals (73,000) more than 45 → 2.3 to 3.2 s, answered; 2 MB and 16 MB of Python execs, and 16 MB of
+evals, more than 45 → 3 to 6 s, out of budget (SC-TRUNCATED); `eval(` or `window[` nested 100,000 deep 8.3 → 0.04 s,
+the tree's cut, as before EVAL-LITERAL (0.04 s). In WebAssembly each of these shapes answered in 7.5 s or less (40,000
+evals 21.4 → 2.5 s). The benign corpora answer as before, natively and in WebAssembly: 16,944 files of popular
+packages and 72 local bundles, each within 25 million steps, a 160th of the budget. Of the thirty that name such
+calls most, the most strings read is 150 (a webpack eval-devtool bundle's modules: 0.2% of the 80,000 the budget
+covers; in Python 13, pandas' `test_eval.py`, of 20,000), and the most budget needed 21 million steps (yarn's
+`cli.js`), 0.5% of it.

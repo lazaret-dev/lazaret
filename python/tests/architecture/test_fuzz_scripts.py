@@ -18,6 +18,7 @@ import os
 import random
 import re
 import sys
+import sysconfig
 import tempfile
 import time
 import unittest
@@ -45,6 +46,13 @@ EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
                     "go-sumdb-check", "provenance-npm", "go-resolve", "ecosystem-names", "ecosystem-member-path", "action-code",
                     "verify-answers", "verify-credentials", "credential-path", "js-parse", "py-parse", "taint"]
+
+
+#: the seconds a short run of every target may take: musl's Python is slower at it (Alpine, Python 3.12 on musl, the
+#: Wheels job's musllinux_1_2_aarch64: 44.5 s, PR #17, Oct 29), so 60 there
+MUSL = any("musl" in (text or "") for text in (sysconfig.get_config_var("HOST_GNU_TYPE"),
+                                                getattr(sys.implementation, "_multiarch", None)))
+SHORT_RUN_SECONDS = 60 if MUSL else 40
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -496,7 +504,7 @@ class TargetTests(unittest.TestCase):
             with self.subTest(target=name):
                 unknown = [(f.kind, f.signature, f.data[:80]) for f in report["findings"] if not driver.is_known(f)]
                 self.assertEqual(unknown, [])
-        self.assertLess(time.monotonic() - started, 40)
+        self.assertLess(time.monotonic() - started, SHORT_RUN_SECONDS)
 
     def test_the_known_findings_still_reproduce(self):
         for (name, signature), (ident, data) in fuzz_targets.KNOWN.items():
@@ -570,6 +578,9 @@ class PromisesAreLive(unittest.TestCase):
         plain = fuzz_targets.tar_entry(b"package/a.js", b"1;\n") + b"\0" * 1024
         with mock.patch.object(npmtar, "written_path", lambda path: "elsewhere.js"), \
                 mock.patch.object(npmtar, "written_path_npm10", lambda path: "elsewhere.js"):   # (npm 11's, 10's)
+            if not fuzz_targets.NPM_MODEL_HERE:
+                run(plain)          # (Windows: the model is npm's on Linux and macOS, not held to the npm here)
+                return
             with self.assertRaises(fuzz_targets.Violation) as raised:
                 run(plain)
         self.assertEqual(raised.exception.rule, "npm-model")

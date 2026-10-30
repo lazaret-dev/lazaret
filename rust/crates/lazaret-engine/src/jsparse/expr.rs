@@ -118,7 +118,7 @@ impl<'a> Parser<'a> {
         if n.kind == Kind::Identifier || n.kind == Kind::MemberExpression {
             return Ok(node);
         }
-        self.fail_at("invalid assignment target", n.line)
+        self.fail_at("invalid assignment target", self.line_at(n.start))
     }
 
     /// The target of `=` (JS-PARSE-STRICT): a pattern, or a call, which V8 compiles in scripts and modules alike and
@@ -722,7 +722,7 @@ impl<'a> Parser<'a> {
         for node in list {
             let n = *self.node(node);
             if n.kind == Kind::RestElement {
-                let spread = self.mk(Kind::SpreadElement, At { line: n.line, start: n.start }, n.end, 0, 0, [n.f[A as usize], NONE, NONE, NONE]);
+                let spread = self.mk(Kind::SpreadElement, At { line: self.line_at(n.start), start: n.start }, n.end, 0, 0, [n.f[A as usize], NONE, NONE, NONE]);
                 args.push(spread);
             } else {
                 args.push(node);
@@ -952,7 +952,7 @@ impl<'a> Parser<'a> {
     #[allow(clippy::wrong_self_convention)] // (jsparse.py's name)
     pub(super) fn to_pattern(&mut self, node: NodeId, binding: bool) -> R<NodeId> {
         let n = *self.node(node);
-        let at = At { line: n.line, start: n.start };
+        let at = At { line: self.line_at(n.start), start: n.start };
         match n.kind {
             Kind::Identifier | Kind::ObjectPattern | Kind::ArrayPattern | Kind::AssignmentPattern | Kind::RestElement => {
                 Ok(node)
@@ -963,14 +963,14 @@ impl<'a> Parser<'a> {
                 let mut out = Vec::with_capacity(props.len());
                 for p in props {
                     let pn = *self.node(p);
-                    let pat = At { line: pn.line, start: pn.start };
+                    let pat = At { line: self.line_at(pn.start), start: pn.start };
                     if pn.kind == Kind::SpreadElement {
                         let arg = self.to_pattern(pn.f[A as usize], binding)?;
                         out.push(self.mk(Kind::RestElement, pat, pn.end, 0, 0, [arg, NONE, NONE, NONE]));
                         continue;
                     }
                     if pn.op != P_INIT || pn.flags & METHOD != 0 {
-                        return self.fail_at("invalid destructuring target", pn.line);
+                        return self.fail_at("invalid destructuring target", self.line_at(pn.start));
                     }
                     let mut value = self.to_pattern(pn.f[B as usize], binding)?;
                     let cover = self.node(p).f[C as usize];
@@ -995,7 +995,7 @@ impl<'a> Parser<'a> {
                     let en = *self.node(el);
                     if en.kind == Kind::SpreadElement {
                         let arg = self.to_pattern(en.f[A as usize], binding)?;
-                        let eat = At { line: en.line, start: en.start };
+                        let eat = At { line: self.line_at(en.start), start: en.start };
                         out.push(self.mk(Kind::RestElement, eat, en.end, 0, 0, [arg, NONE, NONE, NONE]));
                     } else {
                         out.push(self.to_pattern(el, binding)?);
@@ -1008,7 +1008,7 @@ impl<'a> Parser<'a> {
                 let left = self.to_pattern(n.f[A as usize], binding)?;
                 Ok(self.mk(Kind::AssignmentPattern, at, n.end, 0, 0, [left, n.f[B as usize], NONE, NONE]))
             }
-            _ => self.fail_at("invalid destructuring target", n.line),
+            _ => self.fail_at("invalid destructuring target", self.line_at(n.start)),
         }
     }
 
@@ -1115,7 +1115,7 @@ impl<'a> Parser<'a> {
             return self.fail();
         }
         let k = *self.node(key);
-        let kat = At { line: k.line, start: k.start };
+        let kat = At { line: self.line_at(k.start), start: k.start };
         let value = self.mk(Kind::Identifier, kat, k.end, 0, 0, [k.f[A as usize], NONE, NONE, NONE]);
         let node = self.fin_x(Kind::Property, at, P_INIT, SHORTHAND, [key, value, NONE, NONE]);
         if self.is_p(P_ASSIGN) {

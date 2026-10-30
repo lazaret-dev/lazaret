@@ -8,6 +8,14 @@ import { run } from '../src/index.js';
 import { call } from '../src/lib/native.js';
 const reason = "deletes the user's files";
 const cases = JSON.parse(readFileSync(new URL('../../tests/fixtures/ra6-deletion.json', import.meta.url)));
+test('path-built file exfiltration keeps its strong finding', () => {
+  const cases=JSON.parse(readFileSync(new URL('../../tests/fixtures/path-built-reads.json', import.meta.url),'utf8'));
+  for(const c of cases) {
+    const reasons=call('install_script_risk',{lang:c.lang},c.text);
+    assert.ok(reasons.some(r=>r.includes('reads files outside the package and sends them')),c.name);
+    assert.equal(call('install_script_severity',{reasons}),'CRITICAL',c.name);
+  }
+});
 test('RA-6 paths and cleanup exclusions, shared with Python', () => {
   for (const c of cases) {
     const args = {lang:c.lang, command:c.command};
@@ -60,9 +68,38 @@ test('RA-6 own folders, protected subtrees, and deleting-call lines', () => {
     }
   }
   for(const c of fixture.sources) {
-    assert.equal(call('install_script_risk',{lang:c.lang},c.text).includes(reason),c.found,c.name);
+    const install=call('install_script_risk',{lang:c.lang},c.text);
+    assert.equal(install.includes(reason),c.found,c.name);
+    if(c.found) assert.equal(call('install_script_severity',{reasons:install}),'CRITICAL',c.name);
     const [reasons,line]=call('import_time_risk',{lang:c.lang},c.text);
     assert.equal(reasons.includes(reason),c.found,c.name);
     if(c.line !== undefined) assert.equal(line,c.line,c.name);
+  }
+});
+
+ test('RA-6 listed-name work stays bounded', () => {
+  let text="const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';\n";
+  text+="fs.readdirSync(D).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));\n".repeat(1600);
+  text+="fs.rmSync(require('os').homedir()+'/Documents',{recursive:true});";
+  assert.ok(call('install_script_risk',{lang:'js'},text).includes(reason));
+ });
+
+test('RA-6 review cases survive package scanning through WASM', () => {
+  const fixture=JSON.parse(readFileSync(new URL('../../tests/fixtures/ra6-own-folders.json', import.meta.url),'utf8'));
+  for(const c of fixture.sources.filter(c=>c.name.startsWith('v2-'))) {
+    const root=mkdtempSync(join(tmpdir(),'ra6-v2-source-'));
+    const out=mkdtempSync(join(tmpdir(),'ra6-v2-report-'));
+    const filename=c.lang==='js' ? 'install.js' : 'setup.py';
+    try {
+      writeFileSync(join(root,'package.json'),JSON.stringify({name:'ra6-v2-probe',version:'1.0.0',scripts:{postinstall:(c.lang==='js'?'node ':'python3 ')+filename}}));
+      writeFileSync(join(root,filename),c.text);
+      run(['check',root,'--out-dir',out,'--no-html','--quiet'],{out:()=>{},err:()=>{},env:{}});
+      const report=JSON.parse(readFileSync(join(out,'lazaret-report.json'),'utf8'));
+      const found=report.issues.filter(i=>i.msg.includes(reason));
+      assert.equal(found.length>0,c.found,c.name+': '+JSON.stringify(report.issues));
+      if(c.found) assert.ok(found.some(i=>i.rule==='SC-INSTALL-HOOK' && i.sev==='CRITICAL'),c.name);
+    } finally {
+      rmSync(root,{recursive:true,force:true});rmSync(out,{recursive:true,force:true});
+    }
   }
 });

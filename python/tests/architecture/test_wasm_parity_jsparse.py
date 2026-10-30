@@ -32,7 +32,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 const n = await import(pathToFileURL(process.argv[1]).href);
-const calls = JSON.parse(readFileSync(0, "utf8"));
+const calls = JSON.parse(readFileSync(0).toString("utf8"));
 const fresh = () => new WebAssembly.Instance(n.wasmModule(), {}).exports;
 let e = fresh();
 const utf8 = new TextEncoder();

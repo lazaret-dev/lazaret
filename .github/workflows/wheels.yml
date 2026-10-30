@@ -196,7 +196,10 @@ jobs:
   macos-windows:
     name: library (${{ matrix.tag }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    # (the Python suite alone took some 20 minutes on win_amd64, PR #17's
+    # first run, and the second's win_amd64 and macOS jobs were cancelled at
+    # 30 with the build before it)
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

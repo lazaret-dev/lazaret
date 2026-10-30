@@ -379,6 +379,20 @@ class Scenarios:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+#: the reasons 3.10 to 3.12 word otherwise than 3.13, whose words the engine gives: an int past 4,300 digits
+#: ("Exceeds the limit (4300)" on 3.10, "(4300 digits)" since), and a string a bad \\u escape ends ("Invalid
+#: \\uXXXX escape" where 3.13 says "Unterminated string"; CI's python-unit, Oct 29)
+WORDED_OTHERWISE = (": Exceeds the limit (4300", ": Invalid \\uXXXX escape", ": Unterminated string starting at")
+
+
+def reason_cut(text, path):
+    """`text` with a "could not read baseline" line whose reason is one WORDED_OTHERWISE cut after its path: on those
+    Pythons, that the baseline is refused is compared there, and every other line and reason word for word."""
+    head = f"warning: could not read baseline {path}"
+    return "\n".join(head if line.startswith(head) and any(w in line for w in WORDED_OTHERWISE) else line
+                     for line in text.split("\n"))
+
+
 class ApplyTests(unittest.TestCase):
     def test_the_engines_baseline_is_cores(self):
         cases = Scenarios(4, 500)
@@ -386,7 +400,10 @@ class ApplyTests(unittest.TestCase):
             for k, (path, root, key, res) in enumerate(cases.cases):
                 with self.subTest(k, key=key, path=os.path.basename(path)):
                     mine, theirs = copy.deepcopy(res), copy.deepcopy(res)
-                    self.assertEqual(run_engine(mine, path, root, key), run_ref(theirs, path, root, key))
+                    got, want = run_engine(mine, path, root, key), run_ref(theirs, path, root, key)
+                    if sys.version_info < (3, 13):
+                        got, want = reason_cut(got, path), reason_cut(want, path)
+                    self.assertEqual(got, want)
                     self.assertEqual(mine, theirs)
         finally:
             cases.close()
@@ -598,7 +615,7 @@ NODE_APPLY = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const b = await import(pathToFileURL(process.argv[1]).href);
-const cases = JSON.parse(readFileSync(0, "utf8"));
+const cases = JSON.parse(readFileSync(0).toString("utf8"));
 process.stdout.write(JSON.stringify(cases.map(([path, root, key, res]) => {
   const warnings = [];
   b.applyBaseline(res, path, { root, warn: (l) => warnings.push(l), env: key === null ? {} : { LAZARET_BASELINE_KEY: key } });

@@ -79,13 +79,14 @@ class ProjectScanTests(unittest.TestCase):
             ("venv/lib/python3.11/site-packages/evil.pth", 1, "CRITICAL"),
             ("venv/lib/python3.11/site-packages/ns.pth", 1, "MAJOR")])
 
-    def test_size_cap_applies(self):
+    def test_past_the_size_cap_it_is_read_in_chunks(self):
+        # a .pth file too large to read whole is read in chunks for the lines site.py runs (FP-MODEL-FILES, John's
+        # decision of Oct 21: every .pth is checked, whatever its size), each checked at its line: not INCOMPLETE
         from unittest import mock
         with mock.patch.object(core, "SOURCE_SIZE_CAP", 10_000):
             res = self.scan({"big.pth": EVIL + "#" * 10_001})
-        self.assertEqual(pth_findings(res), [])
-        (t,) = [i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
-        self.assertEqual(t["file"], "big.pth")
+        self.assertEqual(pth_findings(res), [("big.pth", 1, "CRITICAL")])
+        self.assertEqual([i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"], [])
 
     def test_the_registry_check_is_the_same(self):
         for text in CORPUS:

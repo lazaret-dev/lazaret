@@ -19,6 +19,18 @@ RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and 
 
 RA-6 follow-up (rule set 2.99.0) exempts fully literal paths at least two components below home outside protected personal-data and credential subtrees. This is a lexical path rule, not proof that a package owns a folder. Home itself, whole top-level home folders, roots/drives, repository deletion and unknown/globbed home paths still trigger. Protected paths include personal folders, cloud storage, browser profiles, Mail/Messages/Photos and credentials; their ancestors are protected too because deleting an ancestor deletes that data. Matching is case-insensitive independent of the scanning host. Dot components and separators are normalized before classification, and unknown components cannot disappear through `..` to gain the new exemption. The existing named-cache exemption retains precedence, including unknown descendants under a known owner; whole caches and unknown owners are not exempt. Unknown paths without an identified home/root/repository target remain outside this detector's evidence. Import-risk attribution preserves the deleting call's line when another call adds no finding. No filesystem paths are accessed and no cleanup is executed.
 
+RA-6 rework (rule set 2.101.0) restores protection for whole application-data containers and listed wallet, messenger, password-manager, keyring, mail, browser and developer-credential paths on macOS, Linux and Windows. Container ancestors remain protected; literal tool children outside the protected lists remain exempt. The names come from data categories, not benchmark or holdout samples. APPDATA/LOCALAPPDATA paths are recognized, and an unknown child directly under a root/drive remains dangerous.
+
+A separate bounded provenance check can exempt a direct entry of the same exempt directory returned by a Node or Python directory listing, with optional literal suffixes. It follows single-source bindings, collection iteration, inline Node callbacks, filtering, indexing/destructuring and Python loops/comprehensions; Dirent and pathlib path forms retain the directory anchor. Reassignments, mutations, object escape, mismatched directories, extra unknown components, recursive listings, globs and visible API/symlink changes do not earn the new exemption. A Python comprehension's provenance stays within its expression. Provenance uses a separate work budget and reads its directory in literal-only mode; cycles cannot consume the original path reader's budget. This checks lexical containment and modeled native API origins, not filesystem ownership, absence of pre-existing symlinks, or API replacement outside the scanned source. The exempt directory is the boundary of the listed-name exception: an unknown entry name is not itself compared with protected basenames such as `.git` or vault-file suffixes. General import/use-time reachability is unchanged. The holdout is not inspected or scored here; John performs the one aggregate acceptance run against stack-0.1.9-b, then decides whether further narrowing or a revert is needed.
+
+The native listing callee must have one unambiguous binding, followed through aliases without reassignment or escape; a conditional callee does not qualify. Name-array filters use the same mutation and escape checks as Dirent filters, including callback rest/third arguments, arguments, closures and helper calls. Python escape checks include positional and keyword values and star expansions. Its writes and escapes are keyed by lexical binding, including global/nonlocal writes, so an unrelated local with the same spelling does not invalidate a listing. Unknown scope ownership or an escaped native namespace keeps the original deletion reading.
+
+Directory expressions at the listing and join also require single-write, scope-qualified literal/native provenance. Augmented, annotated, destructuring and other unsupported writes cannot reuse an earlier decoy value. Global/nonlocal declarations, dynamic namespace access and star imports conservatively disable listing exemptions in that source; failed provenance retains the may-resolve deletion reading. JavaScript global-object access similarly prevents an exemption.
+
+F-05 (rule set 2.102.0) gives the path readers separate operations for Node join and resolve, Python POSIX and Windows joins, Go path/filepath joins, and Rust path pushes/joins. Later absolute components append in Node/Go joins; Python joins can reset the root or drive. Native-platform operations retain two correlated POSIX/Windows interpretations; either can add a deletion or credential-read finding, and a listing exemption requires the directory interpretations to agree. No target cwd or filesystem is consulted. A home API supplies an absolute symbolic anchor; a literal tilde component is not expanded by joining. Dot normalization retains unknown components when their cancellation would discard uncertainty. The shared path helper is removed. The regression matrix compares inert strings with Node/Python path libraries, plus Go standard-library tests selected for the running platform.
+
+Path assembly checks a conservative MAX_TEXT bound before allocating intermediates, retains a bounded prefix plus unknown interpretation on overflow, and charges the engine work budget by text length. Callers collect each part once and evaluate the whole API operation only at completion (or once to check a listed-name prefix); resolve selects components before joining instead of repeatedly prepending strings. Shared input conversions and fixed-platform operations avoid duplicate work. These bounds preserve uncertainty instead of exempting truncated paths.
+
 Lazaret is a static security, supply-chain and quality scanner for Python,
 JavaScript and SQL projects, plus a registry auditor for npm and PyPI packages,
 Go modules, crates and VS Code extensions, and an install guard. It
@@ -235,7 +247,10 @@ shared by the CLI and the MCP server. In order it:
    size caps, binary/pyc/symlink/encoding checks), each source file decoded as
    its interpreter reads it by the engine, for both packages since BR-7's step
    4 (b) (`rust/crates/lazaret-engine/src/decode/`, the `decode_source` call:
-   the BOM and NUL sniff, PEP 263 cookies, every text codec Python has);
+   the BOM and NUL sniff, PEP 263 cookies, every text codec Python has; for
+   the Go reader, F-06, also `go_text`: Go source as the Go toolchain reads
+   it, UTF-8 only, one BOM dropped, "\r\n" folded and a lone "\r" kept,
+   where that is not the rules' text);
 2. **scans each file** (`scan_file`) — rules, intra-file taint, SQL sinks,
    obfuscation/secret detection, per its language — and each config or data
    file (`scan_config_file`: `.env`, JSON, YAML, TOML, INI, shell, keys,
@@ -265,7 +280,14 @@ shared by the CLI and the MCP server. In order it:
    JSON or else as the Python literal gyp reads, `ast.literal_eval` on the
    engine's Python parser); `core.load_manifest` keeps the data the
    registry's and `--deps`' decisions read (the npm package asks the engine,
-   `manifest_data`);
+   `manifest_data`). A manifest's path is the walk's, root-relative with
+   os.sep: on Windows the walk gives `scan_manifest` `windows` (core's
+   `_WINDOWS_PATHS`, collect.js `WINDOWS`), so a backslash separates its
+   folders there and a dependency's `node_modules\dep\test\package.json` is
+   no package's root manifest (WIN-DEP-PATHS: `--deps` read the fixture's
+   dependencies as the package's, SC-DEP-URL on Windows alone); elsewhere,
+   and in a registry's members ('/'-separated on every system), a backslash
+   is a file name's, as core reads a path on POSIX;
 4. **runs `--deps` checks** (`dependency_checks`) — what dependencies run at
    install and import time (install hooks followed to the files they run,
    import-time received-code, and the cross-file follower); the decisions are
@@ -339,7 +361,8 @@ What the walk found is held to what it found (LZ-03's review, H1 and H2). A
 folder the walk found (`_Root.found`) that is a link, no folder or gone when
 it is opened again, by the walk or a reader after it, and a regular file the
 walk listed (`_Root.files`, `_file_record`: its device, inode, size and
-modification and change times) that is a link, another kind of file (a
+modification and change times; on Windows its creation time for the change
+time, below) that is a link, another kind of file (a
 folder, a FIFO, a socket), another file (another inode, or one written since:
 another size or time; a file deleted and made again under its name can get
 the freed inode, as ext4 gives it, LZ-03's re-check 2, N5) or
@@ -386,11 +409,29 @@ another now, or the folder changed while it was looked at (its modification
 and change times, which every entry made, renamed or removed in it moves);
 otherwise it names nothing, as when the walk listed the folder. On a disk
 that tells names apart (Linux's usual ones) a hook's `LIB/RUN.DAT` is a file
-that is not there, as before. Where the walk's listing has no inodes
-(Windows' `DirEntry.stat`), a name is the entry it is one name with, by the
-identity both have now, and a regular file by its size and modification
-time (its change time only where the inode is known: Windows' listing has a
-creation time there).
+that is not there, as before. Windows' listing (`DirEntry.stat`) has no file
+IDs, so the walk lstat's each entry it lists there by its exact path (`\\?\`
+and the absolute path: no name rewritten, no `MAX_PATH`) for its volume and
+file ID (`_Root.listdir`), and holds every later lstat and fstat to them, as
+to an inode: a file replaced by another is a change there too, whatever its
+size and times (a copy made within one tick of the system's clock, some
+15.6 ms, has the same ones on NTFS, which stamps a file's times from it; the
+Windows runs of PR #17 met it by chance). Beside its size and modification
+time, a file is held there to its creation time (`_held_time`), where POSIX
+holds it to its change time: from Python 3.12 Windows' `os.lstat` and
+`os.stat` give `st_ctime` the creation time (CPython's `win32_xstat` copies
+`st_birthtime` into it) and `os.fstat` the change time, so the walk's lstat
+and a read's fstat of a file written after it was made never agree on it;
+`st_birthtime_ns` is the creation time in both, and on 3.10 and 3.11, which
+have none, `st_ctime` is the creation time in both. An entry whose ID
+cannot be had (its lstat fails) keeps the listing's stat, and no lstat or
+fstat with an ID is taken for it; where neither has one (a disk that keeps
+no file IDs), a name is the entry it is one name with, by the identity both
+have now, and a regular file by its size and modification time. The counts
+and probes that hold nothing to the listing (the pruned trees', the MCP
+budget's, a dependency tree's probe) take the listing as it is, and the
+walk's loop check uses no Windows file ID (3.10's and 3.11's 64-bit one of
+ReFS's 128-bit IDs is not unique; nothing is followed there to loop).
 
 These checks keep what is read consistent with what the walk found while the
 tree is changed during a call (fail closed: SC-TRUNCATED and incomplete). The
@@ -405,9 +446,19 @@ LZ-03's re-check 2:
   while its folder's times did not move is taken for one that reached nothing
   then, so a file renamed away and back between two lookups on such a disk
   can be missed (N6, timing-dependent).
-- Windows, whose listing has no inodes: a file replaced by another of the
-  same size whose modification time is set back (`SetFileTime`) is taken for
-  the file the walk listed.
+- Windows, where a file's writer can set every time NTFS keeps (creation,
+  modification, change: `SetFileTime`, `SetFileInformationByHandle`), and no
+  lstat gives the change time: a file written in place at the same size with
+  its modification time kept or set back (or its time updates suspended) is
+  not told from the file the walk listed, since writing in place never moves
+  its creation time (POSIX's change time is the system's alone). A
+  file replaced by another is told apart by its file ID; on Python 3.10 and
+  3.11 a ReFS file ID is cut to 64 bits, which need not be unique. On a disk
+  whose file IDs are 0 or can be reused (FAT and exFAT, which make a file's
+  ID from where its entry is on the disk; some network redirectors), the old
+  matching remains: a file is held to its size and modification time (and,
+  where it has an ID, its creation time), and another file with the same
+  ones is taken for it.
 - A disk that takes names for one some other way (another Unicode version's
   case folding), for a name that reaches nothing because the walk's entry it
   stood for is gone.
@@ -710,6 +761,25 @@ JavaScript twin, `js/src/lib/received.js`, was retired in 0.1.8).
   given it as arguments runs that program, and a usage text's parser
   (`argparse`, `optparse`, `docopt`) gives the command line; the text
   follower answers for a text the tree can't read, and for JavaScript.
+- **Code in a string an eval call runs (EVAL-LITERAL, 0.1.9).** `eval("…")`,
+  `Function("…")`, `new Function("a", "…")`, a global object's eval or
+  Function by a computed name (`globalThis["ev" + "al"]("…")`, `window[k]("…")`)
+  and Python's `eval`, `exec` and `compile` run the string they are handed;
+  to the tests it was a string, so a send written inside one was quiet
+  (found and first fixed by the external review agent, card 609dd639,
+  Oct 21–22). The import-time and install-script tests now read each such
+  string (`evalcode::codes`: a string literal or a template with no holes,
+  or several joined by `+`, read as the runtime reads them; the call found
+  on the text's tokens, so one in a comment or a string is none) with
+  their own reading, as a text of its own, and give what it finds at the
+  call's line, noted " (in a string it runs as code)". Strings in strings
+  are read four deep (`_EVAL_DEPTH`); a text that nests them deeper is
+  SC-TRUNCATED, never quiet. Each string is charged to the call's budget,
+  its length and a fixed amount for its reading, which runs the whole
+  test, so a text of many runs out (SC-TRUNCATED) rather than on. A
+  string handed through a name (`eval(code)`) is not read: the
+  received-code flows and the decoded view read what they can of those.
+  docs/RUST_ENGINE.md §24.
 
 **The second reading (0.1.8).** When the first reading finds nothing, a text of
 up to `_DL_LOGICAL_MAX_CHARS` (1,000,000) characters is read once more as
@@ -842,6 +912,44 @@ file in a `_next`, `static` or `public` directory of its package that none of
 its npm package's entry points reach — main, module, bin and exports, then
 what they require, import or start with node (the engine's `deps_files`) — is
 left out of it and of the follower (litellm's proxy UI).
+
+Look-alike names and display text (0.1.9, FP-HOMOGLYPH-ORDINAL). SC-HOMOGLYPH reads names: each line with its
+comments and literals left out (`names_code`), the literals being what every reading of the file agrees on. A file
+that may hold JSX is read with JSX and without, and JSX text is code to the reading without JSX (where it would not
+parse: an element begins where an expression may, `<` there being no operator), so a label's text was read as names:
+`<span>Nº {index + 1}</span>` gave "'Nº' reads as 'No' but is spelled with U+00BA" (MAJOR, WARN; John's fp-tally of
+Oct 21, `doomvault/src/library/LocalLibrary.tsx:581`). "Nº" is the usual way to write "number" in Spanish, Portuguese
+and Italian. A look-alike matters where a name is resolved or trusted — identifiers, import and require specifiers,
+package and host names, URLs, commands, a workflow's `uses:`. Now, when the look-alike found on a line of a file read
+with JSX is a two-character name ending in an ordinal indicator and is not CRITICAL, the line's ordinals that are
+display text are left out of the names too (`FileCtx::names_code_with`) and the line is read again: a look-alike after
+them on the line is still found. A run is left out only when all of these hold (`ordinal_display_runs`; the review of
+Oct 27, which found the first version's H1, ruled each):
+
+- it is an ordinal (`ordinal_token`): digits, or one ASCII letter, then one ordinal indicator (U+00AA ª, U+00BA º),
+  with no identifier character before or after it (a letter, a digit, `$`, `_`, ZWNJ/ZWJ, a `\`, any non-blank
+  character past ASCII): `1º`, `2ª`, `Nº`, `nº`, `Mª`; `evªl`, `aºb`, `nºs` and any longer name holding one never are;
+- it is not itself a look-alike of a dangerous name (CRITICAL is never lowered by this rule);
+- the lexer's JSX reading holds it as text: JSX text, a JSX attribute's string, a string, a template's text, a
+  comment. The lexer reads `of` (but after a `for` head's binding: `for (x of y)`) and a keyword used as a property's
+  name (after `.` or `?.`) as operands: `of <b> evªl("1")` and `obj.return <b> evªl("1")` are valid JavaScript, two
+  comparisons each, that it read as an element, so `evªl("1")` was JSX text (H1);
+- the file is not JavaScript without JSX (`jsx_display_spans`): its plain parse (jsparse, as a script and as a module)
+  fails — Node runs a `.js`, `.mjs` or `.cjs` file without JSX, and a file that parses so holds no display text — and
+  its JSX reading parses (as JavaScript's, or as TypeScript's for a `.tsx` file);
+- the parser's JSX reading holds it as text too: a JSXText node, a string Literal (a JSX attribute's among them) or a
+  template's TemplateElement. Where the lexer's reading and the parser's differ, the run is a name.
+
+The engine is not told a file's extension (the hosts say only whether it is read with JSX), so the plain-parse rule
+holds for every file read with JSX; a `.jsx` or `.tsx` file that holds JSX never parses without it. Every other
+look-alike in display text (`pаypal` with a Cyrillic а in JSX text: MAJOR, as before) and an ordinal in a name
+(`const Nº`), in a file read without JSX, or after no letter or digit, are read as before; Python reads `Nº` as the
+name `No` (NFKC), as it always did. The rule's other confusables were looked at in JSX text (synthetic labels, before
+and after): the micro sign (`10µs`), a Cyrillic word of mapped letters alone (`Сорок`), `№` and Roman numerals (`Ⅻ`)
+were already quiet (their skeleton is not ASCII, or holds no ASCII letter); superscript abbreviation letters (`Mᵐᵉ`,
+`Mˡˡᵉ`), ligatures (`ﬁle`), fullwidth letters beside ASCII (`Ｗi-Fi`), the script l of `mℓ` and a Greek word with a
+Latin letter (`ΗΟΤΕL`) are still MAJOR there: display text by the same reasoning, left as they are (only the ordinals
+were asked for; a superscript letter is the nearest case, its quieting John's call).
 
 Persistence targets (0.1.7): the install-script test also fails on what makes
 an AI agent, an editor or GitHub Actions run something later — writing an
@@ -1244,6 +1352,696 @@ string array the view reads is a sign of its own (`string_array_line`,
 `_SA_TECHNIQUE_REASON`: CRITICAL at install, a strong import-time reason) —
 the technique, whatever the tool's names. It won back 41 of the holdout's
 56 lost verdicts (§12).
+
+#### SC-EVAL-DECODE: proven visible execution (FP-PDFJS-DECODE, 0.1.9)
+
+SC-EVAL-DECODE keeps BLOCKER unless a narrow proof establishes the exemption.
+A RegExp receiver must be a literal, an intact global construction, or a single
+binding whose uses preserve that proof; members and optional calls are not
+proven. Both the literal fast path and tree path require file-wide integrity.
+Any direct eval (including `eval("require")`), unresolved dynamic code,
+reflection that can reach a regex, unknown computed property, or write to a
+protected constructor, prototype or encoder closes the exemption. The tree can
+prove a constructor/prototype read unrelated for primitive literals and fresh
+containers. Above 2 MB a conservative lexical guard replaces that proof.
+
+A round trip requires a single, unchanged encoding of literal source text and
+an untransformed template passed directly to child_process `exec`/`execSync`.
+The entire command must be plain `node`, one `-e`, `--eval` or `-p` flag, and
+one quoted argument. That argument is parsed as exactly one supported
+`eval`, `Function(…)()`, `new Function(…)()` or `vm.runInThisContext` expression
+with the matching built-in decoder. Bindings, additional statements, command
+options, shell transformations, tagged templates, stored commands, unknown
+computed keys and encoder mutations retain BLOCKER. Proof work is bounded;
+exhausting it leaves the warning intact.
+
+Visible source is checked for unresolved dynamic execution before the
+install-script risk heuristic is consulted. Nonliteral imports/require and
+child commands are refused; eval/Function/vm and timer facilities are
+conservatively refused even where a nested literal might eventually be
+provable. A proven benign source is INFO; a risky source retains its risk
+severity and reasons. Every accepted round trip on a line contributes its own
+finding, including those before or after an unproven BLOCKER. Order and
+minification do not discard a stronger result.
+
+This external-review amendment supersedes the original `eval("name.path")`
+relaxation and broad template-hole exemption. It intentionally gives up
+precision where integrity or the complete child program is uncertain. Real
+pdf.js files containing those facilities can therefore remain BLOCKER.
+Python behavior and the rule-set assignment are unchanged. Acceptance cases
+are shared in `rust/crates/lazaret-engine/tests/data/decode-review.json` and
+run from Rust, Python, npm and native/WASM parity tests, including both sides
+of the 2 MB boundary. Fixtures are inert text and are never executed.
+
+#### Model files: what loading one runs (FP-MODEL-FILES, 0.1.9)
+
+A PyTorch checkpoint is a zip by design (torch.save: `<archive>/data.pkl`, the storages as `data/<n>`, `version`,
+`byteorder`), so every repository and package that shipped one was SC-NESTED-ARCHIVE (MINOR: WARN) — scan-all's run
+of Oct 20 gave `github:ObsidianArch02/fireredasr2s-mlx` WARN for its `golden/golden.pt` alone — while the real risk
+went unread: loading a checkpoint (torch.load without `weights_only=True`, a Lightning `.ckpt`, joblib.load,
+pickle.load, numpy.load with `allow_pickle=True`) unpickles it, and a pickle runs whatever its globals name and its
+REDUCE, BUILD, NEWOBJ, INST and OBJ opcodes call. The engine now reads a model file's pickles for what they would
+run, never unpickling them (`rust/crates/lazaret-engine/src/pickle/`, RUST_ENGINE.md):
+
+- **Which files.** By content, whatever the name: a zip whose first member is `<archive>/data.pkl` (torch.save
+  writes it first), an `.npy` (numpy.savez) or a pickle by its name (pandas' `to_pickle('frame.pkl.zip')`, whose one
+  member `read_pickle` reads: a zip of more than that pickle keeps SC-NESTED-ARCHIVE); PyTorch's legacy stream (its magic number pickled, then four more
+  pickles) and its oldest tar; a pickle stream of protocol 2 to 5 (PROTO and an opcode); zlib or gzip around a
+  pickle (joblib's compressors); a protocol 0 GLOBAL at the start of text that reads to its STOP. By name (`.pkl`,
+  `.pickle`, `.pck`, `.pcl`, `.joblib`, and those before a compressor's extension): a pickle of protocol 0 or 1,
+  and bzip2, xz, lzma or lz4 around one, which the engine cannot decompress. safetensors, ONNX, plain `.npy` data
+  and the like hold no code and are not model files to Lazaret.
+- **What is read.** Every pickle the loader would unpickle: each `.pkl` member of a checkpoint's zip (a second
+  `data.pkl` too; the members are found through the central directory, as miniz finds them, stored or deflated:
+  lazaret-verify's `inflate`, pratique's), the legacy stream's five pickles, the tar's `pickle`, `storages` and
+  `tensors` (with the raw bytes between their pickles counted from the storage types' element sizes), an `.npy`'s
+  object array (its header's dtype holds an `O`), each object array of an `.npz`, a joblib file's pickle with each
+  `NumpyArrayWrapper`'s array bytes after its BUILD (joblib's `read_array`: a padding byte and its padding, then
+  shape × itemsize bytes; an object array's own pickle), and the bytes handed to `torch.storage._load_from_bytes`
+  (how PyTorch pickles a storage with plain pickle) or to `pickle.loads` and the like, read as a file of their own.
+  The opcodes are read as CPython's unpickler reads them (every opcode of protocols 0 to 5, the memo, marks as its
+  fences, Python 2's names through `_compat_pickle`'s mappings), on values that stand for what it would build.
+- **What a global is.** The globals a tensor checkpoint is rebuilt from — PyTorch's own weights-only unpickler's set
+  (`torch/_weights_only_unpickler.py`: `_rebuild_tensor_v2` and the other rebuild functions, the typed and untyped
+  storages, `torch.Size`, `torch.device`, the dtypes, layouts and qschemes, `collections.OrderedDict`,
+  `_codecs.encode`, `builtins.bytearray`, `set`, `complex`) — numpy's own pickling functions in numpy 1 and 2 naming,
+  joblib's array wrappers, TorchScript's builders and `__torch__` classes, and constructors of plain data that run
+  nothing else (`builtins`' types, `collections`, `datetime`, `decimal`, `fractions`, `uuid`, `pathlib`,
+  `argparse.Namespace`, `types.SimpleNamespace`, `functools.partial`, `operator.getitem` for typing's aliases,
+  copyreg's reconstructors), pyarrow's pickling helpers (an Arrow array, chunked array, table, record batch, schema,
+  field, type, scalar or buffer pickles as `_restore_array`, `chunked_array`, `_reconstruct_table`,
+  `_reconstruct_record_batch`, `schema`, `field`, `type_for_alias` and the type factories, `scalar`, `py_buffer`:
+  pandas 3's Arrow-backed strings, a Hugging Face dataset's table), pandas' Arrow extension types' deserializers and
+  dateutil's and pytz's zones are `PICKLE_SAFE_GLOBALS`: a model of the formats, what PyTorch itself trusts to load,
+  not an exemption by package. The data types of modules of code, named exactly (`PICKLE_DATA_GLOBALS`: an enum or a
+  named tuple such as `http.HTTPStatus`, `signal.Signals`, `socket.AddressFamily`, `os.stat_result`,
+  `time.struct_time`, `subprocess.CompletedProcess`), are data; the rest of those modules stays code, and so does an
+  attribute reached through one of them (`signal.Signals.__new__`). A member of those enums is data by the exact name
+  a pickle writes for it (`PICKLE_DATA_MEMBERS`, FP-MODEL-FILES-PY311): Python 3.10 and 3.11.0 to 3.11.4 pickle a
+  member of an enum made by `IntEnum`/`IntFlag._convert_` (signal's `Signals`, `Handlers` and `Sigmasks`, socket's
+  `AddressFamily`, `SocketKind`, `MsgFlag` and `AddressInfo`, ssl's `_SSLMethod`, `Options`, `AlertDescription`,
+  `SSLErrorNumber`, `VerifyFlags` and `VerifyMode`) by the module-level alias `_convert_` exports
+  (`GLOBAL 'signal SIGTERM'`: enum.py's `_reduce_ex_by_name`, `_reduce_ex_by_global_name`), and 3.11.0 to 3.11.4 a
+  member of another (`ssl.TLSVersion`, `ssl.Purpose`) as `getattr(ssl.TLSVersion, 'TLSv1_2')`, read as the dotted
+  `ssl.TLSVersion.TLSv1_2`; 3.11.5 and later write the class called with the value (`signal.Signals(15)`), data
+  already. The 202 names are every constant CPython's `signalmodule.c`, `socketmodule.c` and `_ssl.c` can export on
+  any platform (3.10.0 to 3.14.6) that those enums' filters take, `ssl.PROTOCOL_SSLv23`, and `TLSVersion`'s and
+  `Purpose`'s members; each interpreter's own list (3.10, 3.11.1, 3.11.4, 3.11.17, 3.12, 3.13, 3.14, Linux x86-64 and
+  arm64) is within it. Such a global is data only where it is kept: pushed, stored, memoized, put in a container,
+  a dict's key (an int is no special method's name), handed to a call or a BUILD. Called (REDUCE, OBJ, INST, a
+  helper's call of it; APPEND, APPENDS or ADDITEMS calling the `extend`, `append` or `add` the pickle gave an object,
+  which pickle's `load_append`, `load_appends` and `load_additems` look up on it: the reader keeps, for each object,
+  what its BUILDs' states (their dicts and slots, a slot state's `__dict__`, and a tuple state's dicts), SETITEM on it
+  and the helpers that set an object's attributes from a state — torch's `_rebuild_parameter_with_state` and
+  `_rebuild_from_type(_v2)`, `types.SimpleNamespace` — gave it under those names; and, for the whole file (`AnyGiven`,
+  noted where the pair is written, whatever the dict becomes), every member written under the name `extend`, `append`
+  or `add` wherever a dict may be built or filled — DICT, SETITEM and SETITEMS on anything, a call's arguments (a name
+  beside a member, as `_operator.setitem(d, 'extend', m)` and `dict.setdefault` take them, and a 2-item tuple or list
+  in a list or tuple argument, as `dict.update` does), a list or tuple state each of whose items is a 2-item tuple or
+  list (`torch.nn.Module.__setstate__`'s `__dict__.update`; any other tuple state only at its attribute positions, the
+  halves of a (state, slots) pair and `functools.partial`'s dict), a helper's pairs — and, only where a dict is or
+  becomes an object's attributes (a BUILD's state and its halves, a helper's state, SETITEM on an object that is no
+  plain mapping, a dict installed as an object's `__dict__` by reference and filled later, followed by its address up
+  to 65,536 such dicts), an object the pickle computed that may be called under a key it computes (in a state of pairs
+  no helper reads, its literal names only), which APPEND, APPENDS or ADDITEMS on anything but a list, set, dict or
+  tuple the pickle built calls, since an alias the reader does not follow — a memo entry,
+  `operator.getitem((obj,), 0)`, `logging.getLogger('x')` twice, an enum's member, joblib's memoised wrapper — may
+  reach the object given it; an object the pickle computed given so, or a mapping of attributes it computed, passes no
+  member over. A plain dict keyed by an enum's member or a class is data: Python writes an object's APPENDS before its
+  own state, but another object's dict may come before them (a deque after `{socket.AddressFamily.AF_INET: …}`), so a
+  key the pickle computes counts only where it may name an attribute. Three kinds of file Python writes still read as
+  code, as on base: an object the pickle computed under a key it computes in the items of a dict subclass or an
+  OrderedDict subclass (no plain mapping by its name: `Bunch` and `ModelOutput` serve their items as attributes), with
+  a member kept, and a member under the literal name `append`, `extend` or `add` anywhere (an object's attribute of
+  that name, `SimpleNamespace(extend=…)`, a plain dict's key), and an object whose own state (a `__getstate__`'s dict)
+  is keyed by an enum member or another object the pickle computes and holds an object, with a member kept elsewhere
+  (CRITICAL as on base, where the first amendment read it SC-TRUNCATED), each before a deque or a list subclass's
+  APPENDS. Known
+  limits, passed over (parity with base is backlog PY311-MEMBER-PARITY): a member under a key the pickle computes, in
+  a dict, a state or a state of pairs (`[(Transport.TCP, SOCK_STREAM)]`, `list({int: SIGTERM}.items())`,
+  `{Transport.TCP: AF_INET}` as a state); a member a dict a call fills gives by a key the pickle computes or through a
+  mapping or iterable the pickle builds (`setitem(d, str(b'extend', 'ascii'), m)`,
+  `dict.update(d, [(<computed>, m)])`, `dict.update(d, OrderedDict([('extend', m)]))`, `dict.fromkeys`, `zip`,
+  `setitem` on a dict subclass, `getitem((m,), 0)` as the value); and one under a key
+  `codecs.encode('rkgraq', 'rot13')` makes. Each for one reason: every `PICKLE_DATA_MEMBERS` name is a plain int or
+  str enum member, none is callable, so calling one raises TypeError and runs nothing. Looking at what objects are
+  given and calling what APPEND calls have their own count, `GIVE_WORK`, apart from the reading's other looks
+  (`STATE_WORK`): past it nothing more is looked at or called and no member is passed over; an object's record full is
+  not looked at again (a record only unseen, for a state the pickle computed, is); and an APPEND whose call is not
+  made, or on an object part of whose state the reader did not look at for a bound of its own (the looks spent, the
+  record full, a container's items past what it keeps), is SC-TRUNCATED: what a bound of the reader's hides from an
+  APPEND is said, not passed over; a dict a state holds twice is looked at once, and a global of no helper's model
+  called again with items of no object, of the same text kind and number, is not called again), made (NEWOBJ, a
+  reconstructor's class, the class numpy's `_reconstruct`, `_internal._reconstruct` and `_mareconstruct`,
+  `array._array_reconstructor`, `__pyx_unpickle_SeedSequence`, torch's `_rebuild_wrapper_subclass` or a joblib array
+  wrapper's state make an object of), changed (BUILD, SETITEM(S), APPEND(S) or ADDITEMS on it) or given to a special
+  method, it is code as before, and so is every member of a pickle that calls an object it computed
+  (`functools.partial(signal.SIGTERM)()`: the call's target is not followed, so nothing in it is passed over) or that
+  calls what it may have given an object and the reader does not see (a dict subclass made by a call as a BUILD's
+  state, a dict past what the reader keeps), an attribute reached through it (`signal.SIGTERM.__class__`) and any name
+  that is not exactly one: the table holds (module, name) pairs, the module the first dotted part (`signal.SIGTERMX`,
+  `signal.signal`, `socket.socket`, `signal.Signals.SIGTERM`, `_signal.SIGTERM`, `ssl.SOCK_STREAM`, `http.client.OK`,
+  and `GLOBAL 'ssl.TLSVersion' 'TLSv1_2'`, whose module is no module). A dotted name is a member's only where Python
+  walks it: through the getattr form, and through GLOBAL and STACK_GLOBAL from protocol 4 on (find_class's
+  `_getattribute`); below protocol 4 and in numpy's `_ufunc_reconstruct` it is looked up with a plain `getattr`, which
+  raises, and it is code, once so everywhere in the file (`Book::plain_lookup`). Its kind stays its module's
+  (`Classes::is_member`, `Glob::member`): `findings` passes over it when nothing called, made or changed it and the
+  pickle calls nothing it computed or does not see. `ssl._SSLMethod` joins `PICKLE_DATA_GLOBALS` (3.12 writes
+  `ssl.PROTOCOL_TLS_CLIENT` as `ssl._SSLMethod(16)`). `getattr(<a global>, '<a name>')`, how pickle writes a bound
+  method (a datetime's zone: `getattr(zoneinfo.ZoneInfo, '_unpickle')`; an Arrow extension type's
+  `__arrow_ext_deserialize__`), is read as that dotted global and judged by its name, its call as that global's call;
+  `getattr` in any other use (on a value the pickle computed, in a chain, with a default, given a name that is not
+  one, put anywhere but as the callee of such a call, in either reading of a joblib array's bytes) stays builtins'
+  `getattr`, CRITICAL. A global that runs code or touches the system (`PICKLE_CODE_MODULES`, `PICKLE_CODE_GLOBALS`, a
+  dotted name through `PICKLE_CODE_ATTRS`) is SC-PICKLE-CODE (CRITICAL) in any use, and so are the shapes that run
+  code whatever the names: a callable given to a special method in a dict a BUILD or a call receives (the next BUILD
+  calls an object's `__setstate__`), BUILD on a class or function (it changes its attributes), a class made with
+  `type()`, a dotted name of code handed to a call (`import_string('os.system')`). Any other global made by NEWOBJ and
+  BUILD, or handed to a reconstructor as the class it rebuilds, is an object restored by its own class (sklearn's
+  estimators, an omegaconf config, a Lightning AttributeDict, Cython's `__pyx_unpickle_*`, pandas' `_new_Index`):
+  quiet. Called with text it is told to use — anything but a plain name: a command, code, a path, a URL, a module
+  path, bytes — it is SC-PICKLE-GLOBAL (MAJOR), and so is an object the pickle computed and then calls (a gadget
+  chain's shape); called with numbers, plain names and objects the pickle made (sklearn's
+  `Tree(n_features, n_classes, n_outputs)`, pandas' `StringDtype('python', nan)`), quiet. A global of the scanned
+  package's own modules (its module is a `.py` file of the project, the release, or the dependency's own folder under
+  `--deps`: `torch.save(model)` of the package's own class) is SC-PICKLE-GLOBAL as INFO, listed and setting no verdict
+  (John's decision of Oct 21): importing it runs that module's code when the file is loaded, and that code is the
+  package's, which the scan reads (`pickle::own_imports`, the `model_own` call, once the scan knows its files). Such a
+  function called with text it is told to use stays SC-PICKLE-GLOBAL, MAJOR, as any function's: the text decides what
+  the code does. An enum's member pickles as its class called with its value (`Source('https://...')`): it is such a
+  call, MAJOR, whatever the scan's source defines (model_file holds it in its `calls` for `model_own`, which reports
+  it beside the own module's INFO). A waiver of a plain enum's member lookup (the precision review of Oct 21) was
+  dropped by the external re-review of Oct 27: which file a module name is when the file is loaded is the loading
+  program's import path (sys.path set by its code, PYTHONPATH, `.pth` files, the folder it runs in, what is installed,
+  a project `enum.py`), which no scan of the files establishes.
+- **What cannot be read** is SC-TRUNCATED (INCOMPLETE): a pickle cut short or garbled (what ran before the cut is
+  reported too: a payload before a deliberate break, nullifAI's shape), a joblib array whose shape or dtype cannot be
+  read or that runs past the file's end, a compression the engine cannot undo, a member in a zip method it cannot
+  read, a model file other than a zip larger than the source-size limit (a pickle, the legacy stream: by its first
+  bytes, as a source file over the limit is), a reading past its bounds. A checkpoint whose zip holds a member that
+  is not the format's by its content keeps SC-NESTED-ARCHIVE beside its findings; a read one has none.
+- **The external review of Oct 21 (H1–H7, M1–M4).** Each place the reader decided less than the loader reads:
+  - *An .npy header* (`pickle/npy.rs`) is read as numpy reads it: `ast.literal_eval`'s grammar (escapes, implicit
+    concatenation, comments, a duplicate key's last value, Python 2's `3L`), the header's three keys exactly, and its
+    `descr` by numpy's dtype grammar (`descr_to_dtype`: a string's type codes and names, byte order, sizes, a
+    datetime's unit, a subarray's `(1,)` or count, comma-separated fields; a (dtype, shape) tuple; structured lists
+    at any depth, a field's (title, name)). Object (`'object'`, `'(1,)O'`, `'\x4f'`, a structured `object` field)
+    reads the array's pickle; numeric for certain is quiet; anything it cannot place is SC-TRUNCATED, and an `.npz`
+    with such a member keeps SC-NESTED-ARCHIVE. A joblib array's dtype goes by the same grammar.
+  - *A zip's members* (`zip::entries`, with FP-NESTED-ARCHIVE's review of Oct 21): the union of what every common
+    unpacker finds (Python's zipfile, miniz, adm-zip, yauzl, jszip, unzipper's directory reader and its streaming
+    `Parse`, Info-ZIP's unzip), and `ambiguous`, why they may not agree: the end record's count, the directory's
+    declared size, its offset and `end - size` disagreeing (every entry inside the declared size is read, and those
+    that follow it); a zip64 locator, looked for always, whose record is not the end record's values or not where
+    zipfile reads it; more than one end record a reader takes (the last, and any whose comment runs to the file's
+    end); a local header that is not its directory entry's (name, method, flags, sizes: the local one is a member
+    too); a member no directory lists (the local headers walked from the first byte); bytes before the first member,
+    between the members and the directory or after the end record; members whose data overlap; a name with a NUL
+    (zipfile's name, cut there, is a member too). A model file's ambiguous zip is SC-TRUNCATED and keeps
+    SC-NESTED-ARCHIVE, and every member any view finds is read. Each entry carries the directory's `made_by` and
+    `external` attributes (`unix_mode`, the upper 16 bits when not zero, whatever the creator; `executable`;
+    `special_kind`, a type but a regular file's: FP-NESTED-ARCHIVE's reader). A zip64 record that agrees with
+    its end record is no ambiguity: every reader lists the same members (a checkpoint past 4 GiB has one). The
+    registry's streamed read keeps every member's local header (`_MODEL_HEADERS`, 16,000,000 bytes).
+  - *A legacy tar's members*: every copy of a name is read (tarfile's `getmember` takes the last); two `storages` or
+    `tensors` records are SC-TRUNCATED; a name twice keeps the archive opaque.
+  - *Nested loads*: a byte string handed a loader past the 64 the reading queues, past three levels, or past the
+    inflate budget (the copies are charged to it) is SC-TRUNCATED, not passed over.
+  - *What is the format's* (`read_zip`): a checkpoint's `data.pkl` and its storages `data/<n>`; its records
+    (`version`, `.format_version`, `.storage_alignment`, `.data/version`: a number; `byteorder`: `little` or `big`;
+    `.data/serialization_id`: an id), read and held to that; a TorchScript archive's (one with `code/`)
+    `constants.pkl`, `constants/<n>`, `code/**.debug_pkl`, and `code/**.py`, scanned as a dependency's Python file
+    (its findings named for the member); an `.npz`'s `.npy` members; pandas' one member. Any other member keeps the
+    archive opaque (SC-NESTED-ARCHIVE), is read as a pickle when its bytes are one, whatever its name (PROTO, a
+    protocol 0 GLOBAL, PyTorch's legacy magic, or bytes that read to a STOP), and is reported as a program or an
+    archive (SC-BINARY, SC-NESTED-ARCHIVE, named for the member) when its first bytes are one.
+  - *BUILD state*: a pair that gives a special method a callable (a dunder key, or a key the pickle computes) is
+    kept past a container's bound (`keep_pair`; a list's or a tuple's (key, value) pair too: dict.update reads a list
+    of pairs); one even MAX_KEPT cannot keep marks its container lost; a BUILD on an object an earlier BUILD gave a
+    `__setstate__` is that callable's call; the look through a state or a call's arguments goes through containers
+    only (16,384 a look, 32 deep, 50,000,000 items a reading), and what it cannot see — a lost container, a computed
+    key with a callable value, its bounds — is SC-TRUNCATED. What the format's data constructors make (a safe global
+    named exactly, but not copyreg's, `type`, `functools.partial`, getitem or a TorchScript class) is no callable, and
+    a numpy scalar of a number, a date or bytes no name: LightGBM's class map, `{np.int64(0): np.int64(0)}`, is data.
+  - *A .pth file read whole* is read by the stream's byte-wise rule (`pth_bytes_issues`): a line counts when it
+    starts `import ` under any decoding site.py may use (UTF-8, or the locale's latin-1 fallback, whose `\x85` is
+    U+0085), the same on every route.
+  - *Byte ranges* (`zip::Bytes::note`) are charged once, as the union of what is given and asked for; a member's
+    window is clamped to its compressed size; an `.npy` member's header is read to its end and no further, its
+    inflation charged to `PICKLE_MAX_INFLATED`. The pieces a stream kept (one a member, each touching the last) are
+    joined in place, not copied whole per piece: a 50,000-member `.npz` in a release took more than 45 s.
+  - *First bytes too few to tell*: a file larger than the scan reads whose first bytes (fewer than a legacy tar's
+    magic at byte 257) start as a legacy checkpoint's member header is SC-TRUNCATED, not passed over (a member limit
+    set that low, as the review's streamed routes set it).
+  - *An extension code* (EXT1, EXT2, EXT4) is the global the loading program registered for it (none by default):
+    called or made, SC-PICKLE-GLOBAL, MAJOR; `__torch__.` names are trusted inside a TorchScript archive only.
+- **The external re-review of Oct 27 (5 HIGH).**
+  - *A Unicode Path name* (Info-ZIP's extra field 0x7075, version 1, its CRC-32 the raw name's; central and local):
+    a name of the member too (`zip::entries` adds it, not `listed`), so a storage's entry that Info-ZIP extracts as
+    `archive/hidden.pkl` is read as that member; a name that is not the raw one makes the listing ambiguous
+    (SC-TRUNCATED); one of a bad CRC or another version is ignored, as Info-ZIP ignores it.
+  - *A subtype constructor* (numpy's `_reconstruct` and `_mareconstruct`, torch's `_rebuild_wrapper_subclass`)
+    makes data only when the class it is handed is one of the format's own array or tensor types by its global
+    (`DATA_TYPES`); any other class's object may be callable, and a BUILD that installs it as `__setstate__` is
+    that object's call.
+  - *The enum waiver is gone*: a call with text is SC-PICKLE-GLOBAL, MAJOR, whatever the scan's source says of the
+    class (see above).
+  - *An executable member*: before any member the format owns is passed over (a storage, a record), one whose
+    directory entry a Unix system made with an execute bit keeps the archive opaque and is reported, SC-BINARY when
+    its first bytes are a program's, else SC-NESTED-ARCHIVE (MINOR) naming it and its mode. A member a local header
+    alone shows has no mode a reader trusts: its listing is ambiguous already (SC-TRUNCATED).
+  - *One budget for a listing*: at most 16 end records a reader may take (more is SC-TRUNCATED); each directory a
+    view names read once, whatever views name it; the entries and bytes all of them read charged to one budget
+    (twice `PICKLE_MAX_ENTRIES` and `PICKLE_MAX_DIRECTORY`), past which the listing is SC-TRUNCATED.
+- **The external re-review of Oct 27, its second (4 HIGH).**
+  - *Every Unicode Path field*: each 0x7075 field of a central entry and of its local header is read, and each one
+    a reader accepts (version 1, the raw name's CRC-32; a valid one after an invalid first too: Info-ZIP and
+    zipfile take the last valid one, yauzl the first, jszip the central directory's last) names the member; more
+    than one such field on an entry, in either header, makes the listing ambiguous (readers differ on which they
+    take), as does any name but the raw one. Every name is read as a member (an ordinary one unless it is the
+    format's own storage or record name).
+  - *Constructors handed a class, audited* (`vm::data_maker`; `PICKLE_SAFE_GLOBALS`, 290 entries). Their value is
+    data, never a callable, only when what decides its class is the format's own, positively:
+    - an object of the class they are handed, data only when that class's global is one of `DATA_TYPES` (numpy's
+      arrays, `array.array`, numpy's `SeedSequence`, `torch.Tensor`, `torch.nn.Parameter`): numpy's
+      `_reconstruct` (`multiarray`, `_internal`, in `numpy.core` and `numpy._core`), `numpy.ma.core._mareconstruct`,
+      `array._array_reconstructor`, `numpy.random.bit_generator.__pyx_unpickle_SeedSequence`,
+      `torch._utils._rebuild_wrapper_subclass`;
+    - an object of the class their BUILD state names, which joblib.load hands `_reconstruct` under numpy before
+      2.0: joblib's `NumpyArrayWrapper` and `NDArrayWrapper` (`subclass`), `ZNDArrayWrapper` (`init_args[0]`)
+      (read as joblib reads one, a `NumpyArrayWrapper` is the array it reads, an object the file loads);
+    - an object of their argument's own type when it is not the base type, data only when that argument is:
+      `torch.nn.parameter.Parameter` and `Buffer`, `torch._utils._rebuild_parameter`,
+      `_rebuild_parameter_with_state`, `_rebuild_device_tensor_from_cpu_tensor` (`data.to()`),
+      `numpy.ma.core.MaskedArray(data)` (followed 16 deep);
+    - an object of the class their pyarrow type names (an extension type's `__arrow_ext_class__`), data only when
+      that type is what pyarrow's or pandas' own constructors made: `pyarrow.lib._restore_array`,
+      `pyarrow.lib.scalar`;
+    - what they are handed, or a class, never data: numpy's `_DType_reconstruct`, `torch.jit._pickle`'s
+      `restore_type_tag`, `build_intlist`, `build_tensorlist`, `build_doublelist`, `build_boollist`, numpy's
+      `scalar` of dtype object;
+    - never data by their models: `copyreg._reconstructor`, `__newobj__`, `__newobj_ex__`, `builtins.type`,
+      `builtins.object`, `functools.partial`, `getitem`, numpy's `_ufunc_reconstruct` (a ufunc),
+      `numpy.random._pickle`'s three constructors, `torch._tensor._rebuild_from_type(_v2)`,
+      `torch.storage._load_from_bytes`, the text makers (`bytes`, `str`, `chr`, `codecs.encode`);
+    - the rest make an object of their own type whatever they are handed, none of them callable: numbers, text and
+      containers (`collections`' too: a `defaultdict` is no callable, its factory aside), datetime's, `Decimal`,
+      `Fraction`, `uuid`, `pathlib`'s, `zoneinfo`, pytz's and dateutil's zones, `SimpleNamespace`, `Namespace`,
+      `re._compile`, `logging.getLogger`, `numpy.dtype`, `numpy.ndarray`, `numpy.core.numeric._frombuffer`,
+      pyarrow's types, tables, batches, chunked arrays and dictionary scalars, torch's dtypes, layouts, devices,
+      storages and its other tensor rebuilds (a tensor made from a storage, numpy's bytes or sizes).
+  - *A member's Unix mode, whatever system made it*: the upper 16 bits of the external attributes, when not zero,
+    are judged whatever the creator (Info-ZIP applies them for Unix, VMS, Acorn, Atari, AtheOS, BeOS, QDOS and
+    Tandem, and for FAT when they agree with its DOS bits): an execute bit keeps the archive opaque (SC-BINARY or
+    SC-NESTED-ARCHIVE, as above). numpy's and zipfile's 0600 or 0644, torch's
+    writer's 0, joblib's: none.
+  - *A member's file type*: before any member is passed over as a storage or a record, its type from those bits: a
+    regular file (or none given) only; a symlink, a directory, a device, a FIFO or a socket keeps the archive opaque
+    and is SC-NESTED-ARCHIVE naming it and its type (Info-ZIP extracts a symlink's body as its target).
+- **A zip read by range, whatever its size** (John's decision of Oct 21). A checkpoint is its storages, hundreds of
+  MB, and a few KB of pickle; reading it whole up to the source-size limit made every checkpoint over 16 MB
+  INCOMPLETE. The zip reader reads its bytes through `zip::Bytes`, the whole file or the pieces of it a host read:
+  its end records (the last 65,557 bytes, and the zip64 locator and record), its central directory (at most
+  `PICKLE_MAX_DIRECTORY`, 16,000,000 bytes), each `*pkl` member's local header and bytes, an `.npy` member's first
+  128 KiB (more when deflate's empty blocks hold its header back) and an object array's whole, never a tensor
+  storage. What it needs and was not given is noted (`Bytes::needs`), and `pickle::read_ranges` answers the ranges
+  to read before it asks again; a host reads them and asks again, at most `PICKLE_MAX_READS` (8) times, the last of
+  which makes what is still needed SC-TRUNCATED. The reading is the reading of the whole file: the same calls of the
+  same reader, on bytes that are all there or not yet (`reading_by_range_is_reading_the_whole_file` holds them
+  alike); what a reading may ask for in all is bounded (`range_cap`: `PICKLE_MAX_INFLATED` + `PICKLE_MAX_DIRECTORY`
+  + 1 MiB), and a member past what it reads is SC-TRUNCATED without its bytes being read. A project scan and
+  `--deps` read by range from the disk (collect_file's `{"need": {"read": "ranges"}}`, answered with every range read
+  so far: core's `_read_ranges`, npm's `readRange`; the dashboard, which holds an upload's first bytes, reads one as
+  before), a `.pth` checkpoint over the limit too. The registry reads an archive's members as a stream, once: an
+  oversized member whose first bytes are a zip model file's is read on as the stream passes (`_ZipModelKeep`: its
+  first 64 KiB, each `*pkl` and `.npy` member by its local header, its last 16 MB for the end records and
+  directory) and handed to the engine as its last read (`model_file` with `pieces`), so a directory that names
+  bytes the walk of local headers did not keep is SC-TRUNCATED, never quiet.
+- **A `.pth` file too large to read whole is read in chunks** (John's decision of Oct 21; `.pth` is PyTorch's usual
+  extension, and every `.pth` is checked, whatever its place or size). `binary::pth_stream` keeps, byte-wise and on
+  the safe side whatever the decoding, each line site.py runs: one that starts `import ` or `import\t` (after a
+  UTF-8 byte order mark on the first line), or a part of one that str.splitlines() splits off (after `\x0b`,
+  `\x0c`, `\x1c`–`\x1e`, `\x85`, UTF-8's U+0085, U+2028, U+2029), from its import start to its end, at its line
+  (lines end at `\n`, `\r` and `\r\n`, as pth_issues numbers them); between chunks the host keeps its state (the
+  line, a `\r` at a chunk's end, the current line's last 16 bytes or what is kept of it). `pth_kept_issues` checks
+  each kept line as `pth_issues` checks one, at its line in the file. A line longer than `PTH_MAX_LINE`
+  (1,000,000 bytes), or kept lines past `PTH_MAX_KEPT` (16,000,000 bytes) in all, is SC-TRUNCATED; the rest of the
+  file is read on. The routes: a project scan and `--deps` (collect_file's `{"need": {"read": "pth"}}`, answered
+  with the lines: core's `_stream_pth`, npm's `streamPth` over `readRange`, a MiB at a time), the registry (the same
+  one pass an oversized member gets, `_oversized_member`, beside `_ZipModelKeep`). A 200 MB `model.pth` checkpoint
+  is then judged by its pickle (by range) and by its import lines (streamed): quiet when both are benign. Its other
+  lines are paths to site.py and are not scanned as Python source in the registry, as a `.pth` read whole is.
+- **Plain pickle.load over a joblib file.** joblib skips an array's bytes after its wrapper's BUILD; `pickle.load`
+  would read them as opcodes. When the first of them is an opcode (an unaligned array of joblib before 1.2, or a
+  crafted one), they are read that way too, a fork of the reading that changes nothing it shares, so a payload hidden
+  as array bytes for `pickle.load` is still read. Aligned arrays start with their padding byte (1 to 16: no opcode).
+- **Routes.** The registry (`repo.py`'s `_model`, the members read whole up to `MAX_MEMBER`, an oversized zip one by
+  the pieces `_ZipModelKeep` kept; `_model_own` in the second pass), a project scan and `--deps` (collect.rs: a
+  non-source file whose first 512 bytes `pickle::sniff` recognizes is read, a zip by range, another whole up to the
+  size limit; collect_file's `model`; `core.model_own_issues` and npm's `modelOwnIssues` over the collection), one
+  engine for both packages.
+- **Bounds.** One pass, a step of the call's budget per opcode; `MAX_MEMO` 2,000,000 memo entries, `MAX_STACK`
+  4,000,000 values, `MAX_KEPT` 2,000,000 container items kept in all (`ITEMS` per container; one past it is marked so
+  and its text counts as unknown), 256 values looked at per call's arguments, `MAX_FORKS` 100,000 forks of
+  `MAX_FORK_OPS` 65,536 opcodes, `PICKLE_MAX_INFLATED` 64,000,000 bytes decompressed, `PICKLE_MAX_ENTRIES` 100,000
+  zip entries, `PICKLE_MAX_PICKLES` 64 pickles one after another, nested bytes three deep, the format's helpers
+  handed helpers followed `MAX_DISPATCH` 16 deep; each limit reached is SC-TRUNCATED (the last, MAJOR). Values are
+  let go of in one loop, however deep the pickle nests them (two million nested lists, a million calls of what the
+  last returned), and none is put in a container it holds (`CYCLE_LOOK` 64 values looked at; one the look cannot
+  clear makes the container a suspect whose contents go with the reading), so nothing a reading makes outlives it.
+
+#### Media files and keystores: what a near-random file is (FP-OPAQUE-MEDIA, 0.1.9)
+
+SC-OPAQUE-BLOB (MAJOR: WARN) reports a binary file whose first bytes are near-random (byte entropy over
+`_OPAQUE_ENTROPY`, 7.2 bits, in its first `_OPAQUE_SAMPLE` bytes; at least `_OPAQUE_MIN_SIZE`): encrypted or packed
+data can be a second stage that code decodes and runs. Compressed sound, pictures, video and fonts are near-random
+too, and until 0.1.9 a list of first-bytes signatures (`BENIGN_MAGIC`, a font by its extension) exempted them, so
+that a PNG signature glued onto a payload was quiet while an MP3 that starts at its first frame, with no ID3v2 tag,
+was not. John's fp-tally over 261 GitHub scans (Oct 21) found 3 WARN verdicts SC-OPAQUE-BLOB set, 2 by it alone:
+`music/music1.mp3` (an MP3 with no ID3v2 tag), Pillow's `Tests/images/bw_gradient.imt` (an IM Tools image: a text
+header, then 2,560 bytes of a grey gradient, each of the 256 levels ten times — 7.9 bits a byte and nothing hidden)
+and `signing/tiles-foss-debug.pkcs12` (a debug signing keystore).
+
+- **By structure, never by name.** A near-random file is quiet only when its bytes are a format the engine walks, from
+  the first byte to the last (`rust/crates/lazaret-engine/src/media/`): the chains of MPEG audio and ADTS frames
+  (after their ID3v2 tags; ID3v1, APEv2 and Lyrics3 tags after them), Ogg pages and FLAC frames with their checksums,
+  a transport stream's packets, ISO media boxes (MP4, MOV, M4A, 3GP, HEIC, AVIF, JPEG 2000), RIFF and AIFF chunks
+  (WAV, AVI, WebP, RF64, big-endian RIFX), Matroska and WebM elements (clusters of unknown size too), PNG chunks with
+  their checksums, JPEG segments and their entropy-coded scans (further images after the first, as a multi-picture
+  file has them, and the MP4 a motion photo appends), GIF blocks, an Apple icon's elements; or the directory that
+  names where a file's parts are: TrueType and OpenType fonts and collections, WOFF and WOFF2, BMP (its pixels a JPEG
+  or PNG too), ICO and CUR, TIFF and BigTIFF (with their SubIFD, Exif and GPS directories), ICC profiles, TGA (raw and
+  run-length pixels, version 2's footer and the areas it names); and an IM Tools or Netpbm (PBM, PGM, PPM, PAM)
+  image's header and its width x height pixels. A directory's parts are claimed ranges: the file must hold each, and
+  every byte no part holds must be zero (padding).
+- **Fail closed.** Bytes the structure does not account for — a payload appended, a gap between a directory's parts,
+  a chain broken anywhere, a checksum that does not match, a file cut short, read whole or as its stream passes (but
+  an MP3's or AAC's last frame, after two whole ones), a first-bytes signature glued onto random bytes — leave the
+  file what it was, SC-OPAQUE-BLOB, now saying what it was read as and where it stopped being that ("read as PNG
+  image, it is not one to its end: bytes follow the image's end (IEND) at byte 7028"). So does a file no walker
+  reads. What a format allows past its end is allowed, and zero bytes, which hold nothing.
+- **Bounded (the review of Oct 27).** A walk to the end proves the file has the format's shape, not what its parts
+  hold, so a header and a payload in a part that walks would be quiet; three bounds keep what a real file has and
+  leave the rest opaque, the message naming the part:
+  - *shapes no real file has*: an ISO media file with no file type box (`ftyp`, `styp`, JPEG 2000's signature) and
+    no movie box (`moov`: QuickTime's older files start without `ftyp`), a box of size 0 (to the end) that is not
+    the media data (`mdat`), a PNG with no image data (IDAT), a JPEG image with no frame header (SOF) or no scan
+    (SOS), a GIF with no image, a transport stream with no program association table, a sound whose format names
+    no channels, rate or block size (a WAV's `fmt ` chunk, an AIFF's `COMM`), a font without the tables every font
+    has (`head` or `bhed`, `cmap`, `hhea`, `hmtx`, `maxp`, `name`), a font directory naming a table twice (the
+    re-review of Oct 27: a TrueType or OpenType font's, each font's of a collection, a WOFF's, a WOFF2's, and each
+    font's of a WOFF2 collection, whose own directory lists a table for each of its fonts), a TIFF directory naming a
+    tag twice, an icon whose images overlap;
+  - *free-form parts*, at most `FREE_MAX` (64 KiB) in all and a quarter of the file (`media::free`): ISO media's
+    `free`, `skip`, `wide`, `uuid` and unknown top-level boxes; a PNG's text chunks and those no one registered; a
+    JPEG's comments and the application segments no one registered (JFIF, Exif, XMP, ICC profiles, MPF, JUMBF,
+    Photoshop's and Adobe's are registered); ID3's private (PRIV), object (GEOB) and unknown frames (the tag's frames
+    are read now, its padding must be zero bytes) and a tag written unsynchronised; RIFF's and AIFF's JUNK, padding,
+    application and unknown chunks, and a LIST of no defined type; a TIFF's private tags (32768 and up) but the
+    well-known ones (Exif's, GPS's, IPTC, Photoshop's, ICC, GeoTIFF's, GDAL's, DNG's, ImageJ's and the microscopes');
+    a font's unregistered tables and a WOFF's metadata and private data; Matroska's Void elements and attachments; a
+    GIF's comments, plain text and application extensions but the looping (NETSCAPE2.0) and XMP ones; an Ogg stream
+    whose first packet names no known codec; a FLAC file's application and undefined metadata blocks (its padding must
+    be zero bytes); a TGA's developer area and an ICC profile's tags of no registered signature (`ICC_TAGS`: ICC.1's
+    and the private ones in wide use; the re-review of Oct 27, N4); and the free-form parts of a part walked as a
+    format of its own (an icon's PNG images), which count toward the file's 64 KiB and quarter;
+  - *raw samples*: the formats that store their samples as they are (Netpbm, IM Tools, TGA, an uncompressed BMP, PCM
+    in WAV, RIFX, RF64 and AIFF, and a WAV format of no name) are quiet only when the first `RAW_SAMPLE` (8 KB)
+    bytes of their samples follow one another: the smallest entropy of their differences at lags 1 to 4 under
+    `RAW_MAX_BITS` (7.0 bits a byte; Pillow's real images measure at most 6.5, random bytes 7.98). A noise-like
+    recording (applause) measures as random bytes do, and stays opaque.
+
+  What stays unbounded is what a codec decodes (an MP4's media data, an audio frame, a scan); a payload there is the
+  code that reads it out, which the scan reads.
+- **Formats still taken by their first bytes** (`UNWALKED_MAGIC`): PDF, PostScript and EPS, Photoshop, JPEG 2000's
+  bare codestream, DDS, GIMP's XCF, SGI, Sun raster, FITS, QOI and Radiance images keep 0.1.8's exemption: no walker
+  reads them yet, and leaving them out would make many PDFs opaque (of the 523 PDFs on the build machine, 222 are
+  near-random in the registry's sample, their first 8 KB, and 144 in a project scan's, their first 512 bytes). A
+  payload behind one of these signatures stays quiet, as it was.
+- **Any size.** A file is walked whole when it is read whole (up to the source-size limit; the registry's members
+  up to `MAX_MEMBER`), and as its stream passes when it is larger: the walk is a state machine fed chunks in order
+  (`media::feed`, the `media_stream` call), its state carried by the host between them (a project scan's
+  `collect_file` asks `{"need": {"read": "media"}}`: core's `_stream_media`, npm's `streamMedia`, a MiB a call,
+  passing over what the walk skips, so a 300 MB MP4 is read in a few KB; the registry's `_oversized_member` feeds an
+  archive member's stream as it passes). The host never passes over the file's end: where a part runs past it, the
+  host says the file ends there (its size, or the byte before where the walk goes on, read) and the walk fails (`feed`
+  checks that no part it began runs past the end), but for what a whole walk allows there too (an MP3's or AAC's last
+  frame after two whole ones): streamed or whole, a file walks alike. A format read by a directory that may lie anywhere (TIFF, ICO,
+  ICC) is read whole up to `MAX_CARRY` (1 MiB) when streamed; past it, it stays opaque. A TIFF's walk reads at most
+  `TIFF_ENTRIES` directory entries and `TIFF_VALUES` strip, tile and directory offsets (a million each), and an icon's
+  image once; a directory read as its stream passes (a font's or a collection's tables, a WOFF's, a bitmap's) names
+  at most `MAX_CLAIMS` (65,536) parts, which the walk holds sorted from the last and drops once passed (the re-review
+  of Oct 27, N1: dropping the first of a vector moved every other, so a collection of a thousand fonts of 4,096
+  tables each cost minutes): past them a file stays opaque, so that no file is a walk of hours. The size a directory
+  declares (a WOFF's, a BMP's) is checked at the file's end however its last chunks came (the re-review's N5: an
+  empty chunk before the end passed over it).
+- **Keystores are credential files.** A PKCS#12 keystore (DER: a version 3 PFX whose content is PKCS#7 data or
+  signed data, its unencrypted parts' bags read, BER's indefinite lengths too), a JKS (0xFEEDFEED) or JCEKS
+  (0xCECECECE) keystore (its entries and digest; a JCEKS secret key's SealedObject read as Java's serialization
+  writes it) or a Bouncy Castle BKS keystore (its salt, entries, end mark and MAC), read to its last byte, is
+  **S-SECRET** (`_KEYSTORE_RULE`, `_KEYSTORE_SEALED_RULE`, `_KEYSTORE_CERTS_RULE`): BLOCKER when it holds a private
+  or secret key in the clear part of its structure (JKS's and BKS's entry types, PKCS#12's key, shrouded-key and
+  secret bags), MAJOR when its entries are encrypted whole (keytool's PKCS#12 truststore: it may hold a key), INFO
+  for certificates alone (a truststore). S-SECRET is the credential family: report-only, never a registry's verdict
+  (SECRET_RULES; INFO in test code), BLOCKER in a project scan as a key in a `.pem` is (S-TOKEN). It is not hidden
+  code: a keystore read to its end is not SC-OPAQUE-BLOB; one with bytes after its end, or cut short, is no keystore
+  and stays opaque. A keystore is read whole, at most `KEYSTORE_MAX_BYTES` (4 MiB). Its parts have their shapes (the
+  review of Oct 27): a certificate is a DER Certificate spanning its bytes (a CRL a DER CRL), an encrypted key an
+  EncryptedPrivateKeyInfo, a key in the clear a PrivateKeyInfo (a BKS public key a SubjectPublicKeyInfo), a signed
+  PKCS#12's content is read as an unsigned one's; a shell around random bytes is no keystore. The bytes no structure
+  reads (encrypted data, a key's or a secret's bytes, a signature) are counted: past `KEYSTORE_ELEMENT_MAX_BYTES`
+  (16 KiB) in one part or `KEYSTORE_OPAQUE_MAX_BYTES` (1 MiB) in all, SC-OPAQUE-BLOB stands beside S-SECRET (the
+  `binary_classify` call answers with both; an RSA-16384 key is under 10 KB, a JDK trust store's certificates are in
+  the clear). A certificate is read for its shape, not its fields (the re-review of Oct 27, N2), so every byte of it
+  counts toward the total (the coordinator's ruling of Oct 27: a store of made-up certificates carries no more than
+  `KEYSTORE_OPAQUE_MAX_BYTES`), and its signature with its bytes past `CERTIFICATE_MAX` (16 KiB: real ones are 1 to
+  2 KB) is one part; an alias, and any other value
+  nothing reads — a PKCS#12's MAC salt, a bag's attributes, an algorithm's parameters, a signer's names, a recipient's
+  key, a serialized object's strings and names — counts past `NAME_MAX` (256) bytes, and a serialized object's
+  arrays count whole, as its byte arrays did. The JDK's `cacerts` (123 certificates: 133,175 bytes counted, its
+  largest part 513) and the 436 PKCS#12 files of `cryptography_vectors` stay under both bounds.
+- **Routes.** `binary.rs`'s `classify_more` (the `binary_classify` call's `whole`, `walked` and `more`): a file whose
+  first bytes would make it an opaque blob and start a walked format, or a keystore, needs the whole file (`Need`);
+  collect.rs's `classify_read` reads it whole or streams it; core's `classify_binary(whole=, walked=)` and npm's
+  `classifyBinary(…, {whole})` hand it over only when the first call asks; the registry passes a member whole, or
+  the walk of an oversized one's stream. One engine for both packages and the dashboard.
+
+#### The Gradle wrapper: a jar judged by Gradle's checksums (FP-GRADLE-WRAPPER, 0.1.9)
+
+Nearly every Gradle project commits `gradle/wrapper/gradle-wrapper.jar`, and `./gradlew` runs it on every build, on
+developers' machines and in CI, before Gradle itself is downloaded. SC-BINARY (MAJOR: WARN) reported each as a
+compiled artifact to review. In John's fp-tally over 261 GitHub scans (Oct 21) SC-BINARY set 9 WARN verdicts, 3 by it
+alone, this jar among its files. Gradle publishes the SHA-256 of each release's wrapper jar, and its own
+wrapper-validation action fails a build whose jar matches none, so the engine checks the jar as that action does
+(John's decision of Oct 21: "Yes, check checksums"; `rust/crates/lazaret-engine/src/gradle/`):
+
+- **Where.** A file named `gradle-wrapper.jar` exactly, in a folder `wrapper` in a folder `gradle` (any depth: an
+  Android library's `android/gradle/wrapper/`). A jar elsewhere or under another name is judged as any jar
+  (SC-BINARY), as before; so is a wrapper jar of which a caller gives only the first bytes.
+- **Quiet** when the jar's SHA-256 is one of `GRADLE_WRAPPER_CHECKSUMS` (the rule pack: version -> checksum, every
+  release Gradle publishes a wrapper checksum for, 382 versions to Gradle 9.9.0-milestone-2, 97 distinct
+  checksums), whatever version its properties name: the jar is regenerated only when `gradle wrapper` runs, so a
+  project's properties often name a newer Gradle than its jar's (mockito's names 9.4.1 and commits 8.14's jar).
+- **CRITICAL, SC-GRADLE-WRAPPER** (`_GRADLE_WRAPPER_RULE`) when it matches none, unless what follows says it can't
+  be verified yet (the review of Oct 27: whatever else matches no checksum is a changed wrapper). The message names
+  the list's size and newest version and the distribution named.
+- **MAJOR, SC-GRADLE-WRAPPER, "can't be verified"** (`_GRADLE_WRAPPER_UNVERIFIED_RULE`) only when the list cannot
+  judge it yet, and the jar is a wrapper jar: a zip holding `org/gradle/wrapper/GradleWrapperMain.class`. Then:
+  - *the next release*: the version the last `distributionUrl` names (the one `java.util.Properties`, and so the
+    wrapper, reads) is not listed, is in Gradle's release form (`^\d+\.\d+(\.\d+)?(-(rc|milestone)-\d+)?$`) and
+    may well be the next one Gradle publishes (`gradle::newer`): newer than its line's newest listed release by at
+    most two patches (Gradle publishes patches of an older line after newer releases: 9.8.1, on Oct 7 2026, came
+    after 9.9.0-milestone-2), a new line of the list's newest major at most two minors past it, or the next major's
+    first two lines. A nightly build (`9.9.0-20261021152326+0000`) when its base release is one of these and its
+    timestamp is no older than the list (`GRADLE_WRAPPER_CHECKSUMS_DATE`). Any other version (`99.0`, a version of
+    no form of Gradle's) is a changed wrapper's.
+  - *a listed distribution, a newer jar*: the properties name a listed release and the jar's manifest
+    (`Implementation-Version`, which wrappers before 5.0 write) names one that passes the same test
+    (`_GRADLE_WRAPPER_MANIFEST_NEWER`); no properties, or no version named, is CRITICAL.
+  - *no checksum published*: the manifest names a version of `GRADLE_WRAPPER_NO_CHECKSUM`, the versions Gradle
+    publishes no wrapper checksum for (3.3 to 4.0.2 with their release candidates and milestones, whose wrapper
+    jars were not reproducible: Netflix/Hystrix commits 4.0's; and 0.7 to 0.9.2, before Gradle 1.0), an explicit set
+    the update script derives from `versions/all` (the entries without a `wrapperChecksumUrl`).
+  - a Git LFS pointer committed in the jar's place; a jar not read whole (over the size limit) and no larger than
+    `GRADLE_WRAPPER_MAX_BYTES` (1 MiB). One larger is CRITICAL: the 290 distinct wrapper jars gradle/gradle
+    committed from 2012 to 2026 are 43 to 64 KB.
+- **The distribution** (the review of Oct 27): `./gradlew` downloads and runs the distribution its properties name,
+  so a genuine jar is judged by where that comes from too (`gradle::distribution_issue`): MAJOR over plain `http://`
+  or from what is not a URL (`_GRADLE_DISTRIBUTION_RULE`); INFO, listed and not counted, over HTTPS from a host
+  other than services.gradle.org without a `distributionSha256Sum` (`_GRADLE_DISTRIBUTION_HOST_RULE`: a company's
+  mirror, often; there is no allow-list of hosts); quiet with a `distributionSha256Sum`, which the wrapper checks.
+- **As Java reads the properties** (the re-review of Oct 27, N3). Gradle's `WrapperExecutor` reads
+  `gradle-wrapper.properties` with `java.util.Properties.load(InputStream)`, and `gradle::read` reads it so:
+  ISO-8859-1; `\r\n`, `\r` and `\n` each end a line, inside a continuation too; blank lines and `#` or `!`
+  comments skipped; a line ending in an odd number of backslashes goes on with the next, whose leading blanks are
+  dropped; the key ends at the first `=`, `:` or blank not escaped, then blanks and one `=` or `:` are dropped;
+  `\uXXXX`, `\t`, `\n`, `\r`, `\f` and `\x` meaning `x` are decoded in keys and values; the last of a key's
+  lines wins. The distribution judged (the version, the URL's scheme and host) is the last `distributionUrl` so
+  decoded. It can't be verified (MAJOR, saying why; a jar matching no checksum is then CRITICAL, no release named)
+  when the file is longer than `GRADLE_PROPERTIES_MAX_BYTES` (64 KiB: Java reads it whole, and a later
+  `distributionUrl` wins), holds a `\uXXXX` escape that is not one (Properties.load refuses it from Java 17; Java 8
+  and 11 read past the line), is read into another distribution by Java 8 than by later Java (whose reader, from Java
+  9, tells a comment wherever a logical line is still empty and counts no backslash in it: a lone backslash continued
+  onto a comment line, a comment ending in a backslash before a line of backslashes), or is there and not read (a
+  symbolic link, which Java follows and the scan does not). Held to Java itself: 50,038 generated files read by JDK
+  8, 11, 17 and 21's `Properties.load`, every one the engine reads giving the distribution and checksum each JDK that
+  loads it reads, and every one it refuses one that a JDK refuses or that two JDKs read otherwise.
+- **Every route reads the properties.** A project scan's `collect_file` asks for the jar whole and for the file
+  beside it (`{"need": {"read": "sibling", "name": "gradle-wrapper.properties", "limit": 65537}}`, one byte more than
+  is read, so that a longer file is told: core's `_read_sibling`, npm's `readSibling`, the dashboard's uploaded
+  folder), a regular file only; one there and not read is `{error}`. The registry keeps each release's
+  `gradle-wrapper.properties` (its first `GRADLE_PROPERTIES_MAX_BYTES` and one more; one over the member limit as
+  not read) and judges its wrapper jars once every member is read (`_gradle_wrappers`), as an archive may hold the
+  properties after the jar. `classify_binary` takes `props` (bytes, None, or `{"error": why}`).
+- **The list** is Gradle's, as gradle/actions ships it (`sources/src/wrapper-validation/wrapper-checksums.json`,
+  MIT; that repository also holds a proprietary caching component, not used), written into the pack in its
+  canonical form with where it came from and when (`GRADLE_WRAPPER_CHECKSUMS_SOURCE`).
+  `scripts/update_gradle_wrapper_checksums.py` (standard library only) refreshes it from
+  https://services.gradle.org/versions/all, each release's `wrapperChecksumUrl`, over HTTPS with redirects only to
+  Gradle's download hosts and GitHub; each checksum must be 64 hex digits, each new version's jar is downloaded and
+  must hash to it, a published checksum that changed or a version that disappeared is refused; the versions with no
+  `wrapperChecksumUrl` are written as `GRADLE_WRAPPER_NO_CHECKSUM`, the day as `GRADLE_WRAPPER_CHECKSUMS_DATE`;
+  `--from-json` reads gradle/actions' file instead (its date given with `--date`), `--check` checks the pack's list
+  offline. rust/NOTICE, which the wheels and the npm package carry (`native/NOTICE`), says where the list came from;
+  a checksum is a fact computed from a file, so no licence applies to it (John, Oct 28: a checksum is a fact, said where
+  it came from, not a copyright matter).
+- SC-GRADLE-WRAPPER is not compared with a predecessor's (`prior.NOT_COMPARED`, as SC-BINARY): a release that moves
+  to a Gradle newer than the list is not a new indicator.
+
+#### A compiled artifact by its bytes (FP-BINARY-BY-NAME, 0.1.9)
+
+SC-BINARY's description comes from a file's bytes: a program's magic (`EXEC_MAGIC`; in text, a DEX's whole magic;
+0xCAFEBABE a universal Mach-O or a Java class by the number after it), a Windows executable's `MZ` in bytes that look
+binary, or a compiled artifact's name (`COMPILED_EXTS`) unless the whole file is text (`binary::whole_text`, the
+review of Oct 27). Text throughout means: read whole, to the size limit (`classify_more` asks for the whole file,
+`Need`, when its first bytes are text; a file over the limit keeps the name's finding), no NUL byte, no window of 2 KB
+(`_LOOKS_SAMPLE`, overlapping by half) that looks binary (`looks_binary`), not an ar archive's text headers
+(`COMPILED_TEXT_MAGIC`, a static library or an import library), and for a format read from its end, no zip
+end-of-central-directory record (`PK\x05\x06`) in the last 65,557 bytes of a `.jar`, `.war`, `.ear` or `.apk`
+(`ZIP_READ_EXTS`: a Spring Boot executable jar is a shell launcher, then the zip, which `java -jar` finds from its end)
+and no UDIF trailer (`koly`) in a `.dmg`'s last 512. The registry classifies a member read whole only when its first
+2 KB look binary, so a name there seldom made text binary (a gap filed on its own: FP-BINARY-BY-NAME's review); the
+project scan, `--deps`, the npm CLI and the GitHub scan route classified every file that is not source, so text named
+`.node`, `.so`, `.dll` or `.class` was SC-BINARY there. The rule's other names, audited: `CONTAINER_DOCUMENT_EXTS`
+(`.docx`, `.odg`, `.epub`, …) are quiet only when their bytes are their container's, a zip's local header (gzip for
+`.svgz` and `.dia`: `CONTAINER_GZIP_EXTS`), else judged as any file (`container_bytes`); `.ts`, `.mts`, `.m2ts` are
+read as transport streams only when their bytes are one; a model file's extension is a hint its bytes must confirm.
+
+#### A protobuf file's descriptor generated code alone uses (FP-B64-PROTOBUF, 0.1.9)
+
+protoc-gen-es (protobuf-es 2.x) embeds each `.proto` file's serialized FileDescriptorProto in the code it generates,
+as base64, and hands it to the runtime: `fileDesc("Ci…", [deps])`, `fileDesc` imported from
+`@bufbuild/protobuf/codegenv2` (`codegenv1` in 2.0 to 2.2), required from it in the CommonJS the generator writes
+(`const { fileDesc } = require(…)`), or called as `(0, x.fileDesc)(…)` once TypeScript, Babel or esbuild compiled the
+file. SC-B64 ("Base64 blob (200+ chars) embedded in code", MAJOR: WARN) reported every such file — John's fp-tally of
+Oct 21 found it on `worker/src/gen/listentogether_pb.ts:13`.
+
+A descriptor is not inert: the runtime keeps it, and the program can read it back (`file_x.proto…`, a schema's
+`.file`, a registry's `getFile`), so text put in it is a payload any code of the program may take out and run. The
+review of Oct 27 showed it (B-1): a comment of the descriptor's source information read and handed to `eval`, `new
+Function`, `execSync` or `vm` went quiet, and on `--deps` and in the registry no other rule reports a dependency's eval
+of a variable. So the file scan keeps reporting SC-B64 (`scanfile.rs` reads no descriptor), and whether a finding is
+dropped is decided over the whole scan — a project, a `--deps` tree, a package: each read whole — where every file
+that could read the descriptor back is in hand: `core.b64_descriptor_pass` (the registry's `_b64_descriptors`
+phase, the npm package's `b64DescriptorPass`) asks the engine's `b64_descriptors` (`protodesc/usage.rs`) once, at the
+end, with the scan's JavaScript, its manifests, and the files that may hold script or say where modules are. A route
+that cannot (a file scanned alone) keeps the finding. A finding is dropped only when every run of its line that
+SC-B64 counts passes, and all of these hold (else it stays):
+
+- **Its bytes are one FileDescriptorProto, with no free text** (`protodesc.rs`, `file_descriptor`): read to its end by
+  descriptor.proto's structure, every field a known field of its message with its wire type (as of protobuf 30 with
+  editions 2024), the file's name a `.proto` path (no `..`), every name a protobuf name and every type name a dotted
+  one, the syntax `proto2`, `proto3` or `editions`, every text UTF-8, each named message's name once, nothing left
+  over, nesting at most 64 deep; and none of the fields that carry free text generated code never holds: no source
+  information (the file's field 9: comments of any length), no JSON name (a field's 10) but the one protoc derives
+  from the field's name (`json_name`: its `_`s dropped, the letter after each upper-cased; protoc-gen-es keeps it on an
+  extension — protovalidate's 8, protoc-gen-es's 2 — and it carries nothing the name does not), a default value of at
+  most 64 characters (`MAX_DEFAULT`; the longest of the 61 real descriptors the review measured was 12). Options are
+  read as well-formed fields (custom options are extensions of any number: protovalidate's rules, googleapis' HTTP
+  bindings); they are not bounded to a share of the descriptor (googleapis' files carry more options than structure:
+  a median of a third of the bytes, up to 78% of 511 measured).
+- **The literal is handed, whole, to the runtime's loader and bound as generated code binds it**: `(` before it and
+  `)` or `,` after it, the callee `fileDesc`, `x.fileDesc` or `(0, x.fileDesc)` (the pack's `_B64_DESCRIPTOR_LOADERS`
+  names the functions and their modules; `fileDesc` bound once by a value import, not aliased, or a destructuring
+  `require` of one of them and used only in calls; `x` bound once by `require` (the call its declaration's whole
+  value) or `import * as` and read only for properties not written to; `require` never rebound), followed by nothing
+  but its dependency list, and its value bound and nothing else: `export const file_x = fileDesc(…)` (a type
+  annotation allowed), `const file_x = …`, `exports.file_x = (0, x.fileDesc)(…)`.
+- **The descriptor is used only as generated code uses it, in every file of the scan**: `file_x` (or `m.file_x`) is
+  the first argument of the loader's `messageDesc`, `enumDesc`, `serviceDesc` or `extDesc`, an element of another
+  `fileDesc`'s dependency list, an argument of the runtime's registry constructors (`_B64_DESCRIPTOR_CONSUMERS`:
+  `createFileRegistry`, `createRegistry`, `createMutableRegistry`; protovalidate builds its registry so, which the
+  review's list did not name: without it protovalidate stays WARN), a name in an import's, an export's or a
+  destructured `require`'s list (not renamed), and in its own file `exports.file_x = file_x` or TypeScript's
+  `exports.… = exports.file_x = … = void 0`. Nothing else names it, no string holds the name, a declaration file is
+  types only, and no string but a module specifier names its file (a path handed to `fs`, `new URL`,
+  `require.resolve`: its text read). A file of a kind that holds script the file scan does not read
+  (`_SCRIPT_HOLDER_EXTS`: `.vue`, `.svelte`, `.html`, `.astro`, `.mdx` …) is read with them: its whole text for the
+  name, its script blocks, front matter, event handlers and template expressions as code.
+- **Its module is read for its members alone, wherever it may be loaded**: every specifier of the scan is resolved as
+  far as the scan can tell — a relative path (the folder it names too: its index, what its package.json's `main`
+  names), a tsconfig's or jsconfig's `paths` and `baseUrl`, a package the scan holds (any of its files: its `exports`
+  map may name any), a package a manifest declares by a version range or one of Node's (none of the scan's files);
+  anything else — undeclared, a `#` import, a name a manifest maps elsewhere (`file:`, `npm:`, a `browser` field) or
+  the code aliases (an object's key, a `find:`), a pattern — may name any file — with its last part read as a file's
+  name too and case ignored. Each module object that may be it is read only for its members (`m.y`, never written),
+  and none loads it whole: `import(…)`, `import.meta.glob`, a `require(…)` handed on or followed by anything but its
+  statement's end (`require(…)[k]`), a rest, computed or nested destructuring, `export * as ns`, a helper
+  (`__importStar(require(…))`, `__exportStar`), a `?raw` or loader-prefixed import (its text). A module that
+  re-exports it (`export * from`, `module.exports = require(…)`) is held to the same. And the module's own scope reads
+  no export by a name made at run time: `exports`, `module`, and in CommonJS `this` and `arguments`, only as
+  `exports.y`, `this.y`, `this && …` and `Object.defineProperty(exports, "__esModule", …)`.
+- **No code of the scan runs text or reaches the module registry**: no `eval`, `Function`, vm call or `with` but with
+  literals alone, no `.constructor(…)` call of text (`(() => {}).constructor(text)` is `Function`), no global looked up
+  by a name made at run time (`globalThis[x]`, `window[x]`), no module loaded by a name made at run time
+  (`require(x)`, `import(x)`, `createRequire`, `require.context`), no `require.cache`, `require.main`,
+  `module.children`, `module.parent`, `process.mainModule`, `process.binding`, and no module of
+  `_B64_RUNNER_MODULES` loaded (`child_process`, `worker_threads`, `vm`, `module`, `cluster`, `inspector`, `repl`,
+  `wasi`, by any name: `node:`, a subpath). A key or a method's definition of such a name (`eval: {` in a type,
+  protovalidate's `eval(val, cursor) {`) is not a reference to it; `c ? eval : x`, `f(eval)` and a call are. (So
+  `--deps` of a project whose dependencies build code or run commands keeps every descriptor's finding.)
+- **The loader is the runtime's** (B-3): no package.json from the descriptor's folder up maps `@bufbuild/protobuf` or
+  a module of it to anything but a version range (`npm:`, `file:`, `link:`, git, a URL, `workspace:`), under any key
+  that names it (its dependencies, `overrides`, `resolutions` and `pnpm.overrides` by `a>@bufbuild/protobuf`,
+  `**/@bufbuild/protobuf`, `@bufbuild/protobuf@^2`, its `browser` field); a package's scan does not carry its own copy
+  in its `node_modules`; no tsconfig or jsconfig of the scan has a `paths` entry that matches the runtime's modules
+  (`*` patterns too), a `baseUrl` that holds an `@bufbuild` folder, or an `extends` the scan did not read (a package's
+  config outside a `--deps` tree); no other file that tells a tool where modules are (`_B64_RESOLVER_CONFIGS`:
+  Babel's, SWC's, Deno's, Bun's, an import map) names `@bufbuild/protobuf`; no code has `"@bufbuild/protobuf…"` as an
+  object's key or a `find:` (a bundler's alias, rollup's and vite's `{ find, replacement }`, an import map in a page)
+  or a pattern that names `bufbuild`; and no code uses a module of the runtime whole (a module object written to or
+  handed on: `require("@bufbuild/protobuf/codegenv2").fileDesc = …` in another file).
+- **The scan read everything**: it did not stop, no JavaScript file, folder or script-holding file of it is
+  SC-TRUNCATED, unreadable or a link (`_B64_DESCRIPTOR_UNREAD`), no such file or module map was too large to read, and
+  in the registry no member a limit left unread or a text member not kept.
+
+The pass costs what one reading of the scan's files costs (B-2): the hosts do not ask it when no finding's file calls
+`fileDesc` (no finding could be dropped); each file is lexed once (twice for one that may hold JSX) and read in turn,
+what it loads, runs and names kept and its tokens dropped (memory holds one file's readings, and the findings'
+files'); each reading's names, brackets (each one's closing bracket and what it holds) and `void 0` chains are
+indexed once, so no question asked of a token walks the reading; the loader bindings, module objects and `require` are
+worked out once and kept; each literal's token is found by a binary search; each specifier is resolved once, and the
+files a module object, a load or a re-export may reach are found through an index of the keys a file may be named by
+(its path, its name, the folders above it), each key and each file visited once. Base64 that is not such a descriptor
+(code, a descriptor with bytes after it, a name that is not a `.proto` path, another message) and a descriptor handed
+to anything else are SC-B64 as before. No path or file name exempts anything (`gen/`, `_pb.ts` or not): file names
+decide only what more the pass reads (the kinds that hold script, the module maps), and what it could not read keeps
+the finding. What other generators write was looked at by generating real code from npm: protobuf-es 1.x
+(`proto3.makeMessageType`), ts-proto 1.40 to 2.18 (an object literal, with `outputSchema=true`), grpc-web with
+protoc-gen-js (jspb), protobufjs's pbjs (static and JSON modules) embed no descriptor as base64. ts-proto with
+`outputSchema=true` embeds a message-typed custom option's value as base64 (`ApiDoc.decode(bytesFromBase64("…"))`):
+another message, so SC-B64 when it is 200 characters or more, as before. @bufbuild/protobuf's own well-known types
+import `fileDesc` by a relative path (`../../../codegenv2/file.js`): a module named by its place, so they keep SC-B64.
+
+Residual (for John's call): a descriptor's options carry bytes of any kind by design, and a schema the descriptor
+made (`messageDesc(file_x, 0)`: what generated code exports and every user of it reads) holds the descriptor
+(`.file`, `.proto`); `getOption`/`getExtension` read a custom option's value. No rule on `file_x` can see that read:
+code that reads options so and runs them through a sink this pass reads (an eval, a `Function`, a vm call, a
+constructor, `child_process`, `worker_threads`) keeps the finding; one that writes them to a file something else
+runs later, sends them on, or hands them to `setTimeout` as a string does not. Where a module leads only at run time
+(`NODE_PATH`, a loader or `--import` flag, a bundler's alias the code computes, a `paths` mapping the scan did not
+read) the pass reads it as the scan's files say. A tree a project scan prunes (`node_modules` without `--deps`, a
+checkout's committed copy of the runtime among it) is not read: what it holds is not scanned either.
 
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
@@ -1747,9 +2545,45 @@ build script and a procedural-macro crate are SC-INSTALL-HOOK, CRITICAL; the
 strong reasons of the rest are SC-USE-RISK, read within `USE_RISK_CHARS` as
 `_use_time_code` reads (its counts join `useTime`). `//go:generate` lines are
 listed (SC-GO-GENERATE, INFO). A file no build of a dependent compiles (Go's
-`*_test.go`, `testdata/`, `vendor/`, a name with `_` or `.` first; a crate's
-`tests/`, `benches/`, `examples/`: `_never_built`) gets neither the reader
-nor the file rules. A package over `PACKAGE_CODE_CHARS` (300 million
+`*_test.go`, a name with `_` or `.` first, a file below a `vendor/` folder's
+own folders; a crate's `tests/`, `benches/`, `examples/`: `_never_built`)
+gets neither the reader nor the file rules; a Go test file's name ends in
+`_test.go` exactly, as Go reads it (`x_TEST.go` is built), and a package in
+`vendor/` itself (`m/vendor`) is the module's and is read. A package in
+`testdata/` is built when an import names it (F-06): the registry keeps a
+module's testdata `.go` files (`go_testdata`) and gives the Go reader those of
+a package its answer asks for (`wanted`: an import of the module's names it),
+decoded and counted against `PACKAGE_CODE_CHARS` only then, and asks again
+(`_testdata_wanted`, `TESTDATA_PASSES`); those it reads get the file rules
+too, one it asks for that was not kept makes the module INCOMPLETE, and the
+rest of `testdata/` is data. An import of another module's `testdata/`
+package, which that module's own scan leaves out, is SC-GO-TESTDATA-IMPORT
+(MAJOR), and so is one under the module's own path of a `testdata/` folder it
+does not have (a nested module's, which the zip leaves out: the reader is told
+the module's testdata folders). The Go reader reads each file as the Go toolchain reads its bytes
+(`go_text`, given beside the rules' text), leaves out a file a build
+constraint certainly confines to `ignore` (F-06: read as `go/build` reads the
+header; `//go:buildignore` is a comment and the file builds;
+docs/RUST_ENGINE.md §22), and numbers its findings as the rules number lines;
+a `.go` file its parser refuses makes the module INCOMPLETE (SC-TRUNCATED: a
+build may compile it), but for one in a `_`, `.` or `testdata/` folder no
+import names (Go builds it only when imported) and one that does not decode
+to text (its decoding's SC-TRUNCATED is the file's one). A `--deps` scan's
+vendor tree holds what `go mod vendor` copied: the packages a build compiles,
+which `vendor/modules.txt` lists, and the files their `//go:embed` patterns
+match, which may be `.go` files below them (a `testdata/` fixture; with a main
+module below `go 1.22`, the embeds of their tests too: cmd/go's `vendorPkg`). Each of its `.go` files but a test file or
+one named with `_` or `.` first gets the file rules (the path below `vendor/`
+begins with a module's path, which may hold a `testdata` or a `vendor`), but
+one in a `testdata/`, `_` or `.` folder only as a package modules.txt lists
+or one an import of a Go file read names (the project's or the tree's, a
+chain followed: `go_imports`; a main module whose go.mod says a `go` below
+1.23 builds an unlisted vendored package an import names, cmd/go's
+`importFromModules`); another is data, as in the registry
+(`_go_vendor_data`; a modules.txt that cannot be read, or lists no package,
+leaves every file read). The reader
+applies the rules above below each module's root, and reads every package it
+is given (`listed`). A package over `PACKAGE_CODE_CHARS` (300 million
 characters) is not read (SC-TRUNCATED): the reader holds all of it at once,
 and aws-sdk-go v1's 207 million characters of Go peak at 2.4 GB.
 

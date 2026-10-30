@@ -5,6 +5,7 @@
 // once it has it, what the file is to the scan. This module uses nothing of Node's.
 
 import { call, bytesText, issuesOf } from "./native.js";
+import { looksBinary } from "./binary.js";
 import { scanErrorIssue, truncatedIssue } from "./issue.js";
 import { REDACT } from "./redact.js";
 import { CONFIG_SCAN_CAP } from "./configsecrets.js";
@@ -44,19 +45,58 @@ export const pathIssues = (pairs) => pairs.map(([path, row]) => issuesOf(path, [
 /**
  * Collect one regular file (core._collect_file's): the walk's (fs.js collectFiles) and the dashboard's, which hands
  * over its uploads. `entry`: {rel, name, size, dep, read(limit): its first `limit` bytes (throws when it can't be
- * read; `ioError(e)` says whether an error is one), head(limit): the same, or no bytes when it can't be read}; dep:
- * false, true, or a Go or cargo vendor tree's [kind, rel]. Adds the file to `col`'s files, manifests, configs or pth,
- * and its findings to col.binaryIssues; col.maxFileBytes is the size cap.
+ * read; `ioError(e)` says whether an error is one), head(limit): the same, or no bytes when it can't be read,
+ * range(offset, length): optional, those bytes (fewer at its end; throws as read does), sibling(name, limit):
+ * optional, the first `limit` bytes of the regular file `name` beside it, or null when there is none (throws as read
+ * does; FP-GRADLE-WRAPPER: a Gradle wrapper jar's gradle-wrapper.properties)}; dep: false, true, or a Go or
+ * cargo vendor tree's [kind, rel]. Adds the file to `col`'s files, manifests, configs or pth, and its findings to
+ * col.binaryIssues; col.maxFileBytes is the size cap. An entry that reads by range has a zip model file (a
+ * checkpoint, an .npz) of any size read for its pickles, by the ranges the engine asks for (FP-MODEL-FILES).
  */
 export function collectEntry(entry, col, { ioError = () => false, strerror = (e) => String(e && e.message) } = {}) {
   const args = { rel: entry.rel, name: entry.name, size: entry.size, dep: entry.dep, cap: col.maxFileBytes,
-    configCap: CONFIG_SCAN_CAP, windows: WINDOWS, neumaier: false, redact: REDACT.on };
+    configCap: CONFIG_SCAN_CAP, windows: WINDOWS, neumaier: false, redact: REDACT.on,
+    ranges: typeof entry.range === "function" };
   const answers = {};
+  const pieces = [];
   let text = "";
   for (;;) {
     const got = call("collect_file", { ...args, answers }, text);
-    if (!got.need) { addCollected(got, col, entry.rel); return; }
+    if (!got.need) { addCollected(got, col, entry.rel, entry.dep, entry); return; }
     const { read: what, limit } = got.need;
+    if (what === "pth" || what === "media") {   // (a file too large to read whole, in chunks: a .pth file's lines
+      try {                                       // pth_stream, another's structure media_stream)
+        answers[what] = what === "pth" ? streamPth((off, len) => entry.range(off, len))
+          : streamMedia((off, len) => entry.range(off, len), entry.size);
+      } catch (e) {
+        if (!ioError(e)) throw e;
+        answers[what] = { error: strerror(e) };
+      }
+      continue;
+    }
+    if (what === "sibling") {              // (FP-GRADLE-WRAPPER: the file beside it, a wrapper's properties)
+      try {
+        const b = typeof entry.sibling === "function" ? entry.sibling(got.need.name, limit) : null;
+        answers[what] = b === null ? false : bytesText(b);
+      } catch (e) {
+        if (!ioError(e)) throw e;
+        answers[what] = { error: strerror(e) };
+      }
+      continue;
+    }
+    if (what === "ranges") {               // (every range read so far, their bytes as the text: core's)
+      try {
+        for (const [off, len] of got.need.ranges) pieces.push([off, entry.range(off, len)]);
+      } catch (e) {
+        if (!ioError(e)) throw e;
+        answers[what] = { error: strerror(e) };
+        continue;
+      }
+      answers[what] = pieces.map(([off, b]) => [off, b.length]);
+      answers.rounds = (answers.rounds ?? 0) + 1;
+      text = bytesText(concatBytes(pieces.map(([, b]) => b)));
+      continue;
+    }
     if (what === "sample") { answers[what] = bytesText(entry.head(limit)); continue; }   // (none when unread)
     let data;
     try {
@@ -70,17 +110,107 @@ export function collectEntry(entry, col, { ioError = () => false, strerror = (e)
   }
 }
 
+/** A .pth file too large to read whole is read this many bytes at a time (core.PTH_CHUNK). */
+const PTH_CHUNK = 1 << 20;
+
+/**
+ * FP-MODEL-FILES (John's decision of Oct 21): the lines site.py runs of a .pth file too large to read whole, read to
+ * its end through `range(offset, length)` PTH_CHUNK at a time -> {lines, cuts} (the engine's pth_stream; core's
+ * pth_stream_file).
+ */
+export function streamPth(range) {
+  let state = null, off = 0;
+  const lines = [], cuts = [];
+  for (;;) {
+    const chunk = range(off, PTH_CHUNK);
+    const got = call("pth_stream", { state, end: chunk.length === 0 }, bytesText(chunk));
+    state = got.state;
+    for (const l of got.lines) lines.push(l);
+    for (const c of got.cuts) cuts.push(c);
+    if (chunk.length === 0) return { lines, cuts };
+    off += chunk.length;
+  }
+}
+
+/** A file walked as its stream passes is read this many bytes at a time (core.MEDIA_CHUNK). */
+const MEDIA_CHUNK = 1 << 20;
+
+/**
+ * FP-OPAQUE-MEDIA: a file too large to read whole walked by its structure, read through `range(offset, length)`
+ * MEDIA_CHUNK at a time, passing over what the walk skips but never past its `size` (a part that runs past it is a
+ * file cut short) -> the walk's end: {is}, {not, why} or {unknown} (the engine's media_stream; core's
+ * media_stream_file).
+ */
+export function streamMedia(range, size) {
+  let state = null, off = 0;
+  for (;;) {
+    const chunk = range(off, MEDIA_CHUNK);
+    const got = call("media_stream", { state, offset: off, eof: chunk.length === 0 }, bytesText(chunk));
+    if (got.end !== null) return got.end;
+    state = got.state;
+    const end = off + chunk.length, next = got.next;
+    // (the file ends before where the walk goes on, its size given or its byte there read: it is cut short there)
+    if (next > end && (size !== undefined ? next > size : range(next - 1, 1).length === 0)) {
+      return call("media_stream", { state, offset: end, eof: true }, "").end;
+    }
+    off = Math.max(end, next);
+  }
+}
+
+/** Byte arrays one after another. */
+function concatBytes(parts) {
+  const out = new Uint8Array(parts.reduce((n, b) => n + b.length, 0));
+  let at = 0;
+  for (const b of parts) { out.set(b, at); at += b.length; }
+  return out;
+}
+
+/**
+ * FP-B64-PROTOBUF: the text of a file the descriptors' pass reads (a "holder" or a "resolver": scancollection.js
+ * b64DescriptorPass), read whole when it is asked for, as core's _disk_reader reads one: null when it is larger than
+ * the cap, cannot be read whole, or looks binary.
+ */
+function wholeText(entry, cap) {
+  if (entry.size > cap) return null;
+  let data;
+  try { data = entry.read(cap + 1); } catch { return null; }
+  if (data.length > cap || data.length !== entry.size || looksBinary(data.subarray(0, 2048))) return null;
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
+}
+
 /** What collect_file said a file is, added to `col`. */
-function addCollected(got, col, rel) {
+function addCollected(got, col, rel, dep, entry = null) {
   for (const i of pathIssues(got.issues)) col.binaryIssues.push(i);
   if (got.file) {
     const f = { path: got.file.path, content: got.file.content, lang: got.file.lang, dep: got.file.dep };
     if (got.file.vendor !== undefined) f.vendor = got.file.vendor;      // (its module or crate is read whole)
+    if (got.file.goContent !== undefined) f.goContent = got.file.goContent;   // (F-06: the Go reader's text)
     col.files.push(f);
   }
   if (got.manifest) col.manifests.push(got.manifest);
   if (got.config) col.configs.push(got.config);
   if (got.pth) col.pth.push(rel);
+  // (FP-MODEL-FILES) a model file read, the globals of no known kind it imports and the calls with text it holds:
+  // modelOwnIssues'
+  if (got.model) (col.models ??= []).push([rel, !!dep, got.model.imports, got.model.calls ?? []]);
+  // (FP-B64-PROTOBUF) a file that may hold script, or say where modules are: [rel, read() -> its text or null]
+  for (const key of ["holder", "resolver"]) {
+    if (got[key] !== undefined) {
+      (col[`${key}s`] ??= []).push([rel, () => (entry ? wholeText(entry, col.maxFileBytes ?? MAX_FILE_BYTES) : null)]);
+    }
+  }
+}
+
+/**
+ * FP-MODEL-FILES, once the scan knows its files: SC-PICKLE-GLOBAL as INFO (listed, setting no verdict) for each global
+ * of the scanned project's own modules, or a dependency's, that a model file imports (importing one runs that
+ * module's code, which the scan reads, when the file is loaded), and SC-PICKLE-GLOBAL, MAJOR, for each call with text a
+ * model file holds: `models` [[path, dep, imports, calls]] (addCollected's), `files` the collection's files. The
+ * engine's (pickle::own_imports); core's model_own_issues.
+ */
+export function modelOwnIssues(models, files) {
+  if (!models || !models.length) return [];
+  return pathIssues(call("model_own", { models, files: files.map((f) => [f.path, !!f.dep]) }));
 }
 
 /** A coverage note the walk's I/O finds (collect_issue): "unreadable" (reason), "symlink" (target), "skipped_tree"

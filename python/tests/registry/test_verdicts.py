@@ -15,6 +15,7 @@ import io
 import json
 import tarfile
 import unittest
+import zlib
 from unittest import mock
 
 from lazaret.registry import repo as lazaret_repo
@@ -159,14 +160,28 @@ class PrecisionTests(unittest.TestCase):
         self.assertEqual(res["verdict"], "OK", [i["msg"] for i in res["issues"]])
 
     def test_large_media_is_not_incomplete(self):
-        png = b"\x89PNG\r\n\x1a\n" + bytes((i * 31) % 256 for i in range(lazaret_repo.MAX_MEMBER + 5000))
+        # (FP-OPAQUE-MEDIA: a PNG is quiet when its chunks run to its end, walked as the member's stream passes; a
+        # PNG signature before other bytes is an opaque blob: WhatStaysOpaque in test_review_opaque_media)
+        def chunk(kind, data):
+            return len(data).to_bytes(4, "big") + kind + data + zlib.crc32(kind + data).to_bytes(4, "big")
+        pixels = bytes((i * 31) % 256 for i in range(lazaret_repo.MAX_MEMBER + 5000))
+        png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", bytes.fromhex("00000400000004000802000000"))
+               + chunk(b"IDAT", pixels) + chunk(b"IEND", b""))
         res = scan({"docs/figure.png": png})
         self.assertEqual(res["verdict"], "OK", res["verdictReason"])
 
     def test_media_and_documents_are_not_blobs_or_archives(self):
-        icc = b"\x00" * 36 + b"acsp" + bytes((i * 131) % 256 for i in range(3000))
-        res = scan({"assets/sRGB.icc": icc,
-                    "assets/image.jp2": b"\x00\x00\x00\x0cjP  \r\n\x87\n" + bytes(range(256)) * 12,
+        # (FP-OPAQUE-MEDIA: an ICC profile and a JPEG 2000 image are their structure to their end, a profile's tag
+        # table and a JP2's boxes; their first bytes alone no longer make them media)
+        data = bytes((i * 131) % 256 for i in range(3000))
+        icc = bytearray(144)
+        icc[0:4] = (144 + len(data)).to_bytes(4, "big")
+        icc[8], icc[36:40], icc[128:132] = 4, b"acsp", (1).to_bytes(4, "big")
+        icc[132:144] = b"desc" + (144).to_bytes(4, "big") + len(data).to_bytes(4, "big")
+        box = lambda kind, body: (8 + len(body)).to_bytes(4, "big") + kind + body
+        jp2 = (b"\x00\x00\x00\x0cjP  \r\n\x87\n" + box(b"ftyp", b"jp2 \x00\x00\x00\x00jp2 ")
+               + box(b"jp2c", bytes(range(256)) * 12))
+        res = scan({"assets/sRGB.icc": bytes(icc) + data, "assets/image.jp2": jp2,
                     "docs/diagram.odg": b"PK\x03\x04" + bytes(range(256)) * 8})
         self.assertEqual(res["verdict"], "OK", [i["msg"] for i in res["issues"]])
 

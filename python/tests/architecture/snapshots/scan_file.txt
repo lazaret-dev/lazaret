@@ -1,4 +1,4 @@
-# scan_file: 4264 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+# scan_file: 4285 outputs, a hash per 100 (tests/architecture/_snapshots.py)
 df2aaa0b9973e0d4
 c1b4910b2d6f83cb
 aea4c0c351f5dcf4
@@ -41,4 +41,4 @@ a0a46b70900406c9
 830f5f514f871c75
 69b0737673e89bc4
 a8146e8a0c03c327
-aa6c579ac2b643e9
+d9e30db3c1fa399e

@@ -116,16 +116,7 @@ impl Io {
     /// request.) The socket is polled without blocking and put back as it was.
     pub(crate) fn peer_quiet(&self) -> bool {
         // one system call where the system has a flag for a read that does not wait (BACKLOG B-90)
-        if let Some(quiet) = sys::peek_quiet(&self.tcp) {
-            return quiet;
-        }
-        if self.tcp.set_nonblocking(true).is_err() {
-            return false;
-        }
-        let mut byte = [0u8; 1];
-        let quiet =
-            matches!(self.tcp.peek(&mut byte), Err(e) if e.kind() == io::ErrorKind::WouldBlock);
-        quiet && self.tcp.set_nonblocking(false).is_ok()
+        sys::peek_quiet(&self.tcp).unwrap_or_else(|| quiet_by_switching(&self.tcp))
     }
 
     pub(crate) fn read_ref(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -152,6 +143,19 @@ impl Write for Io {
     fn flush(&mut self) -> io::Result<()> {
         self.tcp.flush()
     }
+}
+
+/// [`Io::peer_quiet`] where the system has no flag for a read that does not wait (Windows): the socket is made
+/// non-blocking for the look, and put back to blocking whatever the look found. (It was put back only when the peer was
+/// quiet, which left a connection that had something waiting, or had hung up, non-blocking: B-119.)
+fn quiet_by_switching(tcp: &TcpStream) -> bool {
+    if tcp.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut byte = [0u8; 1];
+    let quiet = matches!(tcp.peek(&mut byte), Err(e) if e.kind() == io::ErrorKind::WouldBlock);
+    let blocking = tcp.set_nonblocking(false).is_ok();
+    quiet && blocking
 }
 
 /// A look at a socket that does not wait, without making the socket non-blocking and back (which is two more system calls).
@@ -452,30 +456,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_quiet_peer_is_told_from_one_that_sent_something_or_hung_up_and_the_socket_stays_blocking()
-    {
-        let (client, mut server) = pair();
-        let io = wrap(client, Armed::default());
-        assert!(io.peer_quiet());
-        server.write_all(b"x").unwrap();
-        let since = Instant::now();
-        while io.peer_quiet() {
-            assert!(
-                since.elapsed() < Duration::from_secs(5),
-                "the byte never showed"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
-        // the look took nothing: the byte is there to be read, by a read that blocks (and so waits for the next one)
-        let mut b = [0u8; 1];
-        assert_eq!((&io.tcp).read(&mut b).unwrap(), 1);
-        assert_eq!(&b, b"x");
-        assert!(io.peer_quiet());
+    /// That the socket of `io` blocks: a read with nothing to read waits out its timeout of 100 ms. A socket left
+    /// non-blocking answers at once; Windows may end the wait a clock tick early (15.6 ms: 399.5 ms for 400 in
+    /// `http::connect`'s tests, B-119), so the wait is held to half the timeout, measured from the read alone.
+    fn assert_blocks(io: &Io, after: &str) {
         io.tcp
-            .set_read_timeout(Some(Duration::from_millis(50)))
+            .set_read_timeout(Some(Duration::from_millis(100)))
             .unwrap();
+        let mut b = [0u8; 1];
+        let since = Instant::now();
         let e = (&io.tcp).read(&mut b).unwrap_err();
+        let took = since.elapsed();
         assert!(
             matches!(
                 e.kind(),
@@ -484,18 +475,50 @@ mod tests {
             "{e:?}"
         );
         assert!(
-            since.elapsed() >= Duration::from_millis(50),
-            "the socket was left non-blocking"
+            took >= Duration::from_millis(50),
+            "the socket was left non-blocking after {after}: the read took {took:?}"
         );
+    }
+
+    /// The look `look` at the peer: quiet, then not once a byte has come, quiet again once it is read, and not once the
+    /// peer has hung up; and the socket blocks after a look that found it quiet and after one that found the byte.
+    fn a_look_at_the_peer(look: impl Fn(&Io) -> bool) {
+        let (client, mut server) = pair();
+        let io = wrap(client, Armed::default());
+        assert!(look(&io));
+        assert_blocks(&io, "a look that found the peer quiet");
+        server.write_all(b"x").unwrap();
+        let since = Instant::now();
+        while look(&io) {
+            assert!(
+                since.elapsed() < Duration::from_secs(5),
+                "the byte never showed"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        // the look took nothing: the byte is there to be read, and then a read blocks (with no other look in between)
+        let mut b = [0u8; 1];
+        assert_eq!((&io.tcp).read(&mut b).unwrap(), 1);
+        assert_eq!(&b, b"x");
+        assert_blocks(&io, "a look that found a byte waiting");
+        assert!(look(&io));
         drop(server);
         let since = Instant::now();
-        while io.peer_quiet() {
+        while look(&io) {
             assert!(
                 since.elapsed() < Duration::from_secs(5),
                 "the hang-up never showed"
             );
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn a_quiet_peer_is_told_from_one_that_sent_something_or_hung_up_and_the_socket_stays_blocking()
+    {
+        a_look_at_the_peer(|io| io.peer_quiet());
+        // the long way, which Windows takes, here on every system
+        a_look_at_the_peer(|io| quiet_by_switching(&io.tcp));
     }
 
     #[test]

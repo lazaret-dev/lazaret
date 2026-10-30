@@ -17,7 +17,7 @@
 use super::ast::{self, Block, Ex, Op, Pat, Stmt, Toks};
 use super::lit;
 use crate::jsflow::supply::{K_BYTES, K_DECODED, K_IDENTITY, K_PATH, K_WHOLE_ENV};
-use crate::model::events::{self, derived, list_ints, map_text, path_join, text_of_bytes, CmdState, ConnState, Ev, ReqState, WState};
+use crate::model::events::{self, derived, list_ints, map_text, text_of_bytes, CmdState, ConnState, Ev, ReqState, WState};
 use crate::model::val::{self, Obj, Val, UNKNOWN};
 use crate::pack::Pack;
 use crate::pystr::{self, u, PyStr};
@@ -1545,7 +1545,7 @@ impl<'k, 'a> Model<'k, 'a> {
                         l
                     } else if n == "push" && a0.s.as_ref().is_some_and(|s| s.contains(&('/' as u32)) || s.first() == Some(&('.' as u32))) && recv.s.is_some() {
                         // PathBuf::push: a path joined
-                        path_join(recv, &a0)
+                        crate::model::paths::apply(crate::model::paths::Api::RustJoin, &[recv.clone(),a0.clone()])
                     } else if a0.items.is_some() && a0.s.is_none() {
                         let mut s = recv.text_or_unknown();
                         for it in a0.items.as_ref().unwrap().iter() {
@@ -1578,7 +1578,7 @@ impl<'k, 'a> Model<'k, 'a> {
                         return Some(out);
                     }
                 }
-                path_join(recv, &a0)
+                crate::model::paths::apply(crate::model::paths::Api::RustJoin, &[recv.clone(),a0.clone()])
             }
             "concat" => match &recv.items {
                 Some(items) => {

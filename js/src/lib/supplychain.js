@@ -9,7 +9,7 @@
 import { mkIssue } from "./issue.js";
 import { truncatedIssue } from "./issue.js";
 import { pyRe, pyRepr, MAX_JSON_DEPTH, PY_ORDER } from "./pycompat.js";
-import { call, hookIsSuspicious, installScriptSeverity, issuesOf, NativeExhausted, EXHAUSTED } from "./native.js";
+import { call, hookIsSuspicious, installScriptSeverity, issuesOf, NativeExhausted, exhaustedWhy } from "./native.js";
 import { REDACT, redactText } from "./redact.js";
 
 export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactResult, setRedactSecrets } from "./redact.js";
@@ -97,7 +97,7 @@ function engineIssues(path, name, args, content) {
     issues = issuesOf(path, call(name, { path, redact: REDACT.on, ...args }, String(content)).issues);
   } catch (e) {
     if (!(e instanceof NativeExhausted)) throw e;
-    return [truncatedIssue(path, EXHAUSTED)];
+    return [truncatedIssue(path, exhaustedWhy(e))];
   }
   for (const issue of issues) {
     if (typeof issue.cmd !== "string") continue;
@@ -141,10 +141,15 @@ function fromEngine(v) {
  * prepare family, which is INFO unless hostile or hinted (INSTALL_HOOK_RE).
  * Dependencies npm would fetch from an insecure source are SC-DEP-URL
  * (D-14). An unparseable root manifest is SC-MANIFEST-UNPARSEABLE. The
- * engine's (core.scan_manifest).
+ * engine's (core.scan_manifest). `windows`: `path` is the walk's on Windows
+ * (collect.js WINDOWS), where a backslash separates its folders too, so a
+ * dependency's node_modules\dep\test\package.json is no package's root
+ * manifest (WIN-DEP-PATHS); otherwise a backslash is a file name's, as on
+ * POSIX.
  */
-export function scanManifest(path, content, { registry = null } = {}) {
-  return engineIssues(path, "scan_manifest", { registry: registry === null ? null : !!registry, hooks: null }, content);
+export function scanManifest(path, content, { registry = null, windows = false } = {}) {
+  return engineIssues(path, "scan_manifest",
+    { registry: registry === null ? null : !!registry, hooks: null, windows: !!windows }, content);
 }
 
 /** What makes a dependency's spec risky to fetch: ["a plain-http URL", "a raw IP address (HOST)"], the ones that

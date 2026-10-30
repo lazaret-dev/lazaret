@@ -14,9 +14,13 @@ const fn c(ch: char) -> u32 {
 }
 
 /// The tokens of `s`.
-pub fn tokens(s: &[u32]) -> Vec<Token> {
-    // (a call's tests lex its text more than once: the open gate keeps them)
-    crate::textgate::memo(s, "py-tokens", || lex(s))
+pub fn tokens(s: &[u32]) -> std::rc::Rc<Vec<Token>> {
+    // (a call's tests lex its text more than once: the open gate keeps them, shared: js::tokens)
+    crate::textgate::memo(s, "py-tokens", || {
+        let mut toks = lex(s);
+        toks.shrink_to_fit();
+        std::rc::Rc::new(toks)
+    })
 }
 
 fn lex(s: &[u32]) -> Vec<Token> {

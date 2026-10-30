@@ -253,8 +253,27 @@ fn hook_names(p: &Pack, registry: bool, hooks: Option<&[PyStr]>) -> Vec<PyStr> {
 /// npm would fetch from an insecure source (SC-DEP-URL, D-14); SC-MANIFEST-DEPTH or SC-MANIFEST-UNPARSEABLE when it
 /// cannot be read. `registry`: a package installed from a registry (npm runs preinstall, install and postinstall),
 /// else a checked-out project (the prepare family too, INFO when nothing in it looks hostile); `hooks`: the scripts
-/// that run when they are not npm's (none for a manifest no tool reads scripts from).
-pub fn scan_manifest(p: &Pack, path: &[u32], content: &[u32], registry: bool, hooks: Option<&[PyStr]>, redact: bool) -> Vec<Value> {
+/// that run when they are not npm's (none for a manifest no tool reads scripts from). `windows`: `path` is a Windows
+/// host's walk's (os.sep), where a backslash separates its folders too; elsewhere a backslash is a file name's, as
+/// core reads a path on POSIX, and a registry's member paths are '/'-separated on every system (WIN-DEP-PATHS).
+pub fn scan_manifest(
+    p: &Pack,
+    path: &[u32],
+    content: &[u32],
+    registry: bool,
+    hooks: Option<&[PyStr]>,
+    redact: bool,
+    windows: bool,
+) -> Vec<Value> {
+    // (the path is read as '/'-separated from here on: a package's root manifest, at_package_root; is_root and the
+    // unparseable manifest's name take either separator already)
+    let slashed;
+    let path = if windows {
+        slashed = pystr::replace_char(path, '\\' as u32, '/' as u32);
+        slashed.as_slice()
+    } else {
+        path
+    };
     let (data, early) = load(p, path, content, false, None);
     let Some(data) = data else {
         let none = Snippets::new(p, Vec::new(), redact, false).plain();
@@ -336,7 +355,8 @@ pub fn is_package_root(directory: &[u32]) -> bool {
 }
 
 /// core._at_package_root: a package's root manifest (at the top, or node_modules/<name>/). (`/`-separated: a
-/// backslash is a file name's, as core reads a path on POSIX.)
+/// backslash is a file name's, as core reads a path on POSIX; scan_manifest's `windows` gives a Windows walk's path
+/// here with its backslashes made slashes.)
 fn at_package_root(path: &[u32]) -> bool {
     let base = dirname(path);
     base.is_empty() || pystr::eq(base, ".") || is_package_root(base)
@@ -405,5 +425,38 @@ mod tests {
         assert_eq!(k.get(&u("postinstall")), Some(&3));
         assert_eq!(k.get(&u("a")), Some(&4));
         assert_eq!(k.get(&u("install")), None);
+    }
+
+    /// WIN-DEP-PATHS: a Windows walk names a dependency's fixture node_modules\dep\test\package.json; read as
+    /// '/'-separated it had no folder and was a package's root manifest, so --deps reported the fixture's
+    /// dependencies (SC-DEP-URL) on Windows alone. With `windows` its backslashes separate folders; without, a
+    /// backslash is a file name's, as on POSIX (a registry's member paths, and a POSIX name that holds one).
+    #[test]
+    fn a_windows_walks_path_is_read_with_its_separators() {
+        let u = pystr::u;
+        let p = crate::pack::current();
+        let text = u("{\n  \"name\": \"x\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"f\": \"http:\x2f/fixture.invalid/f.tgz\"\n  },\n  \"devDependencies\": {\n    \"z\": \"https://3405803783/z.tgz\"\n  }\n}");
+        let rule = u("SC-DEP-URL");
+        let dep_url = |path: &str, registry: bool, windows: bool| {
+            scan_manifest(&p, &u(path), &text, registry, None, false, windows)
+                .iter()
+                .filter(|v| v.as_arr().and_then(|a| a.first()).and_then(|r| r.as_str()) == Some(rule.as_slice()))
+                .count()
+        };
+        // a dependency's fixture (not its root manifest): nothing, on Windows as on POSIX
+        assert_eq!(dep_url("node_modules/dep/test/package.json", true, false), 0);
+        assert_eq!(dep_url("node_modules\\dep\\test\\package.json", true, true), 0);
+        assert_eq!(dep_url("node_modules\\@s\\dep\\test\\package.json", true, true), 0);
+        // a dependency's root manifest: what npm installs from it (not its devDependencies)
+        assert_eq!(dep_url("node_modules\\dep\\package.json", true, true), 1);
+        assert_eq!(dep_url("a\\node_modules\\@s\\dep\\package.json", true, true), 1);
+        assert_eq!(dep_url("node_modules/dep/package.json", true, false), 1);
+        // the project's own manifests, at the top and a workspace's: devDependencies too
+        assert_eq!(dep_url("package.json", false, true), 2);
+        assert_eq!(dep_url("packages\\web\\package.json", false, true), 2);
+        // POSIX unchanged: a backslash is a name's, so this is one file at the top of the tree
+        assert_eq!(dep_url("node_modules\\dep\\test\\package.json", true, false), 1);
+        assert_eq!(dep_url("node_modules/a\\b/package.json", true, false), 1);
+        assert_eq!(dep_url("node_modules/a\\b/package.json", true, true), 0);
     }
 }

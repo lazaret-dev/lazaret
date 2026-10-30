@@ -376,6 +376,21 @@ pub struct FileIn {
     pub data: Read,
     /// an oversized file's first DISGUISE_SAMPLE_BYTES bytes (none when they could not be read)
     pub sample: Option<Vec<u8>>,
+    /// the package reads a file by range (FP-MODEL-FILES: a zip model file, its directory and its pickles)
+    pub ranged: bool,
+    /// the ranges it read so far ((offset, length), their bytes one after another), or why it could not
+    pub ranges: Option<Result<(Vec<(u64, u64)>, Vec<u8>), PyStr>>,
+    /// how many times ranges were asked for
+    pub rounds: u64,
+    /// a .pth file too large to read whole, read in chunks (binary::pth_stream): the lines site.py runs and why one
+    /// could not be kept, or why it could not be read
+    pub pth_lines: Option<Result<(Vec<(u64, Vec<u8>)>, Vec<String>), PyStr>>,
+    /// a file too large to read whole, walked by its structure as its stream passed (media::feed: FP-OPAQUE-MEDIA),
+    /// or why it could not be read
+    pub media: Option<Result<crate::media::Walked, PyStr>>,
+    /// the file beside it the engine asked for (a Gradle wrapper jar's gradle-wrapper.properties: FP-GRADLE-WRAPPER):
+    /// Ok(None) when there is no such regular file, or why it could not be read
+    pub sibling: Option<Result<Option<Vec<u8>>, PyStr>>,
 }
 
 /// The languages a dependency tree's files are read in (DEP_LANGS: a package's Go and Rust are its readers').
@@ -390,21 +405,28 @@ fn ext_lang(p: &Pack, ext: &[u32]) -> Option<PyStr> {
         .find(|(k, _)| k.as_slice() == ext).and_then(|(_, v)| v.get("value")).and_then(|v| v.as_str()).map(|v| v.to_vec())
 }
 
-/// core.never_built: a file no build of a dependent compiles (a Go *_test.go, a name with "_" or "." first, one
-/// under testdata/ or vendor/; a crate's tests/, benches/ and examples/). `rel`: "/"-separated, below the module's
-/// or the crate's root.
+/// core.never_built: a file the file rules leave out as no build of a dependent compiles it (a Go *_test.go, a name
+/// with "_" or "." first, one under testdata/ or below a vendor/ folder's own folders; a crate's tests/, benches/ and
+/// examples/). `rel`: "/"-separated, below the module's or the crate's root. A test file's name ends in `_test.go`
+/// exactly, as Go reads it (and goread's never_built): `x_TEST.go` is built. A package in vendor/ itself is the
+/// module's (`m/vendor`: built); one in testdata/ is built when imported, which the Go reader reads (F-06).
 pub fn never_built(kind: &str, rel: &[u32]) -> bool {
     let parts: Vec<&[u32]> = rel.split(|&c| c == '/' as u32).collect();
     match kind {
         "go" => {
-            let name = parts[parts.len() - 1];
-            matches!(name.first(), Some(&c) if c == '_' as u32 || c == '.' as u32)
-                || pystr::lower(name).ends_with(&s("_test.go"))
-                || parts[..parts.len() - 1].iter().any(|p| is(p, "testdata") || is(p, "vendor"))
+            let dirs = &parts[..parts.len() - 1];
+            go_name_never_built(parts[parts.len() - 1])
+                || dirs.iter().any(|p| is(p, "testdata"))
+                || dirs.iter().rev().skip(1).any(|p| is(p, "vendor"))
         }
         "crate" => ["tests", "benches", "examples"].iter().any(|d| is(parts[0], d)),
         _ => false,
     }
+}
+
+/// A Go file no build compiles by its name alone: a test file (`_test.go` exactly), a name with "_" or "." first.
+pub fn go_name_never_built(name: &[u32]) -> bool {
+    matches!(name.first(), Some(&c) if c == '_' as u32 || c == '.' as u32) || pystr::ends_with(name, "_test.go")
 }
 
 /// core._vendor_lang: "go" or "rs" for a file of a Go or cargo vendor tree that a build compiles.
@@ -418,7 +440,11 @@ fn vendor_lang(p: &Pack, dep: &Dep, rel: &[u32], ext: &[u32], sep: &[u32]) -> Op
     let below: PyStr = rel.get(root.len() + 1..).unwrap_or(&[]).to_vec();
     let below = pystr::replace(&below, sep, &s("/"));
     if is(kind, "go") {
-        return (!never_built("go", &below)).then(|| s("go"));
+        // by its name alone (F-06): the path below vendor/ begins with a module's path, which may hold a `testdata`
+        // or a `vendor` (example.test/vendor), and `go mod vendor` copies only the packages a build compiles; the
+        // Go reader reads each module's files below its root (vendor/modules.txt: core._vendored_code)
+        let name = below.rsplit(|&c| c == '/' as u32).next().unwrap_or(&[]);
+        return (!go_name_never_built(name)).then(|| s("go"));
     }
     let inside = match below.iter().position(|&c| c == '/' as u32) {
         Some(k) => below[k + 1..].to_vec(),
@@ -493,6 +519,9 @@ struct Done {
     manifest: Option<Value>,
     config: Option<Value>,
     pth: bool,
+    /// a model file read: {imports: its globals of no known kind, calls: its calls with text} (FP-MODEL-FILES:
+    /// model_own's, after the collection)
+    model: Option<Value>,
 }
 
 impl Done {
@@ -510,6 +539,9 @@ impl Done {
         if self.pth {
             out.push(("pth", Value::Bool(true)));
         }
+        if let Some(m) = self.model {
+            out.push(("model", m));
+        }
         Value::obj(out)
     }
 }
@@ -526,6 +558,36 @@ fn own<T>(f: impl FnOnce() -> T) -> Option<T> {
 
 /// core._collect_file and _collect_config: what to read of a file next ({"need": {read, limit}}), or what it is.
 pub fn file(p: &Pack, f: &FileIn) -> Value {
+    let v = file_read(p, f);
+    // FP-B64-PROTOBUF: a file of a kind that holds script the file scan does not read (`_SCRIPT_HOLDER_EXTS`: .vue,
+    // .svelte, .html …) is named in the final answer ("holder"), and a file that says where modules are (tsconfig*.json,
+    // jsconfig*.json, `_B64_RESOLVER_CONFIGS`) too ("resolver"), in a dependency's tree as well: the descriptors' pass
+    // reads them (protodesc::usage)
+    match b64_mark(p, &f.name) {
+        Some(key) => match v {
+            Value::Obj(mut members) if !members.iter().any(|(k, _)| pystr::eq(k, "need")) => {
+                members.push((s(key), Value::Str(f.rel.clone())));
+                Value::Obj(members)
+            }
+            v => v,
+        },
+        None => v,
+    }
+}
+
+/// "holder" or "resolver" for a file the descriptors' pass reads (see `file`).
+fn b64_mark(p: &Pack, name: &[u32]) -> Option<&'static str> {
+    let low = pystr::lower(name);
+    let ext = pystr::lower(&crate::binary::ext_and_base(name, false).0);
+    if p.strs("_SCRIPT_HOLDER_EXTS").iter().any(|x| x.as_slice() == ext.as_slice()) {
+        return Some("holder");
+    }
+    let ts = (low.starts_with(&s("tsconfig")) || low.starts_with(&s("jsconfig"))) && low.ends_with(&s(".json"));
+    (ts || p.strs("_B64_RESOLVER_CONFIGS").iter().any(|x| *x == low)).then_some("resolver")
+}
+
+/// What a regular file is to the walk, read (see `file`).
+fn file_read(p: &Pack, f: &FileIn) -> Value {
     let rel = &f.rel;
     let sep = if f.windows { s("\\") } else { s("/") };
     let ext = pystr::lower(&crate::binary::ext_and_base(&f.name, false).0);
@@ -555,8 +617,17 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
         let agent = crate::agentdoc::is_agent_doc(rel).is_some();
         lang = if agent { None } else { script_source_lang(p, head) };
         if lang.is_none() {
-            if let Some(bi) = classify(head) {
-                done.issues.push(at(rel, bi));
+            // FP-MODEL-FILES: a model file (a pickle, a PyTorch checkpoint, joblib's, numpy's) is read whole, for what
+            // its pickles would run
+            if !agent && crate::pickle::sniff(p, &f.name, head, f.windows) {
+                return model(p, f, head, Done::default());
+            }
+            let bi = match classify_read(p, f, head) {
+                Ok(bi) => bi,
+                Err(need) => return need,
+            };
+            if !bi.is_empty() {
+                done.issues.extend(bi.into_iter().map(|i| at(rel, i)));
             } else if (agent || (!f.dep.any() && is_config_file(p, &f.name)))
                 && (head.starts_with(b"\xff\xfe") || head.starts_with(b"\xfe\xff") || !crate::binary::looks_binary(p, head))
             {
@@ -572,13 +643,44 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
             Some(Ok(h)) => h,
         };
         if crate::binary::mpeg_ts(&head[..head.len().min(377)]) {
-            if let Some(bi) = classify(head) {
-                done.issues.push(at(rel, bi));
+            match classify_read(p, f, head) {
+                Ok(bi) => done.issues.extend(bi.into_iter().map(|i| at(rel, i))),
+                Err(need) => return need,
             }
             return done.value();
         }
     }
     let cap = f.cap;
+    if f.size > cap && pth && f.ranged {
+        // FP-MODEL-FILES (John, Oct 21): a .pth file too large to read whole (PyTorch's checkpoints are named so) is
+        // read in chunks for the lines site.py runs, each checked as pth_issues checks a line (what it could not
+        // keep: SC-TRUNCATED), and a checkpoint's pickles by range, as any zip model file's
+        match &f.pth_lines {
+            None => return need("pth", f.size),
+            Some(Err(why)) => {
+                done.issues.push(at(rel, unreadable_issue(p, rel, why)));
+                return done.value();
+            }
+            Some(Ok((lines, cuts))) => {
+                done.pth = true;
+                match own(|| crate::binary::pth_kept_issues(p, lines, f.redact, f.neumaier)) {
+                    Some(found) => done.issues.extend(found.into_iter().map(|i| at(rel, i))),
+                    None => done.issues.push(at(rel, exhausted(p))),
+                }
+                if let Some(c) = cuts.first() {
+                    let more = if cuts.len() > 1 { format!(" (and {} more)", cuts.len() - 1) } else { String::new() };
+                    done.issues.push(at(rel, crate::manifest::gyp::truncated_issue(p, &format!("{c}{more}"))));
+                }
+            }
+        }
+        match &f.head {
+            None => return need("head", header),
+            Some(Ok(h)) if crate::pickle::zip::first_local_name(h).is_some() && crate::pickle::sniff(p, &f.name, h, f.windows) => {
+                return model(p, f, h, done);
+            }
+            _ => return done.value(),
+        }
+    }
     if f.size > cap {
         done.issues.push(at(rel, crate::manifest::gyp::truncated_issue(
             p, &format!("{} bytes exceeds the {}-byte file limit", commas(f.size), commas(cap)))));
@@ -619,9 +721,19 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
     }
     if pth {
         done.pth = true;
-        let text = crate::decode::utf::utf8_sig(data);
-        match own(|| crate::binary::pth_issues(p, &text, f.redact, f.neumaier)) {
-            Some(found) => done.issues.extend(found.into_iter().map(|i| at(rel, i))),
+        // (a checkpoint named .pth: its pickles too)
+        if crate::pickle::sniff(p, &f.name, &data[..data.len().min(header as usize)], f.windows) {
+            model_into(p, f, data, data.len() as u64, &mut done, None);
+        }
+        // (the lines site.py runs, read byte-wise as a .pth file read in chunks is: one rule for every route)
+        match own(|| crate::binary::pth_bytes_issues(p, data, f.redact, f.neumaier)) {
+            Some((found, cuts)) => {
+                done.issues.extend(found.into_iter().map(|i| at(rel, i)));
+                if let Some(c) = cuts.first() {
+                    let more = if cuts.len() > 1 { format!(" (and {} more)", cuts.len() - 1) } else { String::new() };
+                    done.issues.push(at(rel, crate::manifest::gyp::truncated_issue(p, &format!("{c}{more}"))));
+                }
+            }
             None => done.issues.push(at(rel, exhausted(p))),
         }
         return done.value();
@@ -654,6 +766,12 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
         ("lang", Value::Str(lang.clone())),
         ("dep", Value::Bool(f.dep.any())),
     ];
+    // (F-06) a Go file as the Go toolchain reads it, where that differs from the text: the Go reader's
+    if is(&lang, "go") {
+        if let Some(go) = crate::decode::go_text(data) {
+            entry.push(("goContent", Value::Str(go)));
+        }
+    }
     if let Dep::Vendor(_, root) = &f.dep {
         if is(&lang, "go") || is(&lang, "rs") {
             entry.push(("vendor", Value::Str(root.clone())));
@@ -661,6 +779,145 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
     }
     done.file = Some(Value::obj(entry));
     done.value()
+}
+
+/// binary::classify of a file that is not source, from its first bytes, and the whole file when it needs it
+/// (FP-OPAQUE-MEDIA: a keystore, or a near-random file whose first bytes start a format media.rs walks): read whole
+/// up to the size limit, else walked as its stream passes when the package reads files so ({"need": {"read":
+/// "media"}}: core's _stream_media, npm's streamMedia), else judged by its first bytes (an opaque blob stays one).
+/// A Gradle wrapper jar (FP-GRADLE-WRAPPER) is read whole up to the size limit, with the gradle-wrapper.properties
+/// beside it ({"need": {"read": "sibling"}}). Err: what to read next.
+fn classify_read(p: &Pack, f: &FileIn, head: &[u8]) -> Result<Vec<Value>, Value> {
+    use crate::binary::{classify_more, Classified, More};
+    let sample = &head[..head.len().min(8192)];
+    let go = |more: More| classify_more(p, &f.rel, sample, f.size, "repo", f.windows, f.neumaier, more);
+    let got = match go(More::Ask) {
+        Classified::Need if f.size <= f.cap => match &f.data {
+            None => return Err(need("data", f.cap + 1)),
+            Some(Ok(d)) => go(More::Whole(d)),
+            Some(Err(_)) => go(More::No),
+        },
+        Classified::Need if f.ranged => match &f.media {
+            None => return Err(Value::obj(vec![("need", Value::obj(vec![("read", Value::str("media"))]))])),
+            Some(Ok(walked)) => go(More::Walked(walked)),
+            Some(Err(_)) => go(More::No),
+        },
+        Classified::Need => go(More::No),
+        Classified::Wrapper => {
+            let jar = if f.size <= f.cap {
+                match &f.data {
+                    None => return Err(need("data", f.cap + 1)),
+                    Some(Ok(d)) if d.len() as u64 <= f.cap => Some(d.as_slice()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            // (one byte more than the engine reads, so that a longer file is told; one there and not read can't be
+            // verified)
+            let props = match &f.sibling {
+                None => {
+                    return Err(Value::obj(vec![("need", Value::obj(vec![
+                        ("read", Value::str("sibling")),
+                        ("name", Value::str(crate::gradle::PROPERTIES)),
+                        ("limit", Value::Int(crate::gradle::read_limit(p) as i64)),
+                    ]))]));
+                }
+                Some(Ok(Some(b))) => crate::gradle::Sibling::Bytes(b),
+                Some(Ok(None)) => crate::gradle::Sibling::None,
+                Some(Err(e)) => crate::gradle::Sibling::Error(e),
+            };
+            go(More::Wrapper { jar, props })
+        }
+        other => other,
+    };
+    Ok(match got {
+        Classified::Issue(v) => vec![v],
+        Classified::Issues(v) => v,
+        _ => Vec::new(),
+    })
+}
+
+/// FP-MODEL-FILES: a model file (pickle/), read for what its pickles would run: a zip (a checkpoint, an .npz) by
+/// range whatever its size, when the package reads files by range ({"need": {read: "ranges"}}: its end records, its
+/// central directory and the members the reader reads, never the tensor storages); another whole up to the size
+/// limit, and one larger SC-TRUNCATED by its first bytes, as the registry reads one. A file the reader finds is not
+/// one, and an archive that holds more than its format's members, get what classify says of their first bytes, as
+/// before.
+fn model(p: &Pack, f: &FileIn, head: &[u8], mut done: Done) -> Value {
+    let rel = &f.rel;
+    let cap = f.cap;
+    if f.ranged && crate::pickle::zip::first_local_name(head).is_some() {
+        let (layout, bytes): (&[(u64, u64)], &[u8]) = match &f.ranges {
+            Some(Err(why)) => { done.issues.push(at(rel, unreadable_issue(p, rel, why))); return done.value(); }
+            Some(Ok((l, b))) => (l, b),
+            None => (&[], &[]),
+        };
+        let mut given = vec![(0u64, head)];
+        let mut k = 0usize;
+        for &(off, len) in layout {
+            let end = k.saturating_add(len as usize).min(bytes.len());
+            given.push((off, &bytes[k..end]));
+            k = end;
+        }
+        let src = crate::pickle::zip::Bytes::pieces(f.size, given, crate::pickle::range_cap(p));
+        let last = f.rounds >= p.int("PICKLE_MAX_READS").max(0) as u64;
+        let got = match own(|| crate::pickle::read_ranges(p, rel, &src, f.windows, last)) {
+            None => None,
+            Some(crate::pickle::Ranged::Need(n)) => {
+                return Value::obj(vec![("need", Value::obj(vec![("read", Value::str("ranges")),
+                                                                 ("ranges", crate::api::ranges_value(&n))]))]);
+            }
+            Some(crate::pickle::Ranged::Not) => Some(None),
+            Some(crate::pickle::Ranged::Report(r)) => Some(Some(r)),
+        };
+        model_report(p, f, got, &mut done, Some(head));
+        return done.value();
+    }
+    if f.size > cap {
+        model_into(p, f, head, f.size, &mut done, Some(head));
+        return done.value();
+    }
+    let data = match &f.data {
+        None => return need("data", cap + 1),
+        Some(Err(why)) => { done.issues.push(at(rel, unreadable_issue(p, rel, why))); return done.value(); }
+        Some(Ok(d)) => d,
+    };
+    // (a file that grew past the limit while it was read: its first bytes)
+    let slice = &data[..data.len().min(cap as usize)];
+    model_into(p, f, slice, data.len() as u64, &mut done, Some(head));
+    done.value()
+}
+
+/// A model file's findings and imports added to `done`; with `head`, what classify says of the file's first bytes
+/// when it is not a model file after all, or holds more than one.
+fn model_into(p: &Pack, f: &FileIn, data: &[u8], size: u64, done: &mut Done, head: Option<&[u8]>) {
+    let got = own(|| crate::pickle::read_file(p, &f.rel, data, size, Some(f.cap), f.windows));
+    model_report(p, f, got, done, head);
+}
+
+/// A model file's reading (None: it spent its work budget; Some(None): not a model file) added to `done`.
+fn model_report(p: &Pack, f: &FileIn, got: Option<Option<crate::pickle::Report>>, done: &mut Done, head: Option<&[u8]>) {
+    let rel = &f.rel;
+    let classify = |h: &[u8]| crate::binary::classify(p, rel, &h[..h.len().min(8192)], f.size, "repo", f.windows, f.neumaier);
+    match got {
+        None => done.issues.push(at(rel, exhausted(p))),
+        Some(None) => {
+            if let Some(bi) = head.and_then(classify) {
+                done.issues.push(at(rel, bi));
+            }
+        }
+        Some(Some(r)) => {
+            done.issues.extend(r.issues.into_iter().map(|i| at(rel, i)));
+            if r.opaque {
+                if let Some(bi) = head.and_then(classify) {
+                    done.issues.push(at(rel, bi));
+                }
+            }
+            done.model = Some(Value::obj(vec![("imports", crate::pickle::imports_value(&r.imports)),
+                                              ("calls", crate::pickle::calls_value(&r.calls))]));
+        }
+    }
 }
 
 /// core._collect_config: a config or data file read for its credentials, or Q-SKIPPED-CONFIG over the limit.
@@ -798,13 +1055,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_go_file_carries_the_go_readers_text_where_it_differs() {
+        // F-06: the rules read `content`; the Go reader reads `goContent` (decode::go_text), given only where the Go
+        // toolchain reads the bytes otherwise (a lone "\r" here: white space to Go, a line end to the rules)
+        let p = crate::pack::current();
+        let read_at = |rel: &str, data: &[u8]| {
+            let f = FileIn { rel: pystr::u(rel), name: pystr::u(rel.rsplit('/').next().unwrap()), size: data.len() as u64,
+                             dep: Dep::Vendor(s("go"), s("vendor")), cap: 1 << 20, config_cap: 1 << 20, windows: false,
+                             neumaier: false, redact: true, head: Some(Ok(data.to_vec())), data: Some(Ok(data.to_vec())),
+                             sample: None, ranged: false, ranges: None, rounds: 0, pth_lines: None, media: None, sibling: None };
+            let got = file(&p, &f);
+            let entry = got.get("file").cloned().expect("a file");
+            let field = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(pystr::to_string);
+            (field("content"), field("goContent"))
+        };
+        let read = |data: &[u8]| read_at("vendor/example.test/m/x.go", data);
+        // (a vendored Go file by its name alone: the path below vendor/ begins with a module's, here example.test/testdata)
+        assert_eq!(read_at("vendor/example.test/testdata/t.go", b"package t\n").0.as_deref(), Some("package t\n"));
+        assert_eq!(read(b"package m\r// c\r\nvar a = 1\n"),
+                   (Some("package m\n// c\nvar a = 1\n".into()), Some("package m\r// c\nvar a = 1\n".into())));
+        assert_eq!(read(b"package m\r\nvar a = 1\n"), (Some("package m\nvar a = 1\n".into()), None));
+    }
+
+    #[test]
     fn never_built_is_cores() {
         let u = pystr::u;
         assert!(never_built("go", &u("x_test.go")));
-        assert!(never_built("go", &u("a/X_TEST.GO")));
+        // (Go's test files end in `_test.go` exactly: these are built, and `.GO` read as `.go` is)
+        assert!(!never_built("go", &u("x_TEST.go")));
+        assert!(!never_built("go", &u("a/x_Test.go")));
+        assert!(!never_built("go", &u("a/X_TEST.GO")));
         assert!(never_built("go", &u("_x.go")));
         assert!(never_built("go", &u("testdata/x.go")));
         assert!(!never_built("go", &u("a/x.go")));
+        // (F-06) a package in vendor/ itself is the module's; below it, another module's
+        assert!(!never_built("go", &u("vendor/v.go")));
+        assert!(!never_built("go", &u("a/vendor/v.go")));
+        assert!(never_built("go", &u("vendor/x/x.go")));
+        // a vendor tree's file by its name alone: its path begins with a module's (example.test/testdata)
+        assert!(go_name_never_built(&u("x_test.go")) && go_name_never_built(&u(".x.go")) && !go_name_never_built(&u("x.go")));
         assert!(never_built("crate", &u("tests/a.rs")));
         assert!(!never_built("crate", &u("src/tests/a.rs")));
     }

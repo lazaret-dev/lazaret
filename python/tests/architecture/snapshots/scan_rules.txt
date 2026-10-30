@@ -1,4 +1,4 @@
-# scan_rules: 4264 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+# scan_rules: 4285 outputs, a hash per 100 (tests/architecture/_snapshots.py)
 f712d90da2ab6d94
 d50a791a526f2e6a
 1b167a2288200dca
@@ -41,4 +41,4 @@ a488d5969d4204a1
 04ff5a1ae40b459d
 0188b94756e8d181
 c104087e1cc6a093
-8c50ac505e855e17
+a31bf88e27d219d6

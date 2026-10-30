@@ -62,6 +62,8 @@ pub const CALLS: &[&str] = &[
     "dead_drop_at",
     // Phase 2: scan_file, and what it reads
     "normalize", "scan_file", "file_context",
+    // 0.1.9 (FP-B64-PROTOBUF): a scan's SC-B64 findings that are protobuf descriptors used as generated code uses them
+    "b64_descriptors",
     // 0.1.8: what the npm package asks (it runs this engine as WebAssembly)
     "pack.values", "agent_hijack", "agent_hijack_in_command", "hook_command_risk", "hook_is_suspicious",
     "import_code", "scan_rules", "hook_command_view", "hex_view", "lookalike_view",
@@ -72,7 +74,7 @@ pub const CALLS: &[&str] = &[
     // 0.1.9 (G-1): a Go module's code read for what its init code and the rest do
     "go_package",
     // 0.1.9 (Part C): what a vendored crate's Cargo.toml and a vendor/modules.txt say (vendor.rs), for --deps
-    "cargo_layout", "go_vendored_modules",
+    "cargo_layout", "go_vendored_modules", "go_imports",
     // 0.1.9 (BR-7 step 1): CI files read for what they run — GitHub Actions workflows and GitLab CI files
     "ci_kind", "ci_outline", "ci_workflow", "ci_gitlab", "ci_rule", "ci_issues", "ci_uses", "ci_parse_uses", "ci_check",
     "ci_logical_lines",
@@ -86,8 +88,15 @@ pub const CALLS: &[&str] = &[
     "scan_manifest", "scan_gyp", "manifest_data", "manifest_check",
     // 0.1.9 (BR-7 step 3 c): the one redactor, for the findings the packages build (redact.rs)
     "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line", "pem_lines",
-    // BR-7 step 3 d: binaries, bytecode and .pth files (a file's bytes as latin-1 text)
+    // BR-7 step 3 d: binaries, bytecode and .pth files (a file's bytes as latin-1 text; one too large to read whole in
+    // chunks, pth_stream, its lines site.py runs checked by pth_kept)
     "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
+    // 0.1.9 (FP-MODEL-FILES): a model file's pickles read for what they would run (pickle/), and the globals of the
+    // package's own modules the scan's model files import
+    "model_sniff", "model_file", "model_own", "pth_stream", "pth_kept",
+    // 0.1.9 (FP-OPAQUE-MEDIA): a sound, video, image or font file walked by its structure to its end (media/), whole or
+    // as its stream passes
+    "media_walk", "media_stream",
     // BR-7 step 3 e: --deps' decisions (deps.rs; the packages answer what the calls ask of the tree)
     "deps_hooks", "deps_script", "deps_targets", "deps_files", "dep_file_issues", "declared_names",
     "agent_issue",
@@ -189,6 +198,163 @@ fn read_arg(v: Option<&Value>, text: &[u32]) -> Result<crate::collect::Read, Cal
     }
 }
 
+/// [[offset, length]] as (offset, length) pairs.
+pub fn layout_arg(layout: &[Value]) -> Result<Vec<(u64, u64)>, CallError> {
+    layout.iter().map(|x| {
+        let a = x.as_arr().filter(|a| a.len() == 2);
+        let n = |k: usize| a.and_then(|a| a[k].as_i64()).filter(|&v| v >= 0).map(|v| v as u64);
+        match (n(0), n(1)) {
+            (Some(o), Some(l)) => Ok((o, l)),
+            _ => Err(CallError::BadArgs("a piece is [offset, length]".into())),
+        }
+    }).collect()
+}
+
+/// The pieces of a file a layout says `data` holds, one after another.
+fn pieces_of<'d>(layout: &[(u64, u64)], data: &'d [u8]) -> Result<Vec<(u64, &'d [u8])>, CallError> {
+    let mut at = 0u64;
+    let mut out = Vec::with_capacity(layout.len());
+    for &(off, len) in layout {
+        let end = at.checked_add(len).filter(|&e| e <= data.len() as u64)
+            .ok_or_else(|| CallError::BadArgs("the pieces' lengths run past the bytes given".into()))?;
+        out.push((off, &data[at as usize..end as usize]));
+        at = end;
+    }
+    Ok(out)
+}
+
+/// pth_stream's state from its last answer (null: the file's start).
+fn pth_state_arg(v: Option<&Value>) -> Result<crate::binary::PthStream, CallError> {
+    let Some(v @ Value::Obj(_)) = v else { return Ok(crate::binary::PthStream::default()) };
+    let b = |k: &str| matches!(v.get(k), Some(Value::Bool(true)));
+    let carry = match v.get("carry") {
+        Some(Value::Str(t)) => crate::binary::bytes_of(t).ok_or_else(|| CallError::BadArgs("a carry is latin-1 text".into()))?,
+        _ => Vec::new(),
+    };
+    Ok(crate::binary::PthStream { line: v.get("line").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64, cr: b("cr"),
+                                  carry, whole: b("whole"), keeping: b("keeping"), skipping: b("skipping"),
+                                  kept: v.get("kept").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64, full: b("full") })
+}
+
+/// A media walk's answer as JSON: {"is": kind}, {"not": kind, "why"}, {"unknown": true}.
+pub fn walked_value(w: &crate::media::Walked) -> Value {
+    use crate::media::Walked;
+    match w {
+        Walked::Is(k) => Value::obj(vec![("is", Value::str(k))]),
+        Walked::Not(k, why) => Value::obj(vec![("not", Value::str(k)), ("why", Value::str(why))]),
+        Walked::Unknown => Value::obj(vec![("unknown", Value::Bool(true))]),
+    }
+}
+
+/// walked_value's JSON back.
+pub fn walked_arg(v: &Value) -> Result<crate::media::Walked, CallError> {
+    use crate::media::Walked;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(crate::pystr::to_string);
+    if let Some(k) = s("is") {
+        return Ok(Walked::Is(k));
+    }
+    if let Some(k) = s("not") {
+        return Ok(Walked::Not(k, s("why").unwrap_or_default()));
+    }
+    if matches!(v.get("unknown"), Some(Value::Bool(true))) {
+        return Ok(Walked::Unknown);
+    }
+    Err(CallError::BadArgs("a walk is {is}, {not, why} or {unknown}".into()))
+}
+
+/// A media walk's state as JSON, for the host to give back with the next chunk (every number below 2^53).
+fn media_state_value(w: &crate::media::Walker) -> Value {
+    let n = |v: u64| Value::Int(if v == u64::MAX { -1 } else { v as i64 });
+    Value::obj(vec![
+        ("fmt", Value::Int(w.fmt as i64)),
+        ("phase", Value::Int(w.phase as i64)),
+        ("at", n(w.at)),
+        ("fed", n(w.fed)),
+        ("carry", Value::Str(w.carry.iter().map(|&b| b as u32).collect())),
+        ("n", Value::Arr(w.n.iter().map(|&v| n(v)).collect())),
+        ("x", Value::Arr(w.x.iter().map(|&v| n(v)).collect())),
+        ("crc", Value::Int(w.crc as i64)),
+        ("claims", Value::Arr(w.claims.iter().map(|&(a, b)| Value::Arr(vec![n(a), n(b)])).collect())),
+        ("free", n(w.free)),
+        ("freeWhat", Value::str(&w.free_what)),
+        ("kind", Value::str(&w.kind)),
+        ("why", Value::str(&w.why)),
+        ("end", match &w.end {
+            None => Value::Null,
+            Some(Ok(())) => Value::obj(vec![("ok", Value::Bool(true))]),
+            Some(Err(why)) => Value::obj(vec![("fail", Value::str(why))]),
+        }),
+    ])
+}
+
+/// media_state_value's JSON back (null: a walk's start).
+fn media_state_arg(v: Option<&Value>) -> Result<crate::media::Walker, CallError> {
+    let Some(v @ Value::Obj(_)) = v else { return Ok(crate::media::Walker::new()) };
+    let bad = || CallError::BadArgs("a media walk's state is media_stream's last answer's".into());
+    let n = |x: Option<&Value>| -> Result<u64, CallError> {
+        match x.and_then(|x| x.as_i64()) {
+            Some(-1) => Ok(u64::MAX),
+            Some(i) if i >= 0 => Ok(i as u64),
+            _ => Err(bad()),
+        }
+    };
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(crate::pystr::to_string).unwrap_or_default();
+    let mut w = crate::media::Walker::new();
+    w.fmt = u8::try_from(n(v.get("fmt"))?).map_err(|_| bad())?;
+    w.phase = u8::try_from(n(v.get("phase"))?).map_err(|_| bad())?;
+    w.at = n(v.get("at"))?;
+    w.fed = n(v.get("fed"))?;
+    w.carry = match v.get("carry") {
+        Some(Value::Str(t)) => crate::binary::bytes_of(t).ok_or_else(bad)?,
+        _ => return Err(bad()),
+    };
+    let ns = v.get("n").and_then(|x| x.as_arr()).filter(|a| a.len() == 8).ok_or_else(bad)?;
+    for (k, x) in ns.iter().enumerate() {
+        w.n[k] = n(Some(x))?;
+    }
+    let xs = v.get("x").and_then(|x| x.as_arr()).filter(|a| a.len() == 4).ok_or_else(bad)?;
+    for (k, x) in xs.iter().enumerate() {
+        w.x[k] = n(Some(x))?;
+    }
+    w.free = n(v.get("free"))?;
+    w.free_what = text("freeWhat");
+    w.crc = u32::try_from(n(v.get("crc"))?).map_err(|_| bad())?;
+    for c in v.get("claims").and_then(|x| x.as_arr()).ok_or_else(bad)? {
+        let a = c.as_arr().filter(|a| a.len() == 2).ok_or_else(bad)?;
+        w.claims.push((n(a.first())?, n(a.get(1))?));
+    }
+    w.kind = text("kind");
+    w.why = text("why");
+    w.end = match v.get("end") {
+        None | Some(Value::Null) => None,
+        Some(e) if matches!(e.get("ok"), Some(Value::Bool(true))) => Some(Ok(())),
+        Some(e) => Some(Err(e.get("fail").and_then(|x| x.as_str()).map(crate::pystr::to_string).ok_or_else(bad)?)),
+    };
+    Ok(w)
+}
+
+/// [[line, latin-1 text]] as (line, bytes).
+pub fn pth_lines_arg(v: Option<&Value>) -> Result<Vec<(u64, Vec<u8>)>, CallError> {
+    v.and_then(|x| x.as_arr()).unwrap_or(&[]).iter().map(|x| {
+        let a = x.as_arr().filter(|a| a.len() == 2);
+        let n = a.and_then(|a| a[0].as_i64()).filter(|&n| n > 0);
+        let t = a.and_then(|a| a[1].as_str()).and_then(crate::binary::bytes_of);
+        match (n, t) {
+            (Some(n), Some(t)) => Ok((n as u64, t)),
+            _ => Err(CallError::BadArgs("a line is [line, latin-1 text]".into())),
+        }
+    }).collect()
+}
+
+fn pth_lines_value(lines: &[(u64, Vec<u8>)]) -> Value {
+    Value::Arr(lines.iter().map(|(n, b)| Value::Arr(vec![Value::Int(*n as i64), Value::Str(b.iter().map(|&c| c as u32).collect())])).collect())
+}
+
+/// [[offset, length]] of the ranges a reading needs.
+pub fn ranges_value(ranges: &[(u64, u64)]) -> Value {
+    Value::Arr(ranges.iter().map(|&(o, l)| Value::Arr(vec![Value::Int(o as i64), Value::Int(l as i64)])).collect())
+}
+
 /// The collection's calls (collect.rs).
 fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     use crate::collect;
@@ -231,9 +397,62 @@ fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Valu
             collect::dir(p, &d)
         }
         "collect_file" => {
-            // {rel, name, size, dep, cap, configCap, windows, neumaier, redact, answers: {head, data, sample}} -> {"need": {read,
-            // limit}} or {"issues": [[path, issue]], "file", "manifest", "config", "pth"}
+            // {rel, name, size, dep, cap, configCap, windows, neumaier, redact, ranges (the host reads a file by
+            // range), answers: {head, data, sample, ranges, rounds}} -> {"need": {read, limit}} (or {read: "ranges",
+            // ranges: [[offset, length]]}: a zip model file's, read by range) or {"issues": [[path, issue]], "file",
+            // "manifest", "config", "pth", "model"}. The ranges' answer is [[offset, length]] of every range read so
+            // far, their bytes the call's text one after another, and `rounds` how many times they were asked for; a
+            // .pth file too large to read whole ({read: "pth"}) is read in chunks through pth_stream, its answer
+            // {lines: [[line, latin-1 text]], cuts: [why]} or {error}; one walked as its stream passes ({read:
+            // "media"}: FP-OPAQUE-MEDIA) through media_stream, its answer the walk's end or {error}; a file beside
+            // it ({read: "sibling", name, limit}: a Gradle wrapper's gradle-wrapper.properties, FP-GRADLE-WRAPPER;
+            // `limit` is one byte more than the engine reads, so that a longer file is told), its answer `sibling`:
+            // its first `limit` bytes as latin-1 text, false when there is no such regular file, or {error} (one
+            // there and not read: a symbolic link, which Java follows and the scan does not, can't be verified).
+            let ranges = match answers.and_then(|x| x.get("ranges")) {
+                None | Some(Value::Null) => None,
+                Some(Value::Arr(layout)) => {
+                    let layout = layout_arg(layout)?;
+                    let data = crate::binary::bytes_of(text)
+                        .ok_or_else(|| CallError::BadArgs("a read's bytes come as latin-1 text".into()))?;
+                    pieces_of(&layout, &data)?;
+                    Some(Ok((layout, data)))
+                }
+                Some(o @ Value::Obj(_)) => Some(Err(o.get("error").and_then(|e| e.as_str()).map(|s| s.to_vec()).unwrap_or_default())),
+                _ => return Err(CallError::BadArgs("the ranges read are [[offset, length]] or {error}".into())),
+            };
+            let pth_lines = match answers.and_then(|x| x.get("pth")) {
+                None | Some(Value::Null) => None,
+                Some(o @ Value::Obj(_)) => match o.get("error") {
+                    Some(e) => Some(Err(e.as_str().map(|s| s.to_vec()).unwrap_or_default())),
+                    None => Some(Ok((pth_lines_arg(o.get("lines"))?,
+                                     o.get("cuts").and_then(|c| c.as_arr()).unwrap_or(&[]).iter()
+                                         .filter_map(|c| c.as_str().map(crate::pystr::to_string)).collect()))),
+                },
+                _ => return Err(CallError::BadArgs("a .pth file read in chunks is {lines, cuts} or {error}".into())),
+            };
+            let media = match answers.and_then(|x| x.get("media")) {
+                None | Some(Value::Null) => None,
+                Some(o) => match o.get("error") {
+                    Some(e) => Some(Err(e.as_str().map(|s| s.to_vec()).unwrap_or_default())),
+                    None => Some(Ok(walked_arg(o)?)),
+                },
+            };
+            let sibling = match answers.and_then(|x| x.get("sibling")) {
+                None | Some(Value::Null) => None,
+                Some(Value::Bool(false)) => Some(Ok(None)),
+                Some(Value::Str(t)) => Some(Ok(Some(crate::binary::bytes_of(t)
+                    .ok_or_else(|| CallError::BadArgs("a read's bytes come as latin-1 text".into()))?))),
+                Some(o @ Value::Obj(_)) => Some(Err(o.get("error").and_then(|e| e.as_str()).map(|s| s.to_vec()).unwrap_or_default())),
+                _ => return Err(CallError::BadArgs("a file beside it is latin-1 text, false or {error}".into())),
+            };
             let f = collect::FileIn {
+                sibling,
+                media,
+                pth_lines,
+                ranged: flag("ranges"),
+                ranges,
+                rounds: answers.and_then(|x| x.get("rounds")).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64,
                 rel: arg_str(args, "rel")?,
                 name: arg_str(args, "name")?,
                 size: opt_int(args, "size").unwrap_or(0).max(0) as u64,
@@ -454,10 +673,29 @@ pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         if !text.is_empty() {
             return Err(CallError::BadArgs(format!("{name}: a text and a text_id")));
         }
-        let stored = crate::texts::decoded(id).ok_or_else(|| CallError::BadArgs(format!("{name}: no text {id} in the store")))?;
-        return call_text(name, args, &stored);
+        let shared = crate::texts::decoded_shared(id).ok_or_else(|| CallError::BadArgs(format!("{name}: no text {id} in the store")))?;
+        return with_call_text(&shared, || call_text(name, args, &shared));
     }
     call_text(name, args, text)
+}
+
+thread_local! {
+    /// The text of the call in progress, as a shared copy (call_owned, a stored text's call): call_text_shared
+    static CALL_TEXT: std::cell::RefCell<Option<std::sync::Arc<[u32]>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `f` with `text` as the call's shared text (the one before restored after).
+fn with_call_text<R>(text: &std::sync::Arc<[u32]>, f: impl FnOnce() -> R) -> R {
+    let before = CALL_TEXT.with(|c| c.borrow_mut().replace(text.clone()));
+    let out = f();
+    CALL_TEXT.with(|c| *c.borrow_mut() = before);
+    out
+}
+
+/// The call's shared copy of `text`, when `text` is it (the same characters where they are): what a reading that
+/// keeps the text holds instead of a copy of its own (the supply-chain tree's, BIG-BUNDLE-TAIL).
+pub fn call_text_shared(text: &[u32]) -> Option<std::sync::Arc<[u32]>> {
+    CALL_TEXT.with(|c| c.borrow().as_ref().filter(|t| t.as_ptr() == text.as_ptr() && t.len() == text.len()).cloned())
 }
 
 /// A text_id's value: the id `texts.put` answered.
@@ -487,7 +725,7 @@ fn call_text(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError>
 /// calls borrow it.
 pub fn call_owned(name: &str, args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
     if name != "go_package" && name != "rs_crate" {
-        return call(name, args, &text);
+        return call_shared(name, args, std::sync::Arc::from(text));
     }
     let steps = match args.get("budget").and_then(|b| b.as_i64()) {
         Some(b) if b > 0 => b as u64,
@@ -506,6 +744,16 @@ pub fn call_owned(name: &str, args: &Value, text: Vec<u32>) -> Result<Value, Cal
         Ok(r) => r,
         Err(_) => Err(CallError::Exhausted),
     }
+}
+
+/// call_owned, given the text as one shared buffer (the WebAssembly build's, decode_wtf8_shared): the call's text is
+/// the one copy the supply-chain tree reads and keeps (call_text_shared, BIG-BUNDLE-TAIL, John's decision of Oct 21),
+/// not copied again while its model lives: at 16,000,000 characters a copy is 64 MB.
+pub fn call_shared(name: &str, args: &Value, text: std::sync::Arc<[u32]>) -> Result<Value, CallError> {
+    if name == "go_package" || name == "rs_crate" {
+        return call_owned(name, args, text.to_vec());
+    }
+    with_call_text(&text, || call(name, args, &text))
 }
 
 /// batch: {"calls": [[name, args, text], …], "threads": n} ->
@@ -618,7 +866,7 @@ mod own_stack {
     pub fn run<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(f: F) -> T {
         // (the call's budget goes with the job and comes back with its answer: what the job spends is the call's, as
         // it is when the job runs here, and in WebAssembly)
-        let (back, answer) = sync_channel::<(T, (u64, bool))>(1);
+        let (back, answer) = sync_channel::<(T, crate::budget::State)>(1);
         let budget = crate::budget::state();
         let job: Job = Box::new(move || {
             crate::budget::carry(budget);
@@ -666,7 +914,9 @@ fn batch_item(item: &Value) -> Value {
     match r {
         Ok(Ok(v)) => Value::obj(vec![("ok", v)]),
         Ok(Err(CallError::Exhausted)) => {
-            Value::obj(vec![("error", Value::str("exhausted")), ("exhausted", Value::Bool(true))])
+            // (BIG-BUNDLE-TAIL: the limit a reading met, when one made the call answer so)
+            let why = crate::budget::last_cut().unwrap_or_else(|| "exhausted".to_string());
+            Value::obj(vec![("error", Value::str(&why)), ("exhausted", Value::Bool(true))])
         }
         Ok(Err(CallError::Unknown(n))) => Value::obj(vec![("error", Value::str(&format!("unknown call {}", n)))]),
         Ok(Err(CallError::BadArgs(m))) => Value::obj(vec![("error", Value::str(&m))]),
@@ -782,6 +1032,57 @@ fn deps_files(p: &Pack, args: &Value) -> Result<Value, CallError> {
 
 fn strs(v: &[PyStr]) -> Value {
     Value::Arr(v.iter().map(|s| Value::Str(s.clone())).collect())
+}
+
+/// `b64_descriptors` (FP-B64-PROTOBUF, protodesc::usage): {files: [[path, text]…] (every JavaScript-family file the
+/// scan read whole), holders: [[path, text or null]…] (the files of kinds that hold script it does not read),
+/// manifests: [[path, text]…] (every package.json), configs: [[path, text or null]…] (the files that say where modules
+/// are: tsconfig*.json, jsconfig*.json, `_B64_RESOLVER_CONFIGS`),
+/// findings: [[path, line]…] (the SC-B64 findings to decide), unread: [path…] (the SC-TRUNCATED, Q-UNREADABLE and
+/// Q-SYMLINK findings' files), stopped, package (a package's scan, not a checkout's)} -> {"findings": [[path, line,
+/// null (dropped) or why it stays]…]}, in the order given. Paths '/'-separated.
+fn b64_descriptors(p: &Pack, args: &Value) -> Result<Value, CallError> {
+    let pairs = |k: &str| -> Result<Vec<(String, Option<PyStr>)>, CallError> {
+        let mut out = Vec::new();
+        for r in args.get(k).and_then(|v| v.as_arr()).unwrap_or(&[]) {
+            let a = r.as_arr().ok_or_else(|| CallError::BadArgs(format!("b64_descriptors: {k}")))?;
+            let path = a.first().and_then(|v| v.as_str()).ok_or_else(|| CallError::BadArgs(format!("b64_descriptors: {k}'s path")))?;
+            out.push((crate::pystr::to_string(path).replace('\\', "/"), a.get(1).and_then(|v| v.as_str()).map(|t| t.to_vec())));
+        }
+        Ok(out)
+    };
+    let texts = |k: &str| -> Result<Vec<(String, PyStr)>, CallError> {
+        pairs(k)?.into_iter().map(|(p, t)| t.map(|t| (p, t)).ok_or_else(|| CallError::BadArgs(format!("b64_descriptors: {k}'s text")))).collect()
+    };
+    let mut findings = Vec::new();
+    for r in args.get("findings").and_then(|v| v.as_arr()).unwrap_or(&[]) {
+        let a = r.as_arr().ok_or_else(|| CallError::BadArgs("b64_descriptors: a finding".into()))?;
+        let path = a.first().and_then(|v| v.as_str()).ok_or_else(|| CallError::BadArgs("b64_descriptors: a finding's path".into()))?;
+        let line = a.get(1).and_then(|v| v.as_i64()).ok_or_else(|| CallError::BadArgs("b64_descriptors: a finding's line".into()))?;
+        findings.push((crate::pystr::to_string(path).replace('\\', "/"), usize::try_from(line).unwrap_or(0)));
+    }
+    let flag = |k: &str| matches!(args.get(k), Some(Value::Bool(true)));
+    let input = crate::protodesc::usage::Input {
+        files: texts("files")?,
+        holders: pairs("holders")?,
+        manifests: texts("manifests")?,
+        configs: pairs("configs")?,
+        findings,
+        unread: arg_strs(args, "unread").iter().map(|x| crate::pystr::to_string(x).replace('\\', "/")).collect(),
+        stopped: flag("stopped"),
+        package: flag("package"),
+    };
+    let out = crate::protodesc::usage::decide(p, &input);
+    Ok(Value::obj(vec![(
+        "findings",
+        Value::Arr(
+            out.into_iter()
+                .map(|(path, line, why)| {
+                    Value::Arr(vec![Value::str(&path), Value::Int(line as i64), why.map(|w| Value::str(&w)).unwrap_or(Value::Null)])
+                })
+                .collect(),
+        ),
+    )]))
 }
 
 fn opt_s(v: Option<PyStr>) -> Value {
@@ -1004,7 +1305,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             }
         }
         "scan_manifest" => {
-            // {path, registry, hooks: [script…] or null, redact} -> {"issues": [scan_file's issues…, a hook's {"cmd"}]}
+            // {path, registry, hooks: [script…] or null, redact, windows} -> {"issues": [scan_file's issues…, a hook's
+            // {"cmd"}]}. `windows`: the path is a Windows walk's (os.sep), "\\" separating its folders too (a
+            // package's root manifest; WIN-DEP-PATHS); absent, a backslash is a file name's, as on POSIX
             let path = arg_str(args, "path")?;
             // (registry null: a manifest under a dependency folder is a dependency's, collect.rs)
             let registry = match args.get("registry") {
@@ -1016,7 +1319,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 Some(Value::Arr(_)) => Some(arg_strs(args, "hooks")),
                 _ => None,
             };
-            let issues = crate::manifest::scan_manifest(p, &path, text, registry, hooks.as_deref(), redact);
+            let windows = flag(args, "windows", false);
+            let issues = crate::manifest::scan_manifest(p, &path, text, registry, hooks.as_deref(), redact, windows);
             Value::obj(vec![("issues", Value::Arr(issues))])
         }
         "scan_gyp" => {
@@ -1055,17 +1359,170 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                     "program" => Value::Bool(binary::native_program(p, &data)),
                     other => return Err(CallError::BadArgs(format!("binary_check: no check {other:?}"))),
                 },
-                // {path, size, context, windows, neumaier} -> core.classify_binary's issue, or null
+                // {path, size, context, windows, neumaier, whole, walked, more, props} -> core.classify_binary's
+                // issue, or null. FP-OPAQUE-MEDIA: `whole`, the text is the whole file (its first 8,192 bytes the
+                // sample); `walked`, a walk of it as its stream passed (media_stream's end); `more`, the caller can
+                // give either, and is asked: {"need": "whole"}. FP-GRADLE-WRAPPER: a Gradle wrapper jar asks
+                // {"need": "wrapper"} (with `more`, or `whole`), answered with `props`, its gradle-wrapper.properties
+                // as latin-1 text (its first GRADLE_PROPERTIES_MAX_BYTES and one more), null when there are none, or
+                // {error} when it is there and was not read, and `whole` when the text is the whole jar
                 "binary_classify" => {
                     let context = opt_str(args, "context").map(|c| crate::pystr::to_string(&c)).unwrap_or_default();
                     let size = opt_int(args, "size").unwrap_or(data.len() as i64).max(0) as u64;
-                    or_null(binary::classify(p, &path, &data, size, &context, flag("windows"), flag("neumaier")))
+                    let walked = match args.get("walked") {
+                        None | Some(Value::Null) => None,
+                        Some(v) => Some(walked_arg(v)?),
+                    };
+                    let sample = &data[..data.len().min(8192)];
+                    // (props: latin-1 text, null when there are none, or {error}: there, and not read)
+                    let props = match args.get("props") {
+                        None => None,
+                        Some(Value::Str(t)) => Some(Ok(Some(binary::bytes_of(t).ok_or_else(|| {
+                            CallError::BadArgs("the properties come as latin-1 text".into())
+                        })?))),
+                        Some(o @ Value::Obj(_)) => Some(Err(o.get("error").and_then(|e| e.as_str()).map(|s| s.to_vec())
+                            .unwrap_or_default())),
+                        Some(_) => Some(Ok(None)),
+                    };
+                    let more = if let Some(props) = props.as_ref().filter(|_| crate::gradle::wrapper_path(&path, flag("windows"))) {
+                        let props = match props {
+                            Ok(Some(b)) => crate::gradle::Sibling::Bytes(b),
+                            Ok(None) => crate::gradle::Sibling::None,
+                            Err(e) => crate::gradle::Sibling::Error(e),
+                        };
+                        binary::More::Wrapper { jar: flag("whole").then_some(&data[..]), props }
+                    } else if flag("whole") {
+                        binary::More::Whole(&data)
+                    } else if let Some(w) = &walked {
+                        binary::More::Walked(w)
+                    } else if flag("more") {
+                        binary::More::Ask
+                    } else {
+                        binary::More::No
+                    };
+                    match binary::classify_more(p, &path, sample, size, &context, flag("windows"), flag("neumaier"), more) {
+                        binary::Classified::Issue(v) => v,
+                        // (a keystore that is an opaque blob too: both findings)
+                        binary::Classified::Issues(v) => Value::Arr(v),
+                        binary::Classified::Quiet => Value::Null,
+                        binary::Classified::Need => Value::obj(vec![("need", Value::str("whole"))]),
+                        binary::Classified::Wrapper => Value::obj(vec![("need", Value::str("wrapper"))]),
+                    }
                 }
                 // {path, windows} -> core.disguised_binary's issue, or null
                 "binary_disguised" => or_null(binary::disguised(p, &path, &data, flag("windows"))),
                 // {path, has_source} -> core.pyc_issues
                 _ => Value::Arr(binary::pyc_issues(p, &path, &data, flag("has_source"))),
             }
+        }
+        "model_sniff" => {
+            // {path, windows} + a file's first bytes (HEADER_SAMPLE_BYTES of them) as latin-1 text -> whether it may be a
+            // model file (pickle::sniff): one to read whole with model_file
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let path = opt_str(args, "path").unwrap_or_default();
+            Value::Bool(crate::pickle::sniff(p, &path, &data, flag(args, "windows", false)))
+        }
+        "model_file" => {
+            // {path, size, limit, windows} + a file's bytes as latin-1 text (all of them, or its first ones when the
+            // file is larger, `size`, than the scan reads, `limit`) -> null (not a model file) or {"kind", "issues",
+            // "imports": [[module, name, how]], "opaque"}. With {pieces: [[offset, length]], last}, the text is those
+            // pieces of the file one after another (its first bytes among them): a zip model file read by range
+            // (pickle::read_ranges) -> null, the report, or {"need": [[offset, length]]} (the ranges to read before
+            // asking again; none with `last`, which makes what is still needed SC-TRUNCATED)
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let path = opt_str(args, "path").unwrap_or_default();
+            let size = opt_int(args, "size").unwrap_or(data.len() as i64).max(0) as u64;
+            let limit = opt_int(args, "limit").map(|l| l.max(0) as u64);
+            let windows = flag(args, "windows", false);
+            if let Some(layout) = args.get("pieces").and_then(|v| v.as_arr()) {
+                let layout = layout_arg(layout)?;
+                let src = crate::pickle::zip::Bytes::pieces(size, pieces_of(&layout, &data)?, crate::pickle::range_cap(p));
+                match crate::pickle::read_ranges(p, &path, &src, windows, flag(args, "last", false)) {
+                    crate::pickle::Ranged::Not => Value::Null,
+                    crate::pickle::Ranged::Report(r) => crate::pickle::report_value(&r),
+                    crate::pickle::Ranged::Need(n) => Value::obj(vec![("need", ranges_value(&n))]),
+                }
+            } else {
+                match crate::pickle::read_file(p, &path, &data, size, limit, windows) {
+                    None => Value::Null,
+                    Some(r) => crate::pickle::report_value(&r),
+                }
+            }
+        }
+        "model_own" => {
+            // {models: [[path, dep, [[module, name, how]], [[module, name, issue]]]], files: [[path, dep]]} ->
+            // [[path, issue]]: the model files' globals of the scanned package's own modules (INFO), and the calls
+            // with text they hold (MAJOR: pickle::own_imports). A third item of a file, a text, is not read.
+            let models: Vec<crate::pickle::ModelIn> = arr_arg(args, "models").iter().filter_map(|m| {
+                let a = m.as_arr()?;
+                Some((a.first()?.as_str()?.to_vec(), matches!(a.get(1), Some(Value::Bool(true))),
+                      crate::pickle::imports_of(a.get(2)), crate::pickle::calls_of(a.get(3))))
+            }).collect();
+            let files: Vec<(PyStr, bool, Option<Vec<u32>>)> = arr_arg(args, "files").iter().filter_map(|f| {
+                let a = f.as_arr()?;
+                Some((a.first()?.as_str()?.to_vec(), matches!(a.get(1), Some(Value::Bool(true))),
+                      a.get(2).and_then(|t| t.as_str()).map(|t| t.to_vec())))
+            }).collect();
+            Value::Arr(crate::pickle::own_imports(p, &models, &files).into_iter()
+                .map(|(path, issue)| Value::Arr(vec![Value::Str(path), issue])).collect())
+        }
+        "media_walk" => {
+            // a whole file as latin-1 text -> what it is, walked by its structure to its end (media::walk):
+            // {"is": kind}, {"not": kind, "why"} or {"unknown": true}
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            walked_value(&crate::media::walk(&data))
+        }
+        "media_stream" => {
+            // {state: null or the last answer's, offset, eof} + the next chunk of a file, from `offset` (where the last
+            // one ended, or the answer's `next` when the host passes over the bytes the walk skips), as latin-1 text
+            // -> {"state", "next": the offset of the next byte the walk reads, "end": null while it runs, else
+            // media_walk's answer}
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let mut w = media_state_arg(args.get("state"))?;
+            let offset = opt_int(args, "offset").unwrap_or(0).max(0) as u64;
+            crate::media::feed(&mut w, offset, &data, flag(args, "eof", false));
+            Value::obj(vec![
+                ("next", Value::Int(w.at.min(crate::media::MAX_OFFSET) as i64)),
+                ("end", w.walked().as_ref().map_or(Value::Null, walked_value)),
+                ("state", media_state_value(&w)),
+            ])
+        }
+        "pth_stream" => {
+            // {state: null or the last answer's, end} + the next chunk of a .pth file too large to read whole, as
+            // latin-1 text -> {"state", "lines": [[line, its bytes from its import start as latin-1 text]], "cuts"}:
+            // the lines site.py runs (binary::pth_stream; FP-MODEL-FILES)
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let st = pth_state_arg(args.get("state"))?;
+            let (st, got) = crate::binary::pth_stream(p, &st, &data, flag(args, "end", false));
+            Value::obj(vec![
+                ("state", Value::obj(vec![
+                    ("line", Value::Int(st.line as i64)),
+                    ("cr", Value::Bool(st.cr)),
+                    ("carry", Value::Str(st.carry.iter().map(|&b| b as u32).collect())),
+                    ("whole", Value::Bool(st.whole)),
+                    ("keeping", Value::Bool(st.keeping)),
+                    ("skipping", Value::Bool(st.skipping)),
+                    ("kept", Value::Int(st.kept as i64)),
+                    ("full", Value::Bool(st.full)),
+                ])),
+                ("lines", pth_lines_value(&got.lines)),
+                ("cuts", Value::Arr(got.cuts.iter().map(|c| Value::str(c)).collect())),
+            ])
+        }
+        "pth_kept" => {
+            // {lines: [[line, latin-1 text]], redact, neumaier} -> core.pth_issues' issues for the lines pth_stream
+            // kept, at their lines
+            let lines = pth_lines_arg(args.get("lines"))?;
+            let f = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            Value::Arr(crate::binary::pth_kept_issues(p, &lines, f("redact", true), f("neumaier", false)))
         }
         "pth_issues" => {
             // {redact, neumaier} + a .pth file's text -> core.pth_issues' issues
@@ -1085,12 +1542,18 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "deps_targets" => crate::deps::file_targets(p, text),
         "deps_files" => deps_files(p, args)?,
+        "b64_descriptors" => b64_descriptors(p, args)?,
         "dep_file_issues" => {
             // {lang, declared, own, redact, neumaier} + a dependency's file -> [SC-IMPORT-RISK or null, SC-AGENT-HIJACK
             // or null]; `declared` and `own`: its package's names and its own name (D-12b, D-9c), when known
             let declared = args.get("declared").filter(|d| !matches!(d, Value::Null)).map(|_| arg_strs(args, "declared"));
             let release = opt_str(args, "own");
-            crate::deps::dep_file_issues(p, text, lang, declared.as_deref(), release.as_deref(), &deps_opts(args))
+            // `unread` (BIG-BUNDLE-TAIL, the review of Oct 20): where a reading of the text met a limit before its end,
+            // or the supply-chain tree did not read it whole (budget::cut), a third element, its words, and the call
+            // answers with what it found, where without it such a call answers as one that ran out (a file read whole:
+            // the two elements, as before)
+            let unread = flag(args, "unread", false);
+            crate::deps::dep_file_issues(p, text, lang, declared.as_deref(), release.as_deref(), &deps_opts(args), unread)
         }
         "agent_issue" => {
             // {agent, flag, line, context, redact, neumaier} + the file's text -> its SC-AGENT-HIJACK issue
@@ -1294,6 +1757,18 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 ("proc_macro", l.proc_macro.map(Value::Bool).unwrap_or(Value::Null)),
             ])
         }
+        // {"files": [[path, length], …]} (the files' texts, concatenated) -> [the import paths of a file's build, or
+        // null for one the parser refuses, …] (F-06: the vendored folders a --deps scan's Go files import)
+        "go_imports" => {
+            let files = package_files(args, text.len()).map_err(|m| CallError::BadArgs(format!("go_imports: {m}")))?;
+            let text = std::sync::Arc::new(text.to_vec());
+            let got = on_own_stack(move || {
+                files.iter().map(|(_, a, b)| crate::goread::file_imports(&text[*a..*b])).collect::<Vec<_>>()
+            });
+            Value::Arr(got.into_iter().map(|f| f.map_or(Value::Null, |v| strs(&v))).collect())
+        }
+        // {"packages": true}: the packages it lists (F-06), not its modules
+        "go_vendored_modules" if matches!(args.get("packages"), Some(Value::Bool(true))) => strs(&crate::vendor::vendored_packages(text)),
         "go_vendored_modules" => strs(&crate::vendor::vendored_modules(text)),
         "js_flow" => js_flow(args, text)?,
         "py_flow" => py_flow(args, text)?,
@@ -1595,14 +2070,20 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             crate::baseline::apply(p, &a)
         }
         "decode_source" => {
-            // the file's bytes as the text (one code point a byte); {lang, issues, redact} -> {"text", "info", and
-            // with `issues` its encoding findings (decode/mod.rs)}
+            // the file's bytes as the text (one code point a byte); {lang, issues, redact} -> {"text", "info", for
+            // "go" "goText" where the Go toolchain reads the bytes otherwise (decode::go_text: the Go reader's text),
+            // and with `issues` its encoding findings (decode/mod.rs)}
             if text.iter().any(|&c| c > 0xFF) {
                 return Err(CallError::BadArgs("decode_source: the bytes are one code point each, up to 0xFF".into()));
             }
             let bytes: Vec<u8> = text.iter().map(|&c| c as u8).collect();
             let (decoded, info) = crate::decode::decode_source(&bytes, lang);
             let mut items = vec![("text", Value::Str(decoded.clone())), ("info", crate::decode::info_value(&info))];
+            if lang == Some("go") {
+                if let Some(go) = crate::decode::go_text(&bytes) {
+                    items.push(("goText", Value::Str(go)));
+                }
+            }
             if matches!(args.get("issues"), Some(Value::Bool(true))) {
                 let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
                 let mut issues = crate::decode::encoding_issues(p, &decoded, &info, redact);
@@ -1728,8 +2209,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             // "go" or "rs"
             let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
             let toks = match lang {
-                Some("js") => crate::lex::js::tokens(text, jsx),
-                Some("py") => crate::lex::py::tokens(text),
+                Some("js") => crate::lex::js::tokens(text, jsx).to_vec(),
+                Some("py") => crate::lex::py::tokens(text).to_vec(),
                 Some("go") => crate::lex::go::tokens(text),
                 Some("rs") => crate::lex::rs::tokens(text),
                 _ => return Err(CallError::BadArgs("lex.tokens needs lang 'js', 'py', 'go' or 'rs'".into())),
@@ -1779,7 +2260,14 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let command = matches!(args.get("command"), Some(Value::Bool(true)));
             // `own`: the release's name, when the caller knows it (its own package's code is not another's, D-9)
             let _own = if args.get("own").is_some() { Some(signs::own_release(&arg_str(args, "own")?)) } else { None };
-            strs(&signs::install_script_risk_with(p, text, shell, command, lang))
+            let reasons = strs(&signs::install_script_risk_with(p, text, shell, command, lang));
+            // `unread` (BIG-BUNDLE-TAIL): [reasons, the limit a reading met or the tree's not reading the text whole, or
+            // null], as import_time_risk's fourth element
+            if matches!(args.get("unread"), Some(Value::Bool(true))) {
+                Value::Arr(vec![reasons, crate::budget::take_cut().map(|c| Value::Str(u(&c))).unwrap_or(Value::Null)])
+            } else {
+                reasons
+            }
         }
         "import_time_risk" => {
             // `declared`: the release's own name and the packages its manifest names (D-12), when the caller knows them
@@ -1790,11 +2278,18 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             // not read ([line, reason], or null: JS-PARSE-STRICT, said in a registry scan's report); asked first, it
             // reads the text once for the test (facts' cache)
             let refused = matches!(args.get("refused"), Some(Value::Bool(true)));
+            // `unread` (BIG-BUNDLE-TAIL): a fourth element, the limit a reading of the text met before its end (the
+            // text follower's: budget::cut), or null; the call answers then with what it found, where without it a
+            // call whose reading met a limit answers as one that ran out
+            let unread = matches!(args.get("unread"), Some(Value::Bool(true)));
             let why = if refused && lang == Some("js") { crate::jsflow::supply::refusal(text) } else { None };
             let (reasons, line) = signs::import_time_risk_with(p, text, lang, declared.as_deref());
             let mut out = vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)];
-            if refused {
+            if refused || unread {
                 out.push(why.map(|(l, r)| Value::Arr(vec![Value::Int(l as i64), Value::Str(r)])).unwrap_or(Value::Null));
+            }
+            if unread {
+                out.push(crate::budget::take_cut().map(|c| Value::Str(u(&c))).unwrap_or(Value::Null));
             }
             Value::Arr(out)
         }
@@ -2292,20 +2787,35 @@ fn with_reader_issues(args: &Value, spans: &[(usize, usize)], text: &[u32], answ
 }
 
 /// go_package: {"files": [[path, length], …] (their contents, concatenated, are
-/// the text; a module's .go files, and its cgo packages' .c and .h files),
-/// "module" (go.mod's module path, optional), "use_file_chars", "use_chars"
-/// (SC-USE-RISK's bounds, optional)} -> {"start": [finding, …] (the
-/// import-time test of what init code reaches), "uses": [finding, …],
-/// "read": [file index, …], "unparsed": [file index, …] (.go files the
-/// parser refuses), "generate": [[file, line, text], …], "linkname": [[file,
-/// line, text], …], "useRead": {files, chars, ofFiles, ofChars}}. A finding
-/// is {"file": index, "reasons": [str, …], "line": n}. Each module gets the
+/// the text; a module's .go files, as the Go toolchain reads them, and its
+/// cgo packages' .c and .h files), "module" (go.mod's module path,
+/// optional), "use_file_chars", "use_chars" (SC-USE-RISK's bounds,
+/// optional), "listed" (true: the packages a vendor tree's modules.txt
+/// lists, every one built), "testdata" ([folder, …]: the module's testdata/
+/// folders with .go files, given or not; an import of a testdata/ package
+/// that names none of them is another module's, a nested one's included)}
+/// -> {"start": [finding, …] (the import-time test
+/// of what init code reaches), "uses": [finding, …], "read": [file index,
+/// …], "unparsed": [file index, …] (.go files the parser refuses),
+/// "refused": [[file, line, why], …] (those of them a build compiles, where
+/// the parser stopped), "wanted": [import path, …] (the module's testdata/
+/// packages an import names of which no file was given), "testdataImports":
+/// [[file, line, import path], …] (another module's testdata/ packages
+/// imported), "generate": [[file, line, text], …], "linkname": [[file, line,
+/// text], …], "useRead": {files, chars, ofFiles, ofChars}}. A finding is
+/// {"file": index, "reasons": [str, …], "line": n}. Each module gets the
 /// call's budget (crate::goread::read_module).
 fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
     use crate::goread::{read_module, Found, Options};
     let bad = |m: &str| CallError::BadArgs(format!("go_package: {}", m));
     let files = package_files(args, text.len()).map_err(bad)?;
-    let mut opts = Options { module: opt_str(args, "module"), ..Options::default() };
+    let listed = matches!(args.get("listed"), Some(Value::Bool(true)));
+    let testdata_dirs = match args.get("testdata") {
+        None | Some(Value::Null) => None,
+        Some(Value::Arr(a)) => Some(a.iter().map(|d| d.as_str().map(|t| t.to_vec()).ok_or_else(|| bad("testdata is a list of folders"))).collect::<Result<Vec<_>, _>>()?),
+        Some(_) => return Err(bad("testdata is a list of folders")),
+    };
+    let mut opts = Options { module: opt_str(args, "module"), listed, testdata_dirs, ..Options::default() };
     if let Some(n) = opt_int(args, "use_file_chars").filter(|&n| n >= 0) {
         opts.use_file_chars = n as usize;
     }
@@ -2337,6 +2847,9 @@ fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
         ("uses", findings(&answer.uses)),
         ("read", ints(&answer.read)),
         ("unparsed", ints(&answer.unparsed)),
+        ("refused", directives(&answer.refused)),
+        ("wanted", strs(&answer.wanted)),
+        ("testdataImports", directives(&answer.testdata_imports)),
         ("generate", directives(&answer.generate)),
         ("linkname", directives(&answer.linkname)),
         (

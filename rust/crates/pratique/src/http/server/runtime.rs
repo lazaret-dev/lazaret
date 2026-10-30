@@ -28,7 +28,11 @@
 //!
 //! * the TLS handshake, in all ([`Limits::handshake_timeout`]);
 //! * an idle connection, until the first byte of the next request or, in HTTP/2, while no stream is open (frames
-//!   that are not requests, PING for one, do not keep it alive) ([`Limits::idle_timeout`]);
+//!   that are not requests, PING for one, do not keep it alive) ([`Limits::idle_timeout`]). In HTTP/2 it begins once
+//!   all the connection framed has been handed to the system, and it ends as the connection's other ends do: GOAWAY,
+//!   then the end of what the server sends, after which the connection is read while the client gives credit on the
+//!   connection (as it reads what the systems' buffers still held) at least once each idle timeout, sixteen idle
+//!   timeouts and a megabyte at most (B-120);
 //! * a request head, in all, from its first byte (slowloris) ([`Limits::head_timeout`]);
 //! * a request body, as a rate: after [`Limits::body_grace`], at least [`Limits::body_min_rate`] bytes a second on average,
 //!   counted from when the handler first reads it (in HTTP/2, a handler waits at most [`Limits::body_wait`] for more of
@@ -37,17 +41,18 @@
 //! * a connection handed over by an upgrade, per read ([`Limits::upgraded_idle_timeout`]).
 //!
 //! **Shutdown.** [`Server::shutdown`] stops accepting, closes the idle connections, lets those under way finish (HTTP/1.1:
-//! the response says `Connection: close`; HTTP/2: GOAWAY with no error) and, at the deadline, cuts what is left.
+//! the response says `Connection: close`; HTTP/2: GOAWAY with no error, and once nothing is left the end of what the
+//! server sends, after which the connection is read until the client closes it) and, at the deadline, cuts what is left.
 
 use super::{Handler, HttpConfig, Socket, Version};
 use crate::tls::certs::{CertStore, CertifiedKey};
 use crate::tls::server::{ServerConfig, ServerStream};
-use crate::tls::Duplex;
+use crate::tls::{discard, Duplex, Linger, LINGER_MOST};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
@@ -151,6 +156,20 @@ impl Timer {
         *self.lock() = ReadLimit::None;
     }
 
+    /// When reads end, if they end at a time: the phase's deadline, or where its minimum rate puts it now.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        match *self.lock() {
+            ReadLimit::None | ReadLimit::Each(_) => None,
+            ReadLimit::Until(t) => Some(t),
+            ReadLimit::Rate {
+                start,
+                grace,
+                rate,
+                read,
+            } => Some(start + grace + Duration::from_secs_f64(read as f64 / rate as f64)),
+        }
+    }
+
     /// How long the next read may wait (`None`: as long as it likes); an error if the time is up.
     fn wait(&self) -> io::Result<Option<Duration>> {
         let deadline = match *self.lock() {
@@ -251,15 +270,19 @@ impl<S: Socket> Read for Timed<S> {
 
 impl<S: Socket> Write for Timed<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf).map_err(|e| {
-            if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) {
+        self.inner.write(buf).map_err(|e| match e.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
                 io::Error::new(io::ErrorKind::TimedOut, "the client did not read in time")
-            } else {
-                e
             }
+            // On Windows a send that a stop of the connection cancelled ([`crate::sys::shutdown`]) fails with no count
+            // of what it sent, which may be some of it: `write_all` would send all of it again after Interrupted, and
+            // the client would read bytes twice. The connection is over instead (B-119). (Elsewhere Interrupted means
+            // that nothing was sent, and the send is tried again.)
+            io::ErrorKind::Interrupted if cfg!(windows) => io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                format!("a send that was cancelled, and may have sent some of its bytes: {e}"),
+            ),
+            _ => e,
         })
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -274,6 +297,18 @@ impl<S: Socket> Duplex for Timed<S> {
             timer: self.timer.clone(),
             set: None,
         })
+    }
+}
+
+impl<S: Socket> Linger for Timed<S> {
+    /// As a socket lingers, but its reads keep to the connection's timer, not to the socket's timeout, and it lingers
+    /// no later than the deadline the timer had (the handshake's, say), which the timer's 200 ms a read replace.
+    fn linger(&mut self) {
+        let most = Instant::now() + LINGER_MOST;
+        let until = self.timer.deadline().map_or(most, |d| d.min(most));
+        self.shutdown_write();
+        let timer = self.timer.clone();
+        discard(self, until, |_, wait| timer.each(wait));
     }
 }
 
@@ -302,8 +337,9 @@ pub(crate) struct Ctl {
     pub(crate) limits: Limits,
     /// The server is shutting down: answer what is under way, take nothing new.
     pub(crate) closing: AtomicBool,
-    /// HTTP/1.1: waiting for the first byte of a request (the shutdown closes such a connection at once).
-    pub(crate) idle: AtomicBool,
+    /// HTTP/1.1: whether the connection waits for the first byte of a request, which the shutdown ends at once
+    /// ([`Ctl::idle_wait`]).
+    idle: AtomicU8,
     /// HTTP/2: how to say GOAWAY on this connection.
     pub(crate) h2: Mutex<Option<Weak<dyn GoAway>>>,
     pub(crate) log: Option<AccessLog>,
@@ -312,10 +348,19 @@ pub(crate) struct Ctl {
     pub(crate) stop_reading: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
+/// `Ctl::idle`: the connection is busy (or not HTTP/1.1).
+const BUSY: u8 = 0;
+/// It waits for a request.
+const IDLE: u8 = 1;
+/// The shutdown took it while it waited, and stops it: nothing more is to be written to it.
+const TAKEN: u8 = 2;
+
 /// An HTTP/2 connection that can be asked to go away.
 pub(crate) trait GoAway: Send + Sync {
-    /// Says GOAWAY; true if nothing is left under way (the connection can be closed now).
-    fn go_away(&self) -> bool;
+    /// Says GOAWAY. Once no stream is left and all it has to send is sent, the connection ends its sending side (a TLS
+    /// close_notify, then a FIN after the last byte) and reads on until the client ends it (B-120); its reading is not
+    /// stopped, which on Windows would cancel a send under way (B-119) and make what the client still sends reset it.
+    fn go_away(&self);
 }
 
 impl Ctl {
@@ -324,11 +369,42 @@ impl Ctl {
             timer: None,
             limits: Limits::default(),
             closing: AtomicBool::new(false),
-            idle: AtomicBool::new(false),
+            idle: AtomicU8::new(BUSY),
             h2: Mutex::new(None),
             log: None,
             handlers: None,
             stop_reading: None,
+        })
+    }
+
+    /// One with a timer and these limits, and nothing else (tests of the HTTP/2 driver's deadlines on a connection served
+    /// without the runtime's listener: its socket keeps to the timer if it is wrapped in [`Timed`]).
+    #[cfg(test)]
+    pub(crate) fn detached_with_limits(limits: Limits) -> Arc<Ctl> {
+        Arc::new(Ctl {
+            timer: Some(Timer::new()),
+            limits,
+            closing: AtomicBool::new(false),
+            idle: AtomicU8::new(BUSY),
+            h2: Mutex::new(None),
+            log: None,
+            handlers: None,
+            stop_reading: None,
+        })
+    }
+
+    /// One that does nothing but stop with `stop` (tests of a connection served without the runtime).
+    #[cfg(test)]
+    pub(crate) fn detached_with_stop(stop: impl Fn() + Send + Sync + 'static) -> Arc<Ctl> {
+        Arc::new(Ctl {
+            timer: None,
+            limits: Limits::default(),
+            closing: AtomicBool::new(false),
+            idle: AtomicU8::new(BUSY),
+            h2: Mutex::new(None),
+            log: None,
+            handlers: None,
+            stop_reading: Some(Box::new(stop)),
         })
     }
 
@@ -364,15 +440,30 @@ impl Ctl {
         *self.h2.lock().unwrap_or_else(|e| e.into_inner()) = Some(h.clone());
         if self.is_closing() {
             if let Some(h) = h.upgrade() {
-                if h.go_away() {
-                    self.stop();
-                }
+                h.go_away();
             }
         }
     }
 
+    /// HTTP/1.1: waits for the next request with `wait`, as an idle connection, which the shutdown stops at once.
+    /// `None` if the shutdown began first, or took the connection while it waited: then it is stopped, even if a request
+    /// came in the meantime, and nothing more may be written to it (a response would be cut short on Windows, where
+    /// the stop cancels a send under way, B-119); a client sends again a request whose connection closed unanswered.
+    pub(crate) fn idle_wait<R>(&self, wait: impl FnOnce() -> R) -> Option<R> {
+        self.idle.store(IDLE, Ordering::SeqCst);
+        let waited = if self.is_closing() {
+            None
+        } else {
+            Some(wait())
+        };
+        match self.idle.swap(BUSY, Ordering::SeqCst) {
+            TAKEN => None,
+            _ => waited,
+        }
+    }
+
     /// Asks the connection to finish: say GOAWAY, or close at the end of the response, or close now if it is idle.
-    fn begin_close(&self) {
+    pub(crate) fn begin_close(&self) {
         self.closing.store(true, Ordering::SeqCst);
         let h2 = self
             .h2
@@ -381,16 +472,22 @@ impl Ctl {
             .as_ref()
             .and_then(Weak::upgrade);
         if let Some(h) = h2 {
-            if h.go_away() {
-                self.stop();
-            }
+            h.go_away();
         }
-        if self.idle.load(Ordering::SeqCst) {
+        // (only if it is still idle, taken so that it stays so: a request that has just come is not answered)
+        if self
+            .idle
+            .compare_exchange(IDLE, TAKEN, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
             self.stop();
         }
     }
 
-    /// Closes the reading side, which ends the connection's loop (nothing more will be read).
+    /// Closes the reading side, which ends the connection's loop (nothing more will be read). On Windows it also cancels
+    /// a send under way on the connection ([`crate::sys::shutdown`]): it is called only when nothing is being sent, an
+    /// HTTP/1.1 connection waiting for a request, a tunnel that is over. (An HTTP/2 connection is not stopped so: its
+    /// end is the end of its sending side, B-120.)
     pub(crate) fn stop(&self) {
         if let Some(stop) = &self.stop_reading {
             stop();
@@ -487,6 +584,8 @@ pub struct ServerBuilder {
     limits: Limits,
     log: Option<AccessLog>,
     errors: Option<ErrorLog>,
+    #[cfg(test)]
+    before_entry: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ServerBuilder {
@@ -499,7 +598,17 @@ impl ServerBuilder {
             limits: Limits::default(),
             log: None,
             errors: None,
+            #[cfg(test)]
+            before_entry: None,
         }
+    }
+
+    /// Calls `f` when a connection has been accepted and before it is entered among the server's connections (tests:
+    /// to hold it there while the server begins to shut down).
+    #[cfg(test)]
+    pub(crate) fn before_entry(mut self, f: impl Fn() + Send + Sync + 'static) -> ServerBuilder {
+        self.before_entry = Some(Arc::new(f));
+        self
     }
 
     /// Listens for TLS on `addr` (HTTP/2 or HTTP/1.1, as the configuration's ALPN protocols and the client agree).
@@ -585,6 +694,8 @@ impl ServerBuilder {
             handlers: Arc::new(AtomicUsize::new(0)),
             stats: Counters::default(),
             next_id: AtomicU64::new(0),
+            #[cfg(test)]
+            before_entry: self.before_entry,
         });
         let mut addrs = Vec::new();
         let mut listeners = Vec::new();
@@ -658,6 +769,8 @@ struct Inner {
     handlers: Arc<AtomicUsize>,
     stats: Counters,
     next_id: AtomicU64,
+    #[cfg(test)]
+    before_entry: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Inner {
@@ -701,10 +814,22 @@ fn accept_loop(inner: Arc<Inner>, listener: TcpListener, kind: Kind, handler: Ar
         if inner.stopping.load(Ordering::SeqCst) {
             return;
         }
+        #[cfg(test)]
+        if let Some(f) = &inner.before_entry {
+            f();
+        }
         let key = limit_key(peer.ip());
         let id = inner.next_id.fetch_add(1, Ordering::SeqCst);
         let ctl = {
             let mut conns = inner.conns();
+            // the shutdown may have begun since the look above: its list of the connections to close, taken under this
+            // lock, would not have this one, which would be served as if nothing had happened and cut at the end of the
+            // grace. Looked at again under the lock, either the shutdown finds the entry or this finds the shutdown.
+            if inner.stopping.load(Ordering::SeqCst) {
+                drop(conns);
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+                return;
+            }
             let from_ip = conns.per_ip.get(&key).copied().unwrap_or(0);
             if conns.open.len() >= inner.limits.max_connections
                 || from_ip >= inner.limits.max_connections_per_ip
@@ -722,13 +847,14 @@ fn accept_loop(inner: Arc<Inner>, listener: TcpListener, kind: Kind, handler: Ar
                 timer: Some(Timer::new()),
                 limits: inner.limits.clone(),
                 closing: AtomicBool::new(false),
-                idle: AtomicBool::new(false),
+                idle: AtomicU8::new(BUSY),
                 h2: Mutex::new(None),
                 log: inner.log.clone(),
                 handlers: Some(inner.handlers.clone()),
                 stop_reading: stopper.map(|s| {
                     Box::new(move || {
-                        let _ = s.shutdown(std::net::Shutdown::Read);
+                        // (the connection's thread, waiting to read, wakes: on Windows too, B-119)
+                        let _ = crate::sys::shutdown(&s, std::net::Shutdown::Read);
                     }) as Box<dyn Fn() + Send + Sync>
                 }),
             });
@@ -878,6 +1004,20 @@ impl Server {
 
     /// Stops accepting, asks every connection to finish (idle ones close at once), waits up to `grace` for them, and
     /// then cuts the rest. Returns once the listeners have stopped.
+    ///
+    /// A request under way is answered (HTTP/1.1: with `Connection: close`; HTTP/2: before the connection ends, after a
+    /// GOAWAY that lets the client open no stream after it). An HTTP/1.1 keep-alive connection that is idle closes at
+    /// once, and a request that reaches it just as it does is neither run nor answered: the close and the request
+    /// cross, the race every keep-alive connection has, which RFC 9112 section 9.3.1 leaves to the client (it may send
+    /// the request again on a new connection, an idempotent one at least). Before B-119 such a request was answered
+    /// with `Connection: close`; that is not safe, as on Windows the close cancels a send under way and would cut the
+    /// response short.
+    ///
+    /// An HTTP/2 connection with nothing left (an idle one at once) ends what it sends, a GOAWAY, then close_notify and
+    /// a FIN after the last byte, and is read until the client closes it, as the client may still be reading the tail
+    /// and answering it (B-120): so the wait is for its client, within the grace, until it has gone an idle timeout
+    /// without giving credit on the connection (which it gives as it reads), and for sixteen idle timeouts at most.
+    /// Clients close on that end.
     pub fn shutdown(&self, grace: Duration) {
         stop(&self.inner, &self.addrs, grace);
         for t in self
@@ -935,9 +1075,13 @@ fn stop(inner: &Inner, addrs: &[SocketAddr], grace: Duration) {
         }
         let _ = TcpStream::connect_timeout(&a, Duration::from_secs(1));
     }
-    let entries: Vec<Arc<ConnEntry>> = inner.conns().open.values().cloned().collect();
-    for e in &entries {
-        e.ctl.begin_close();
+    // (the entries are let go of before the wait: each holds a handle to its connection's socket, which would keep a
+    // connection that ends now, an idle one, open until the shutdown was over, its client told nothing: B-119)
+    {
+        let entries: Vec<Arc<ConnEntry>> = inner.conns().open.values().cloned().collect();
+        for e in &entries {
+            e.ctl.begin_close();
+        }
     }
     let deadline = Instant::now() + grace;
     let mut conns = inner.conns();
@@ -953,7 +1097,7 @@ fn stop(inner: &Inner, addrs: &[SocketAddr], grace: Duration) {
             .0;
     }
     for e in conns.open.values() {
-        let _ = e.socket.shutdown(std::net::Shutdown::Both);
+        let _ = crate::sys::shutdown(&e.socket, std::net::Shutdown::Both);
     }
 }
 
@@ -1139,14 +1283,7 @@ pub fn refresh_ocsp_staples(
 /// data makes the system reset the connection, which can destroy the answer before the client reads it).
 pub(crate) fn linger<S: Socket>(socket: &mut S) {
     socket.shutdown_write();
-    let _ = socket.set_read_timeout(Some(Duration::from_millis(200)));
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let mut buf = [0u8; 8192];
-    let mut total = 0;
-    while Instant::now() < deadline && total < 64 * 1024 {
-        match socket.read(&mut buf) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => total += n,
-        }
-    }
+    discard(socket, Instant::now() + LINGER_MOST, |s, wait| {
+        let _ = s.set_read_timeout(Some(wait));
+    });
 }

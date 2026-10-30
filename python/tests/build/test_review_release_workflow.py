@@ -321,15 +321,21 @@ class NpmEngineTests(unittest.TestCase):
     def test_every_module_that_needs_the_npm_engine_runs_where_it_is_built(self):
         # a module whose tests skip without js/native/lazaret.wasm (NPM_READY)
         # is skipped by the jobs that run the whole suite: a job that builds
-        # the engine must name it, or nothing runs it
-        arch = os.path.join(_support.REPO_ROOT, "python", "tests", "architecture")
-        gated = sorted(f[:-3] for f in os.listdir(arch) if f.startswith("test_") and f.endswith(".py")
-                       and "NPM_READY" in text_of(os.path.join(arch, f)))
+        # the engine must name it, or nothing runs it (every folder of tests:
+        # two scanner modules compared with an npm CLI that had no engine in
+        # CI's python-unit, and a third's npm tests no job ran; PR #17, Oct 29)
+        tests = os.path.join(_support.REPO_ROOT, "python", "tests")
+        gated = sorted(f"tests.{d}.{f[:-3]}" for d in sorted(os.listdir(tests)) if os.path.isdir(os.path.join(tests, d))
+                       for f in os.listdir(os.path.join(tests, d)) if f.startswith("test_") and f.endswith(".py")
+                       and "NPM_READY" in text_of(os.path.join(tests, d, f))
+                       and f != os.path.basename(__file__))
         self.assertGreater(len(gated), 10)
+        self.assertTrue({"tests.scanner.test_review_term_c1", "tests.scanner.test_review_term_newlines",
+                         "tests.scanner.test_project_metrics"} <= set(gated), gated)
         built = "".join(text for workflow in workflows().values() for text in jobs(workflow).values()
                         if "npm run build" in text)
         for module in gated:
-            self.assertTrue(re.search(rf"tests\.architecture\.{module}\b", built),
+            self.assertTrue(re.search(rf"{re.escape(module)}\b", built),
                             f"{module} is run by no job that builds the npm engine")
 
     def test_release_builds_the_engine_with_the_wheels_compiler(self):

@@ -47,18 +47,22 @@ function tree(files) {
   return root;
 }
 
-function scan(files, deps = true) {
+/** Every finding of a --deps scan of `files` (or without --deps): [rule, sev, file, line]. */
+function scanAll(files, deps = true) {
   const root = tree(files);
   const out = mkdtempSync(join(tmpdir(), "lz-vendor-out-"));
   try {
     run(["check", root, "--out-dir", out, "--no-html", "--quiet", ...(deps ? ["--deps"] : [])], { out: () => {}, err: () => {}, env: {} });
     const rep = JSON.parse(readFileSync(join(out, "lazaret-report.json"), "utf8"));
-    return rep.issues.filter((i) => i.rule.startsWith("SC-") || i.rule === "Q-SKIPPED-TREE")
-      .map((i) => [i.rule, i.sev, i.file.replaceAll("\\", "/"), i.line]);
+    return rep.issues.map((i) => [i.rule, i.sev, i.file.replaceAll("\\", "/"), i.line]);
   } finally {
     rmSync(out, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+function scan(files, deps = true) {
+  return scanAll(files, deps).filter(([rule]) => rule.startsWith("SC-") || rule === "Q-SKIPPED-TREE");
 }
 
 test("Go: init code a vendored module runs, and the tree pruned without --deps", () => {
@@ -77,12 +81,119 @@ test("Go: a module is read whole: init in one package reaching a function of ano
 
 test("Go: what a build never compiles is not read; a file of no listed module is read with its package", () => {
   const bad = INIT_GO + `\nvar blob = "${BLOB}"\n`;
-  for (const name of ["e_test.go", "testdata/t.go", "_x.go", ".x.go"]) {
+  for (const name of ["e_test.go", "_x.go", ".x.go"]) {
     assert.deepEqual(scan({ ...GO_PROJECT, "vendor/example.test/evil/ok.go": CLEAN_GO.replace("package sub", "package evil"),
       [`vendor/example.test/evil/${name}`]: bad }), [], name);
   }
+  // (F-06's third round) a .go file in a testdata/ folder, or one named with "_" or "." first, is Go code only as a
+  // package modules.txt lists: `go mod vendor` copies the files a package's //go:embed patterns match, .go files
+  // below it too, and a build compiles only the packages it lists; another is data, as in the registry
+  for (const folder of ["testdata", "testdata/fx", "_examples", ".hidden/x"]) {
+    const path = `vendor/example.test/evil/${folder}/t.go`;
+    const files = { ...GO_PROJECT, "vendor/example.test/evil/ok.go": CLEAN_GO.replace("package sub", "package evil"), [path]: bad };
+    assert.deepEqual(scan(files), [], folder);
+    files["vendor/modules.txt"] = MODULES_TXT.replace("example.test/evil\n", `example.test/evil\nexample.test/evil/${folder}\n`);
+    assert.deepEqual(scan(files), [["SC-IMPORT-RISK", "CRITICAL", path, 9], ["SC-B64", "MAJOR", path, 12]], folder);
+  }
   assert.deepEqual(scan({ ...GO_PROJECT, "vendor/example.test/other/x/e.go": INIT_GO.replace("package evil", "package x") }),
     [["SC-IMPORT-RISK", "CRITICAL", "vendor/example.test/other/x/e.go", 9]]);
+});
+
+test("Go: a build constraint Go does not read as ignore leaves the file read (F-06); a test file ends in _test.go exactly", () => {
+  // `//go:buildignore` and `// +buildignore` are comments to Go: white space must follow the prefix
+  const bad = 'package evil\n\nimport "os"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n';
+  for (const [header, read] of [["//go:buildignore\n\n", true], ["// +buildignore\n", true], ["// +build ignore\n", true],
+    ["//go:build ignore || linux\n\n", true], ["//go:build ignore\n\n", false], ["// +build ignore\n\n", false]]) {
+    const line = header.split("\n").length - 1 + 5;                                  // (the init's line)
+    assert.deepEqual(scan({ ...GO_PROJECT, "vendor/example.test/evil/d.go": header + bad }),
+      read ? [["SC-IMPORT-RISK", "CRITICAL", "vendor/example.test/evil/d.go", line]] : [], header);
+  }
+  assert.deepEqual(scan({ ...GO_PROJECT, "vendor/example.test/evil/e_TEST.go": INIT_GO }),
+    [["SC-IMPORT-RISK", "CRITICAL", "vendor/example.test/evil/e_TEST.go", 9]]);
+});
+
+test("Go: a file is read as the Go toolchain reads its bytes; a module path holding testdata or vendor is read (F-06)", () => {
+  // twin of test_vendored_code.py: a lone \r is no line end to Go, a second byte order mark is code to it, a \r in a
+  // string is Go's; a file the parser refuses is SC-TRUNCATED, never left out; UTF-16's text is read by the rules as
+  // before, and refused by Go and the reader
+  const body = 'package evil\n\nimport "os"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n';
+  const path = "vendor/example.test/evil/d.go";
+  for (const data of ["// c\r//go:build ignore\n\n" + body, "// c\r// +build ignore\n\n" + body,
+    "﻿﻿//go:build ignore\n\n" + body,
+    'package evil\n\nimport "os"\n\nvar s = "a\rb"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n']) {
+    assert.deepEqual(scan({ ...GO_PROJECT, [path]: data }).map(([r, , f]) => [r, f]), [["SC-IMPORT-RISK", path]], JSON.stringify(data));
+  }
+  for (const data of ["//go:build ignore\r\rpackage evil\r\r" + body.slice("package evil\n\n".length), "package evil\n\nfunc (\n"]) {
+    assert.deepEqual(scan({ ...GO_PROJECT, [path]: data }).map(([r, , f]) => [r, f]), [["SC-TRUNCATED", path]]);
+  }
+  const token = 'const k = "AKIA' + "Q7R2ZK9M4TXW8B3N" + '"\n';
+  const text = "//go:build ignore\n\n" + body + token;
+  for (const data of [Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]),
+    Buffer.from(text, "utf16le").swap16()]) {
+    assert.deepEqual(scanAll({ ...GO_PROJECT, [path]: data }).filter(([r]) => ["S-TOKEN", "SC-TRUNCATED", "SC-IMPORT-RISK"].includes(r))
+      .map(([r, , f, l]) => [r, f, l]), [["S-TOKEN", path, text.split("\n").length - 1]]);
+  }
+  // a lone \r: the reader's lines are the rules' (Go's line 1 holds the comments)
+  const cr = 'package evil\n\n// one\r// two\r// three\n\nimport "os"\n\nconst k = "AKIA' + "Q7R2ZK9M4TXW8B3N" +
+    '"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n';
+  assert.deepEqual(Object.fromEntries(scanAll({ ...GO_PROJECT, [path]: cr }).filter(([r]) => ["S-TOKEN", "SC-IMPORT-RISK"].includes(r))
+    .map(([r, , , l]) => [r, l])), { "S-TOKEN": 9, "SC-IMPORT-RISK": 11 });
+  const bad = (pkg) => body.replace("package evil", `package ${pkg}`);
+  const mods = "# example.test/testdata v1.0.0\n## explicit\nexample.test/testdata\n" +
+    "# example.test/vendor v1.0.0\n## explicit\nexample.test/vendor\n# example.test/vd v1.0.0\n## explicit\nexample.test/vd\n" +
+    "example.test/vd/vendor\n# example.test/td v1.0.0\n## explicit\nexample.test/td\nexample.test/td/testdata/x\n";
+  const files = { ...GO_PROJECT, "vendor/modules.txt": mods, "vendor/example.test/testdata/t.go": bad("testdata"),
+    "vendor/example.test/vendor/v.go": bad("vendor"), "vendor/example.test/vd/a.go": 'package vd\n\nimport _ "example.test/vd/vendor"\n',
+    "vendor/example.test/vd/vendor/v.go": bad("vendor"),
+    "vendor/example.test/td/lib.go": 'package td\n\nimport _ "example.test/td/testdata/x"\n',
+    "vendor/example.test/td/testdata/x/x.go": bad("x") };
+  assert.deepEqual(scan(files).map(([r, , f]) => [r, f]).sort(),
+    [["SC-IMPORT-RISK", "vendor/example.test/td/testdata/x/x.go"], ["SC-IMPORT-RISK", "vendor/example.test/testdata/t.go"],
+      ["SC-IMPORT-RISK", "vendor/example.test/vd/vendor/v.go"], ["SC-IMPORT-RISK", "vendor/example.test/vendor/v.go"]]);
+});
+
+test("Go: a testdata package modules.txt lists is read; an unlisted one is data (F-06)", () => {
+  // twin of test_vendored_code.py (the review's appx and app-1.21)
+  const mods = "# example.test/ta v1.0.0\n## explicit; go 1.21\nexample.test/ta/testdata/x\n" +
+    "# example.test/tb v1.0.0\n## explicit; go 1.21\nexample.test/tb\n";
+  const x = 'package x\n\nimport "os"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n';
+  const token = 'package fx\n\nconst k = "AKIA' + "Q7R2ZK9M4TXW8B3N" + '"\n';
+  const files = { ...GO_PROJECT, "vendor/modules.txt": mods, "vendor/example.test/ta/testdata/x/x.go": x,
+    "vendor/example.test/ta/testdata/fx/f.go": token,
+    "vendor/example.test/tb/tb.go": 'package tb\n\nimport _ "example.test/ta/testdata/x"\n' };
+  assert.deepEqual(scan(files), [["SC-IMPORT-RISK", "CRITICAL", "vendor/example.test/ta/testdata/x/x.go", 5]]);
+  assert.deepEqual(scanAll(files).filter(([r]) => r.startsWith("S-")), []);
+  // a modules.txt that lists no package: every file is read
+  files["vendor/modules.txt"] = "garbage\n## nonsense\nexample.test/ta/testdata/x\n";
+  assert.ok(scanAll(files).some(([r, , f]) => r === "S-TOKEN" && f === "vendor/example.test/ta/testdata/fx/f.go"));
+  // a refused file in a `_` folder modules.txt does not list is data; listed, it holds the module
+  const tmpl = { ...GO_PROJECT, "vendor/example.test/evil/_tmpl/t.go": "package {{.Name}}\n\nfunc F() {}\n",
+    "vendor/example.test/evil/ok.go": CLEAN_GO.replace("package sub", "package evil") };
+  assert.deepEqual(scan(tmpl), []);
+  tmpl["vendor/modules.txt"] = MODULES_TXT.replace("example.test/evil\n", "example.test/evil\nexample.test/evil/_tmpl\n");
+  assert.deepEqual(scan(tmpl), [["SC-TRUNCATED", "CRITICAL", "vendor/example.test/evil/_tmpl/t.go", 1]]);
+});
+
+test("Go: an unlisted folder an import names is code (F-06's fourth round)", () => {
+  // twin of test_vendored_code.py (the review's appv-tamper): a main module below `go 1.23` builds a vendored package
+  // modules.txt does not list when an import names it
+  const x = (pkg) => `package ${pkg}\n\nimport "os"\n\nfunc init() { os.RemoveAll("/home/example/Documents") }\n`;
+  const files = { ...GO_PROJECT,
+    "vendor/example.test/evil/evil.go": 'package evil\n\nimport (\n\t_ "example.test/evil/testdata/td"\n\t_ "example.test/evil/\\x5fu"\n)\n',
+    "vendor/example.test/evil/testdata/td/td.go": 'package td\n\nimport _ "example.test/evil/.hidden/h"\n',
+    "vendor/example.test/evil/.hidden/h/h.go": x("h"), "vendor/example.test/evil/_u/u.go": x("u"),
+    "vendor/example.test/evil/_m/m.go": x("m"), "vendor/example.test/evil/_quiet/q.go": x("q"),
+    "main.go": 'package main\n\nimport _ "example.test/evil/_m"\n\nfunc main() {}\n' };
+  assert.deepEqual(scan(files).filter(([r]) => r === "SC-IMPORT-RISK").map(([, , f]) => f).sort(),
+    ["vendor/example.test/evil/.hidden/h/h.go", "vendor/example.test/evil/_m/m.go", "vendor/example.test/evil/_u/u.go"]);
+  assert.deepEqual(scan({ ...GO_PROJECT, "vendor/example.test/evil/ok.go": CLEAN_GO.replace("package sub", "package evil"),
+    "vendor/example.test/evil/gen.go": '//go:build ignore\n\npackage evil\n\nimport _ "example.test/evil/_u"\n',
+    "vendor/example.test/evil/_u/u.go": x("u") }), []);
+  // (the review's appv-refmain: a file the parser refuses may import any of them, so every unlisted folder is code)
+  const found = scan({ ...GO_PROJECT, "vendor/example.test/evil/ok.go": CLEAN_GO.replace("package sub", "package evil"),
+    "vendor/example.test/evil/_u/u.go": x("u"),
+    "main.go": 'package main\n\nimport _ "example.test/evil/_u"\n\nfunc main() {}\n\nfunc (\n' }).map(([r, , f]) => `${r} ${f}`);
+  assert.ok(found.includes("SC-IMPORT-RISK vendor/example.test/evil/_u/u.go"), found.join("; "));
 });
 
 test("Rust: a build script, the manifest's own, and none when it says false", () => {

@@ -76,7 +76,7 @@ NPM_FLOW = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const f = await import(pathToFileURL(process.argv[1]).href);
-const { sets } = JSON.parse(readFileSync(0, "utf8"));
+const { sets } = JSON.parse(readFileSync(0).toString("utf8"));
 process.stdout.write(JSON.stringify(sets.map((files) => f.analyzeFlows(files))));
 """
 

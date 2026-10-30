@@ -10,6 +10,7 @@
 pub mod deletion;
 pub mod events;
 pub mod facts;
+pub mod paths;
 pub mod val;
 
 use crate::pystr::PyStr;

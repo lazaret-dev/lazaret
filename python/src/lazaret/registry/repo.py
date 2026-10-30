@@ -351,7 +351,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.100.0"
+ENGINE_VERSION = "2.114.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1661,6 +1661,224 @@ def _folder_link(base, entry):
     return None, None
 
 
+#: FP-MODEL-FILES: what one read of an oversized zip model member keeps for the engine (_ZipModelKeep): its first
+#: bytes; each entry whose name ends in "pkl" (its local header and data, up to _MODEL_KEEP bytes in all) or ".npy" (its
+#: header and data when no larger than _MODEL_NPY_WHOLE, else its first _MODEL_NPY_KEEP bytes: what the engine reads of
+#: an .npy that is not an object array); every other entry's local header (up to _MODEL_HEADERS bytes); and its last
+#: bytes, its end records and a central directory up to the engine's PICKLE_MAX_DIRECTORY (16,000,000 bytes).
+_MODEL_HEAD = 1 << 16
+_MODEL_TAIL = 16_000_000 + 65_557 + 76
+_MODEL_KEEP = 64_000_000
+_MODEL_NPY_KEEP = 1 << 17
+_MODEL_NPY_WHOLE = 4 << 20
+#: ... and the local headers of the other members, at most this many bytes of them
+_MODEL_HEADERS = 16_000_000
+
+
+class _ZipModelKeep:
+    """FP-MODEL-FILES: one forward read of an oversized member whose first bytes are a zip model file's (a checkpoint,
+    an .npz, in a wheel, an sdist, an npm tarball or a folder), keeping the pieces of it the engine reads by range
+    (model_file's `pieces`): its end records and central directory among its last bytes, its pickle and .npy members
+    by their local headers, followed from its first. A member of a tar or zip archive is a stream read once, so the
+    engine reads these pieces as its last read: what it needs that this did not keep (a directory that names other
+    bytes, local headers it could not follow) is SC-TRUNCATED, never quiet. Bounded: what it keeps is at most
+    _MODEL_HEAD + _MODEL_KEEP + the .npy prefixes + _MODEL_HEADERS + _MODEL_TAIL bytes."""
+
+    def __init__(self):
+        self.size = 0
+        self.head = bytearray()
+        self.tail, self.tail_len = [], 0
+        self.kept, self.kept_len = [], 0
+        self.headers_len = 0
+        self.walking = True             # following the local headers (stopped at the first that is not one)
+        self.hdr_at, self.hdr, self.need = 0, bytearray(), 30
+        self.keep, self.skip, self.piece = 0, 0, None
+
+    def feed(self, chunk):
+        n = len(chunk)
+        if len(self.head) < _MODEL_HEAD:
+            self.head += chunk[:_MODEL_HEAD - len(self.head)]
+        self.tail.append(bytes(chunk))
+        self.tail_len += n
+        drop = 0
+        while drop < len(self.tail) and self.tail_len - len(self.tail[drop]) >= _MODEL_TAIL:
+            self.tail_len -= len(self.tail[drop])
+            drop += 1
+        if drop:
+            del self.tail[:drop]
+        i = 0
+        while self.walking and i < n:
+            if self.keep:
+                take = chunk[i:i + self.keep]
+                self.piece += take
+                self.keep -= len(take)
+                self.kept_len += len(take)
+                i += len(take)
+            elif self.skip:
+                take = min(self.skip, n - i)
+                self.skip -= take
+                i += take
+            else:
+                if not self.hdr:
+                    self.hdr_at = self.size + i
+                take = chunk[i:i + self.need - len(self.hdr)]
+                self.hdr += take
+                i += len(take)
+                if len(self.hdr) == self.need:
+                    self._header()
+        self.size += n
+
+    def _header(self):
+        h = self.hdr
+        if h[:4] != b"PK\x03\x04":
+            self.walking = False
+            return
+        flags, _method, csize, size, nlen, xlen = struct.unpack_from("<6xHH8xLLHH", h)
+        if self.need == 30 and nlen + xlen:
+            self.need = 30 + nlen + xlen      # (its name and extra field next)
+            return
+        if csize == 0xFFFFFFFF or size == 0xFFFFFFFF:
+            # zip64: the local extra field holds the sizes that did not fit, the size first
+            sizes = [v for tp, data in _zip_extra_fields(bytes(h[30 + nlen:])) if tp == 1
+                     for v in struct.unpack_from(f"<{len(data) // 8}Q", data)][:2]
+            if size == 0xFFFFFFFF:
+                size = sizes.pop(0) if sizes else None
+            if csize == 0xFFFFFFFF:
+                csize = sizes.pop(0) if sizes else None
+            if csize is None or size is None:
+                self.walking = False
+                return
+        if flags & 8:
+            self.walking = False              # (its sizes follow its data: the walk cannot pass it)
+            return
+        low = bytes(h[30:30 + nlen]).lower()
+        want = 0
+        if low.endswith(b"pkl"):
+            want = csize if self.kept_len + len(h) + csize <= _MODEL_KEEP else 0
+        elif low.endswith(b".npy"):
+            whole = csize <= _MODEL_NPY_WHOLE and self.kept_len + len(h) + csize <= _MODEL_KEEP
+            want = csize if whole else min(csize, _MODEL_NPY_KEEP)
+        if want:
+            self.piece = bytearray(h)
+            self.kept.append((self.hdr_at, self.piece))
+            self.kept_len += len(h)
+        elif self.headers_len + len(h) <= _MODEL_HEADERS:
+            # (every member's local header: the engine holds each to its directory entry, and walks them as a
+            # streaming unpacker does: the external review's H2, FP-NESTED-ARCHIVE's review of Oct 21)
+            self.kept.append((self.hdr_at, bytes(h)))
+            self.headers_len += len(h)
+        self.keep, self.skip = want, csize - want
+        self.hdr, self.need = bytearray(), 30
+
+    def pieces(self):
+        """(the member's size, [(offset, bytes)]) for model_file: of its last bytes, those the engine reads (its last
+        65,557, where it looks for the end record, and the central directory that record names), all of them when
+        the record cannot be read here."""
+        tail = b"".join(self.tail)
+        start = self.size - len(tail)
+        cut = _zip_tail_start(tail, start)
+        return self.size, ([(0, bytes(self.head))] + [(off, bytes(b)) for off, b in self.kept]
+                           + [(start + cut, tail[cut:])])
+
+
+def _zip_tail_start(tail, start):
+    """Where in `tail` (a zip's last bytes, from byte `start` of it) the bytes the engine reads of them begin: the end
+    record's window (the last 65,557 bytes) and the central directory the record (or its zip64 record) names, a KiB
+    before it; 0 when that cannot be told."""
+    pos = tail.rfind(b"PK\x05\x06", max(0, len(tail) - 65_557), max(0, len(tail) - 18))
+    if pos < 0:
+        return 0
+    cd_size = struct.unpack_from("<L", tail, pos + 12)[0]
+    end = pos
+    if cd_size == 0xFFFFFFFF or struct.unpack_from("<L", tail, pos + 16)[0] == 0xFFFFFFFF \
+            or struct.unpack_from("<H", tail, pos + 10)[0] == 0xFFFF:
+        loc = pos - 20
+        if loc < 0 or tail[loc:loc + 4] != b"PK\x06\x07":
+            return 0
+        z = struct.unpack_from("<Q", tail, loc + 8)[0] - start
+        if not 0 <= z <= len(tail) - 56 or tail[z:z + 4] != b"PK\x06\x06":
+            return 0
+        cd_size, end = struct.unpack_from("<Q", tail, z + 40)[0], z
+    return max(0, min(len(tail) - 65_557, end - cd_size - 1024))
+
+
+def _oversized_member(rel, first, more):
+    """FP-MODEL-FILES: an oversized member (`first`: its first MAX_MEMBER + 1 bytes; `more(n)`: the next bytes, b"" at
+    its end) read on, once, as its stream passes, when its first bytes are a zip model file's (a checkpoint, an
+    .npz: the pieces _ZipModelKeep keeps) or it is a .pth file (the lines site.py runs, read in chunks: the engine's
+    pth_stream, John's decision of Oct 21), or (FP-OPAQUE-MEDIA) when its first bytes would make it an opaque blob
+    unless it is a sound, video, image or font to its end (its structure walked as the stream passes: the engine's
+    media_stream) -> (pieces or None, {"lines", "cuts"} or None, the walk's end or None); (None, None, None) when it
+    is none of them, and nothing more is read."""
+    keep = _ZipModelKeep() if first[:4] == b"PK\x03\x04" and lazaret.model_sniff(rel, first[:512]) else None
+    pth = os.path.splitext(posixpath.basename(rel))[1].lower() == ".pth"
+    walk = {"state": None, "offset": 0, "end": None} if _wants_walk(rel, first) else None
+    if keep is None and not pth and walk is None:
+        return None, None, None
+    state, lines, cuts = None, [], []
+
+    def feed(chunk):
+        nonlocal state
+        if keep is not None:
+            keep.feed(chunk)
+        if pth:
+            for k in range(0, len(chunk), lazaret.PTH_CHUNK):
+                got = lazaret.pth_stream(state, chunk[k:k + lazaret.PTH_CHUNK], False)
+                state = got["state"]
+                lines.extend(got["lines"])
+                cuts.extend(got["cuts"])
+        if walk is not None and walk["end"] is None:
+            for k in range(0, len(chunk), lazaret.MEDIA_CHUNK):
+                piece = chunk[k:k + lazaret.MEDIA_CHUNK]
+                got = lazaret.media_stream(walk["state"], walk["offset"], piece, False)
+                walk["state"], walk["end"] = got["state"], got["end"]
+                walk["offset"] += len(piece)
+                if walk["end"] is not None:
+                    break
+    feed(first)
+    while True:
+        chunk = more(_OUTPUT_CHUNK)
+        if not chunk:
+            break
+        feed(chunk)
+    if pth:
+        got = lazaret.pth_stream(state, b"", True)
+        lines.extend(got["lines"])
+        cuts.extend(got["cuts"])
+    if walk is not None and walk["end"] is None:
+        walk["end"] = lazaret.media_stream(walk["state"], walk["offset"], b"", True)["end"]
+    return ((keep.pieces() if keep is not None else None), ({"lines": lines, "cuts": cuts} if pth else None),
+            (walk["end"] if walk is not None else None))
+
+
+def _wants_walk(rel, first):
+    """FP-OPAQUE-MEDIA: whether an oversized member's first bytes call for its structure to be walked (they would
+    make it an opaque blob, and they start a format the engine walks)."""
+    return lazaret.classify_needs_whole(rel, first[:SAMPLE], len(first), "repo")
+
+
+def _folder_oversized_member(rel, path, first, budget):
+    """_oversized_member for an oversized file of a folder (`first`: its first bytes), the rest read as _read_regular
+    reads one, charged to `budget`; (None, None, None) when what is there is no longer a regular file. OSError when
+    it cannot be read; ArchiveLimit past the budget."""
+    if not (first[:4] == b"PK\x03\x04" or os.path.splitext(rel)[1].lower() == ".pth" or _wants_walk(rel, first)):
+        return None, None, None
+    fd = os.open(path, _FOLDER_OPEN_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, None, None
+        os.lseek(fd, len(first), os.SEEK_SET)
+
+        def more(n):
+            budget.check()
+            chunk = os.read(fd, n)
+            budget.charge(len(chunk))
+            return chunk
+        return _oversized_member(rel, first, more)
+    finally:
+        os.close(fd)
+
+
 def _walk_folder(base, budget):
     count, last = 0, "(folder)"
     try:
@@ -1727,7 +1945,16 @@ def _walk_folder(base, budget):
         if raw is None:
             continue                              # (it was swapped for something else than a file)
         if len(raw) > MAX_MEMBER:
-            yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+            big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
+            # (FP-MODEL-FILES: a zip model file of any size, read for its pickles; a .pth file for its import lines)
+            try:
+                big.model, big.pth, big.media = _folder_oversized_member(rel, path, raw, budget)
+            except ArchiveLimit as lim:
+                yield Member(rel, 0, b"", lim.reason, lim.detail)
+                return
+            except OSError:
+                big.model = big.pth = big.media = None    # (unread: SC-TRUNCATED, as before)
+            yield big
             continue
         yield Member(rel, len(raw), raw, None)
 
@@ -1790,7 +2017,11 @@ def _iter_tar(data, container, artifact, budget, anomalies):
             f = tf.extractfile(m)
             raw = f.read(MAX_MEMBER + 1) if f is not None else b""
             if len(raw) > MAX_MEMBER:
-                yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                # (FP-MODEL-FILES: a zip model file of any size, read for its pickles as the stream passes; a .pth
+                # file for its import lines)
+                big.model, big.pth, big.media = _oversized_member(rel, raw, f.read)
+                yield big
                 continue
             yield Member(rel, len(raw), raw, None)
     except ArchiveLimit as lim:
@@ -1896,7 +2127,11 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, co
                 continue
             f = tf.extractfile(m)
             raw = f.read(MAX_MEMBER + 1) if f is not None else b""
-            for link_rel in plan.pop(rel):
+            links_to = plan.pop(rel)
+            # (the target read on once for all its links: as a .pth file when one of them is named so)
+            name = next((n for n in links_to if n.lower().endswith(".pth")), links_to[0])
+            read_as = _oversized_member(name, raw, f.read) if len(raw) > MAX_MEMBER else (None, None, None)
+            for link_rel in links_to:
                 count += 1
                 if count > MAX_FILES:
                     yield Member(link_rel, 0, b"", "files")
@@ -1904,7 +2139,9 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, co
                 _note_member(seen, link_rel, anomalies)
                 last = link_rel
                 if len(raw) > MAX_MEMBER:
-                    yield Member(link_rel, SAMPLE, raw[:SAMPLE], "member")
+                    big = Member(link_rel, SAMPLE, raw[:SAMPLE], "member")
+                    big.model, big.pth, big.media = read_as
+                    yield big
                 else:
                     yield Member(link_rel, len(raw), raw, None)
             if not plan:
@@ -2145,18 +2382,31 @@ def _iter_zip(data, artifact, budget, anomalies):
     seen, count, last = {}, 0, "(archive)"
 
     def read(info, rel, limit):
+        """(the entry's first `limit` bytes, and for one larger than MAX_MEMBER whose first bytes are a zip model
+        file's, its pieces and a .pth file's lines: _oversized_member, FP-MODEL-FILES)."""
         dictionary = _lzma_dict_size(data, info)
         if dictionary is not None and dictionary > MAX_LZMA_DICT:
             raise ValueError(f"an LZMA dictionary of {dictionary:,} bytes, over the {MAX_LZMA_DICT:,}-byte limit")
         # zipfile 3.12.3+ warns of entries that overlap: _zip_overlaps names
         # them, so the warning is no line on stderr or, under -W error, an
         # exception out of the reader (F-2)
+        model = None
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with zf.open(info) as fh:
                 raw = fh.read(limit)
-        budget.charge(len(raw))
-        return raw
+                budget.charge(len(raw))
+                if len(raw) > MAX_MEMBER:
+                    def more(n):
+                        budget.check()
+                        chunk = fh.read(n)
+                        budget.charge(len(chunk))
+                        return chunk
+                    try:
+                        model = _oversized_member(rel, raw, more)
+                    except _ZIP_READ_ERRORS:
+                        model = None          # (the rest unreadable: unread, SC-TRUNCATED, as before)
+        return raw, model
 
     for name in _zip_overlaps(data, infos):
         anomalies.append(("overlap", name, "its bytes overlap another entry's"))
@@ -2213,7 +2463,7 @@ def _iter_zip(data, artifact, budget, anomalies):
                     _note_member(seen, rel, anomalies)
                 last = rels[0]
                 try:
-                    raw = read(info, last, MAX_MEMBER + 1)     # bounded, real bytes
+                    raw, model = read(info, last, MAX_MEMBER + 1)     # bounded, real bytes
                 except _ZIP_READ_ERRORS as exc:
                     why = str(exc) if str(exc).startswith("an LZMA dictionary") else type(exc).__name__
                     for rel in rels:
@@ -2221,7 +2471,9 @@ def _iter_zip(data, artifact, budget, anomalies):
                     continue
                 for rel in rels:
                     if len(raw) > MAX_MEMBER:
-                        yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                        big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                        big.model, big.pth, big.media = model or (None, None, None)
+                        yield big
                     else:
                         yield Member(rel, len(raw), raw, None)
             for view_names, view_placed in pip_views:
@@ -2311,6 +2563,9 @@ PACKAGE_CODE = {"gomod": ("go", (".go",), (".c", ".h")), "crate": ("rs", (".rs",
 # not read and the scan is INCOMPLETE (aws-sdk-go v1, Go's largest module in
 # common use, is 207 million characters of Go and peaks at 2.4 GB read).
 PACKAGE_CODE_CHARS = lazaret.PACKAGE_CODE_CHARS        # (300,000,000; --deps reads with core's)
+# F-06: the Go reader's passes over a module's testdata/ packages an import names (_package_code): each pass gives
+# the packages the last one's imports named; after this many, every testdata/ package at once.
+TESTDATA_PASSES = 4
 # Tests and fixtures: a member under a folder named for them (TEST_DIR_NAMES:
 # exact names, in any case; testkit/, testutils/, attestation/ are code), or a
 # test file by its name (TEST_FILE_RE, Rust's tests.rs and *_test.rs among
@@ -2839,12 +3094,14 @@ def _unread_code(artifact, rel):
 
 
 def _never_built(artifact, rel):
-    """Is `rel`, a source file of a Go module or a crate, one no build of a
-    dependent compiles, as the readers say (core.never_built: a Go
+    """Is `rel`, a source file of a Go module or a crate, one the file rules
+    leave out as no build of a dependent compiles it (core.never_built: a Go
     *_test.go file, a file named with "_" or "." first, one under testdata/
-    or vendor/; a crate's tests/, benches/ and examples/)? Neither the reader
-    nor the file rules read it: the toolchain never runs it in a dependent
-    (rivo/uniseg's line-break tests hold escaped URLs)."""
+    or below a vendor/ folder's own folders; a crate's tests/, benches/ and
+    examples/)? The toolchain never runs it in a dependent (rivo/uniseg's
+    line-break tests hold escaped URLs), but for a testdata/ package an
+    import names, which the Go reader is given and reads (F-06: go_testdata,
+    _package_code)."""
     if artifact == "gomod":
         return lazaret.never_built("go", _go_root_file(rel))
     if artifact == "crate":
@@ -2987,6 +3244,7 @@ class _ArtifactScan:
         self._bare = {}                    # (folder, specifier) -> _resolve_bare's answer (EG-6)
         self._node_modules = None          # does the archive hold a node_modules folder (_has_node_modules)
         self.issues, self.files_scanned, self.binaries = [], 0, 0
+        self.wrappers, self.wrapper_props = [], {}      # FP-GRADLE-WRAPPER: _gradle_wrappers
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
         self.cut = set()           # why the scan is incomplete, of INCOMPLETE_KINDS (T-1, decision 9)
@@ -3000,6 +3258,7 @@ class _ArtifactScan:
         self.dropped = set()       # text members not kept (budget)
         self.shell = {}            # rel -> text of shell scripts
         self.binary = set()        # classified as binary
+        self.models = []           # FP-MODEL-FILES: [rel, False, imports] of the model files (_model, _model_own)
         self.oversize = set()
         self.native = set()        # members whose first bytes are a program's (ELF, Mach-O, PE, WebAssembly, DEX)
         self.compiled = set()      # RA-13: members that are compiled code (_compiled_code: the result's compiledCode)
@@ -3029,6 +3288,13 @@ class _ArtifactScan:
         self.code_text = {}        # rel -> raw: what a reader reads besides the scanned sources (a Go
         self.code_bytes = 0        # module's cgo C; an sdist's .rs and Cargo.toml files, N-17), kept
         self.code_dropped = set()  # within PACKAGE_CODE_CHARS bytes (code_dropped: not kept)
+        # F-06: a Go module's .go files in testdata/ folders (rel -> raw, kept within PACKAGE_CODE_CHARS bytes of
+        # their own: over them, testdata_dropped; over the member limit: rel -> size), decoded and given to the Go
+        # reader only when an import of the module's names their package (its answer's "wanted"), and then read
+        # with the file rules too (_package_code); the others are data. go_text: rel -> what the Go reader reads of
+        # a .go file where the Go toolchain reads its bytes otherwise than the rules' text (decode_go_member)
+        self.testdata_go, self.testdata_dropped, self.testdata_oversize, self.testdata_bytes = {}, set(), {}, 0
+        self.go_text = {}
         # action (N-4): the action's directory in the repository ('' for its root), its action.yml's text
         # (rel -> text), what it runs (_action_entry_points: action_info), and the files it runs as code
         # (rel -> how: 'runs.main', 'step 2', ...)
@@ -3102,11 +3368,77 @@ class _ArtifactScan:
             elif keep_encoding or i["rule"] != "Q-ENCODING":
                 self.issues.append(i)
 
-    def classify(self, rel, raw, size):
-        bi = lazaret.classify_binary(rel, raw, size, self.artifact)
-        if bi:
-            self.binaries += 1
-            self.issues.append(bi)
+    def _model(self, rel, raw, size, whole, ranged=None):
+        """FP-MODEL-FILES: a member read as a model file (its pickles, for what they would run): its findings
+        (SC-TRUNCATED as a part not fully read: its pickle is code) and imports kept; None when it is not one.
+        `ranged`: an oversized zip model member's (size, pieces), kept as it was read (_oversized_member)."""
+        if ranged is not None:
+            full, pieces = ranged
+            got = lazaret.model_file(rel, None, full, pieces=pieces, last=True)
+        elif not lazaret.model_sniff(rel, raw):
+            return None
+        else:
+            got = lazaret.model_file(rel, raw, size, None if whole else MAX_MEMBER)
+        if got is None:
+            return None
+        for i in got["issues"]:
+            if i["rule"] == "SC-TRUNCATED":
+                self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "code")
+            else:
+                self.issues.append(i)
+        if got["imports"]:
+            self.models.append([rel, False, got["imports"], got.get("calls", [])])
+        return got
+
+    def _pth_streamed(self, rel, got):
+        """FP-MODEL-FILES: a .pth member too large to read whole, read in chunks as its stream passed (_oversized_member):
+        SC-PTH-EXEC for each line site.py runs (pth_kept_issues: as pth_issues reads a line, at its line), and
+        SC-TRUNCATED for a line it could not keep. Its other lines are paths to site.py, and are not scanned as Python
+        source as a .pth file read whole is."""
+        try:
+            self.issues.extend(lazaret.pth_kept_issues(rel, got["lines"]))
+        except _engine.NativeError as exc:
+            self._unanswered(rel, exc)
+        if got["cuts"]:
+            more = f" (and {len(got['cuts']) - 1} more)" if len(got["cuts"]) > 1 else ""
+            self.truncate(rel, got["cuts"][0] + more, "code")
+
+    def _model_own(self):
+        """FP-MODEL-FILES: the globals of the release's own modules its model files import (importing one runs
+        that module's code, which the scan reads, when the file is loaded): SC-PICKLE-GLOBAL as INFO; and the calls
+        with text its model files hold: SC-PICKLE-GLOBAL, MAJOR. The engine's (pickle::own_imports)."""
+        files = [[rel, False] for rel in sorted(self.members) if rel.endswith(".py")]
+        self.issues.extend(lazaret.model_own_issues(self.models, files))
+
+    def classify(self, rel, raw, size, whole=True, walked=None):
+        """classify_binary of a member: `raw` the whole member (`whole`), or an oversized one's first bytes with the
+        walk of its structure as its stream passed (`walked`: FP-OPAQUE-MEDIA). A keystore is S-SECRET, listed as
+        secrets are (and SC-OPAQUE-BLOB beside it when it holds more than a keystore does); the rest are binary
+        artifacts. A Gradle wrapper jar is judged once every member is read (_gradle_wrappers: FP-GRADLE-WRAPPER)."""
+        if lazaret.gradle_wrapper_path(rel):
+            # (an oversized member's size is not known here: it is larger than the member limit)
+            whole = whole and walked is None
+            self.wrappers.append((rel, raw, size if whole else max(size, MAX_MEMBER + 1), whole))
+            return
+        self._binary_issue(lazaret.classify_binary(rel, raw, size, self.artifact, whole=whole and walked is None,
+                                                   walked=walked))
+
+    def _gradle_wrappers(self):
+        """FP-GRADLE-WRAPPER: each Gradle wrapper jar, judged by its checksum against Gradle's published wrapper
+        checksums with the gradle-wrapper.properties beside it, wherever the archive held that (it may follow the
+        jar). One not read whole (over the member limit) is judged by its size."""
+        wrappers, self.wrappers = self.wrappers, []
+        for rel, raw, size, whole in wrappers:
+            props = self.wrapper_props.get(posixpath.join(posixpath.dirname(rel), "gradle-wrapper.properties"))
+            self._binary_issue(lazaret.classify_binary(rel, raw, size, self.artifact, whole=whole, props=props))
+
+    def _binary_issue(self, bi):
+        """Count and keep classify_binary's answer: an issue, a list of them (a keystore that is an opaque blob too)
+        or None."""
+        for issue in bi if isinstance(bi, list) else [bi] if bi else []:
+            if issue["rule"].startswith("SC-"):
+                self.binaries += 1
+            self.issues.append(issue)
 
     def scan_source(self, rel, text, lang):
         self._deadline(rel)                  # not one more file past the deadline
@@ -3185,8 +3517,10 @@ class _ArtifactScan:
         kept); `declared`, the release's declared names, for its D-12 test
         (_declared_names); the release's own name (D-9, _own_name). Each
         answer is (reasons, line, refused): the parser's refusal of a
-        JavaScript or TypeScript file, said in the report (_note_unparsed)."""
-        flags = {"budget": _engine.WORK_BUDGET, "refused": True}
+        JavaScript or TypeScript file, said in the report (_note_unparsed);
+        unread: the limit a reading of the file met before its end, which
+        makes it SC-TRUNCATED beside what was found (BIG-BUNDLE-TAIL)."""
+        flags = {"budget": _engine.WORK_BUDGET, "refused": True, "unread": True}
         if declared is not None:
             flags["declared"] = hashlib.sha256("\n".join(declared).encode("utf-8", "surrogatepass")).hexdigest()
         own = self._own_name()
@@ -3199,7 +3533,7 @@ class _ArtifactScan:
         def compute(missing):
             return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
                     for a in _engine.import_time_risks([asked[key] for key in missing], texts=self.texts,
-                                                       declared=declared, own=own, refused=True)]
+                                                       declared=declared, own=own, refused=True, unread=True)]
         return self.memo.get_or_compute_many(keys, compute)
 
     def _declared_names(self):
@@ -3277,6 +3611,11 @@ class _ArtifactScan:
             self.timed_out = self.timed_out or reason == "time"
             return
         self.members.add(rel)
+        if posixpath.basename(rel) == "gradle-wrapper.properties":
+            # (FP-GRADLE-WRAPPER: _gradle_wrappers. One byte more than the engine reads, so that a longer file is
+            # told; one over the member limit was not read whole: its wrapper can't be verified)
+            self.wrapper_props[rel] = (raw[:lazaret.engine.pack_value("GRADLE_PROPERTIES_MAX_BYTES") + 1]
+                                       if reason != "member" else {"error": "it is larger than the member size limit"})
         if self.artifact in UNREAD_CODE and _unread_code(self.artifact, rel):
             self.unread_code.append(rel)
         base = os.path.basename(rel)
@@ -3292,8 +3631,11 @@ class _ArtifactScan:
         agent_doc = (self.artifact in AGENTDOC_ARTIFACTS
                      and (base.lower().endswith(_AGENTDOC_HINT_EXTS) or base.lower() in _AGENTDOC_HINT_NAMES)
                      and lazaret.agentdoc_kind(rel) is not None)
+        testdata = self.artifact == "gomod" and ext == ".go" and lazaret.go_testdata(_go_root_file(rel))
         if reason == "member":
             self.oversize.add(rel)
+            if testdata:
+                self.testdata_oversize[rel] = size
             native = _native_program(raw)
             if native:
                 self.native.add(rel)
@@ -3301,17 +3643,25 @@ class _ArtifactScan:
                 self.compiled.add(rel)
             if agent_doc:
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
+            elif ext == ".pth" and getattr(m, "pth", None) is not None:
+                # (FP-MODEL-FILES, John's decision of Oct 21: a .pth file too large to read whole, read as its stream
+                # passed for the lines site.py runs; a checkpoint's pickles below)
+                self._pth_streamed(rel, m.pth)
             elif wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
                 # Verdict integrity (audit C2/G16): a cut-short scan is a
                 # signal, not a clean verdict — whatever the first bytes look like.
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
             # still classifiable by magic/entropy from the decompressed prefix
             disguised = lazaret.disguised_binary(rel, raw) if lazaret.dep_source_lang(ext) else None
+            # (a model file larger than the limit: a zip read by range, the pieces of it kept as it was read; another
+            # SC-TRUNCATED, its pickle not read)
+            model = (None if disguised or (wants_text and ext != ".pth") or agent_doc or lazaret.dep_source_lang(ext)
+                     else self._model(rel, raw, size, False, getattr(m, "model", None)))
             if disguised:
                 self.binaries += 1
                 self.issues.append(disguised)
-            else:
-                self.classify(rel, raw, size)
+            elif model is None or model["opaque"]:
+                self.classify(rel, raw, size, whole=False, walked=getattr(m, "media", None))
             return
         if rel in self.action_meta_paths:
             # the action's action.yml (N-4), read in the second pass (_action_entry_points)
@@ -3363,6 +3713,13 @@ class _ArtifactScan:
         if named == "pyproject.toml":
             self.manifests[rel] = raw.decode("utf-8", "replace")
             return
+        if testdata:
+            # (F-06) kept for the Go reader, which reads it when an import names its package; classified as before
+            if self.testdata_bytes + len(raw) <= PACKAGE_CODE_CHARS:
+                self.testdata_go[rel] = raw
+                self.testdata_bytes += len(raw)
+            else:
+                self.testdata_dropped.add(rel)
         if ((self.artifact == "sdist" and (ext == ".rs" or base == "Cargo.toml"))
                 or (code is not None and ext in code[2] and not _never_built(self.artifact, rel))) \
                 and not lazaret.looks_binary(raw[:2048]):
@@ -3372,10 +3729,15 @@ class _ArtifactScan:
             # Cargo.toml is
             self._keep_code(rel, raw)
             return
+        # FP-MODEL-FILES: a model file's pickles, for what they would run (a checkpoint named .pth too)
+        model = None
+        if lazaret.dep_source_lang(ext) is None and not agent_doc:
+            model = self._model(rel, raw, size, True)
         if ext == ".pth":
+            # the lines site.py runs, read byte-wise as a .pth member read in chunks is (one rule for every route)
             text = raw.decode("utf-8-sig", "replace")
             try:
-                self.issues.extend(pth_issues(rel, text))
+                self._pth_streamed(rel, lazaret.pth_stream_file(iter([raw, b""]).__next__))
             except _engine.NativeError as exc:
                 self._unanswered(rel, exc)
             self.scan_source(rel, text, "py")
@@ -3384,7 +3746,12 @@ class _ArtifactScan:
         if lang is None and code is not None and ext in code[1] and not _never_built(self.artifact, rel):
             lang = code[0]                       # a Go module's .go, a crate's .rs (Part C)
         if lang is not None:
-            text, extra = lazaret.decode_member(rel, raw)
+            if lang == "go" and self.artifact == "gomod":
+                text, extra, go = lazaret.decode_go_member(rel, raw)
+                if go != text:
+                    self.go_text[rel] = go           # (F-06: what the Go reader reads, _package_code)
+            else:
+                text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)
             disguised = lazaret.disguised_binary(rel, raw)
             if disguised:
@@ -3403,7 +3770,8 @@ class _ArtifactScan:
                 self.native.add(rel)
             if _compiled_code(rel, raw, native):
                 self.compiled.add(rel)
-            self.classify(rel, raw, size)
+            if model is None or model["opaque"]:
+                self.classify(rel, raw, size)
             return
         # An AI agent's skill or instruction file (RA-3): read in the second pass for what it tells the agent to do
         # (_agent_docs); a #! line does not make it a script. It is kept as other text is too (package.json may name
@@ -3897,13 +4265,13 @@ class _ArtifactScan:
             if rel is None:
                 continue
             lang = _engine.script_lang(rel, text)
-            reasons = _engine.install_script_risk(text, lang=lang, own=self._own_name(), path=rel) if text else []
+            reasons = self._install_risk(rel, text, lang=lang, own=self._own_name(), path=rel) if text else []
             out.append((rel, reasons))
             # (a step's script runs in the job's workspace: only a path built from its own place is the action's)
             for started, more in self._started_scripts(rel, text, None, self.install_scripts):
                 self.action_entries.setdefault(started, []).append(how)
-                more = (_engine.install_script_risk(more, lang=_engine.script_lang(started, more),
-                                                    own=self._own_name(), path=started) if more else [])
+                more = (self._install_risk(started, more, lang=_engine.script_lang(started, more),
+                                           own=self._own_name(), path=started) if more else [])
                 out.append((f"{rel}, which starts {started}", more))
         return out
 
@@ -3955,7 +4323,7 @@ class _ArtifactScan:
             kind = _actionmeta.step_shell(_actionmeta.unquote_json(step.shell))
             script = _actionmeta.substitute(step.run)
             if kind in ("py", "js"):
-                reasons = _engine.install_script_risk(script, shell=False, lang=kind, own=self._own_name())
+                reasons = self._install_risk(meta_rel, script, shell=False, lang=kind, own=self._own_name())
                 self._action_issue(meta_rel, step.run_line, text, what, reasons, [])
                 continue
             if kind == "other":
@@ -4099,16 +4467,16 @@ class _ArtifactScan:
                 text = self._text_of(rel, lang)
                 clean = clean and bool(text)
                 runs.append(rel)
-                reasons = (_engine.install_script_risk(text, lang=_engine.script_lang(rel, text),
-                                                       own=self._own_name(), path=rel) if text else [])
+                reasons = (self._install_risk(rel, text, lang=_engine.script_lang(rel, text),
+                                              own=self._own_name(), path=rel) if text else [])
                 if reasons:
                     clean = False       # a followed script with any reason (weak ones too) is not "read clean"
                     _escalate(reasons, f"Install hook runs {target}, which {'; and '.join(reasons)}.")
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
                     runs.append(started)
-                    more = (_engine.install_script_risk(more, lang=_engine.script_lang(started, more),
-                                                        own=self._own_name(), path=started) if more else [])
+                    more = (self._install_risk(started, more, lang=_engine.script_lang(started, more),
+                                               own=self._own_name(), path=started) if more else [])
                     if more:
                         clean = False
                         _escalate(more, f"Install hook runs {target}, which starts {started}, which "
@@ -4223,7 +4591,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel, text), own=self._own_name(), path=rel)
+            reasons = self._install_risk(rel, text, lang=_engine.script_lang(rel, text), own=self._own_name(), path=rel)
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
@@ -4340,8 +4708,10 @@ class _ArtifactScan:
             if _engine.unanswered(risk):
                 self._unanswered(rel, risk)
                 continue
-            reasons, line, refused = risk
+            reasons, line, refused, unread = risk
             self._note_unparsed(rel, refused, "import")
+            if unread:
+                self.truncate(rel, unread, "work")      # (BIG-BUNDLE-TAIL: not read to its end; what was found stands)
             if not reasons:
                 continue
             when, runs = "runs when the package is loaded", (
@@ -4442,6 +4812,16 @@ class _ArtifactScan:
         self.truncate(rel, _engine.error_issue(rel, exc)["msg"].removeprefix("File not fully scanned: ").rstrip("."),
                       "work")
 
+    def _install_risk(self, rel, text, **kwargs):
+        """The install-script test's reasons for the script `rel` (`text`; engine.install_script_risk's arguments),
+        the script SC-TRUNCATED when it was not read whole (BIG-BUNDLE-TAIL, the review of Oct 20: a limit of the text
+        follower's, or the supply-chain tree's not reading it: code V8 compiles that the parser refused, the model's
+        budget spent), beside what was found."""
+        reasons, unread = _engine.install_script_risk(text, unread=True, **kwargs)
+        if unread:
+            self.truncate(rel, unread, "work")
+        return reasons
+
     def _phase(self, where, step, *args):
         """Run one step of finish() once the deadline check passes. A call the
         engine could not answer in it (its work budget spent on a hostile
@@ -4451,7 +4831,7 @@ class _ArtifactScan:
         try:
             return step(*args)
         except _engine.NativeError as exc:
-            why = (_engine.EXHAUSTED if isinstance(exc, _engine.NativeExhausted)
+            why = (_engine.exhausted_why(exc) if isinstance(exc, _engine.NativeExhausted)
                    else f"an internal error of the engine ({type(exc).__name__})")
             self.truncate("(release)", f"the engine could not finish {where}: {why}", "work")
             return None
@@ -4493,8 +4873,11 @@ class _ArtifactScan:
                 continue
             self.use_time["files"] += 1
             self.use_time["chars"] += len(self.sources[rel][0])
-            reasons, line, refused = risk
+            reasons, line, refused, unread = risk
             self._note_unparsed(rel, refused, "use")
+            if unread and not unread.startswith(_engine.TREE_CUT):
+                # (code that may never run: the text follower's answer stands where the tree did not read it whole)
+                self.truncate(rel, unread, "work")
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
@@ -4603,6 +4986,29 @@ class _ArtifactScan:
             text = lazaret.normalize_newlines(lazaret.decode_source(self.agent_docs[rel])[0])
             self.issues.extend(lazaret.agentdoc_issues(rel, text.split("\n"), self._member_text, dep=True))
 
+    def _b64_descriptors(self):
+        """FP-B64-PROTOBUF (the review of Oct 27): the SC-B64 findings of the release's JavaScript that are protobuf
+        descriptors generated code alone uses, decided over the whole release (core.b64_descriptor_pass): its sources,
+        its manifests, and the members that may hold script or say where modules are (core.b64_mark), as this scan
+        holds them (_member_text: None when it does not). What it did not read keeps them: a member a limit left
+        unread, a text member not kept, a part not fully scanned (SC-TRUNCATED, past the cap on findings too)."""
+        if not any(i["rule"] == "SC-B64" for i in self.issues):
+            return
+        marked = {"holder": [], "resolver": []}
+        for rel in sorted(self.members):
+            kind = lazaret.b64_mark(rel)
+            if kind is not None:
+                marked[kind].append(rel)
+        unread = set(self.truncated_at) | set(self.dropped)
+        if self.unread or self.timed_out:
+            unread.add(".")
+        files = [{"path": rel, "content": text, "lang": lang} for rel, (text, lang) in self.sources.items()]
+        manifests = [{"path": rel, "content": text} for rel, text in self.manifests.items()]
+        note = lazaret.b64_descriptor_pass(self.issues, files, manifests, marked["holder"], marked["resolver"],
+                                           self._member_text, False, True, unread=sorted(unread))
+        if note:
+            print(f"warning: {note}", file=sys.stderr)
+
     def _member_text(self, rel):
         """The text of a member as this scan holds it (a source, a shell
         script, other text kept), with \\n line endings, or None: what an agent
@@ -4660,7 +5066,19 @@ class _ArtifactScan:
         A module's //go:generate commands are listed (SC-GO-GENERATE, INFO):
         they run only when someone runs go generate. Code larger than
         PACKAGE_CODE_CHARS is not read (SC-TRUNCATED: INCOMPLETE), and so is
-        a module whose cgo C was not all kept."""
+        a module whose cgo C was not all kept.
+
+        F-06: the reader reads each .go file as the Go toolchain reads it
+        (go_text), and a module's testdata/ package only when an import of
+        the module's names it: the reader's answer says which it wants, and
+        it is asked again with their files (_testdata_wanted), each decoded
+        then and read with the file rules too; a file of one that was not
+        kept (over the member limit, or past the bytes held) makes the module
+        INCOMPLETE. An import of another module's testdata/ package is
+        SC-GO-TESTDATA-IMPORT (MAJOR), and so is one of a testdata/ folder
+        the module does not have, under its own path: a nested module's,
+        which a module zip leaves out (the reader is told the module's
+        testdata/ folders)."""
         code = PACKAGE_CODE.get(self.artifact)
         if code is None:
             return
@@ -4669,25 +5087,62 @@ class _ArtifactScan:
         if not rels:
             return
         what = "module" if self.artifact == "gomod" else "crate"
-        texts = {rel: self.sources[rel][0] for rel in rels}
+        texts = {rel: self.go_text.get(rel, self.sources[rel][0]) for rel in rels}
         for rel in sorted(self.code_text):
             if os.path.splitext(rel)[1].lower() in others:
                 texts[rel] = self.code_text[rel].decode("utf-8", "replace")
-        order = sorted(texts)
         place = _go_root_file if self.artifact == "gomod" else (lambda r: r)
-        files = [(place(rel), texts[rel]) for rel in order]
-        size = sum(len(t) for _p, t in files)
-        if size > PACKAGE_CODE_CHARS or self.code_dropped:
-            amount = f"{size:,} characters" if not self.code_dropped else "its C files not all kept"
-            self.truncate(rels[0], f"the {what}'s code ({amount}) is more than the reader takes at once "
-                                   f"({PACKAGE_CODE_CHARS:,}), so it was not read", "code")
+
+        def fits():
+            order = sorted(texts)
+            files = [(place(rel), texts[rel]) for rel in order]
+            size = sum(len(t) for _p, t in files)
+            if size > PACKAGE_CODE_CHARS or self.code_dropped:
+                amount = f"{size:,} characters" if not self.code_dropped else "its C files not all kept"
+                self.truncate(rels[0], f"the {what}'s code ({amount}) is more than the reader takes at once "
+                                       f"({PACKAGE_CODE_CHARS:,}), so it was not read", "code")
+                return None
+            return order, files
+        got = fits()
+        if got is None:
             return
+        order, files = got
         self._deadline(rels[0])
         if self.artifact == "gomod":
             mods = self._go_mods()
             module = mods[0][2]["module"] if mods else None
-            answer = _engine.go_package(files, module=module, use_file_chars=USE_RISK_MAX_CHARS,
-                                        use_chars=USE_RISK_CHARS, what=what, names=order)
+            testdata, asked, passes = {}, set(), 0   # (F-06) rel -> (text, extra) of the testdata/ files given
+            # (the module's testdata/ folders, given or not: an import of one it does not have is another module's,
+            # a nested module's too, SC-GO-TESTDATA-IMPORT)
+            dirs = sorted({posixpath.dirname(_go_root_file(rel))
+                           for rel in set(self.testdata_go) | self.testdata_dropped | set(self.testdata_oversize)})
+            while True:
+                answer = _engine.go_package(files, module=module, use_file_chars=USE_RISK_MAX_CHARS,
+                                            use_chars=USE_RISK_CHARS, what=what, names=order, testdata=dirs)
+                folders = self._testdata_wanted(answer.get("wanted") or (), module,
+                                                everything=passes >= TESTDATA_PASSES) - asked
+                if not folders:
+                    break
+                passes += 1
+                asked |= folders
+                for rel in sorted(set(self.testdata_go) | self.testdata_dropped | set(self.testdata_oversize)):
+                    if posixpath.dirname(_go_root_file(rel)) not in folders:
+                        continue
+                    if rel in self.testdata_go:
+                        text, extra, go = lazaret.decode_go_member(rel, self.testdata_go[rel])
+                        testdata[rel] = (text, extra)
+                        texts[rel] = go
+                    elif rel in self.testdata_oversize:
+                        self.truncate(rel, _TRUNC_DETAILS["member"](rel, self.testdata_oversize[rel]), "code")
+                    else:
+                        self.truncate(rel, f"{rel} is in a testdata/ package the module imports, and the module's "
+                                           f"testdata/ files are more than the {PACKAGE_CODE_CHARS:,} bytes kept",
+                                      "code")
+                self._deadline(rels[0])
+                got = fits()
+                if got is None:
+                    return
+                order, files = got
         else:
             from lazaret.registry.ecosystems import crates as _crates
             manifest = self.deferred.get("Cargo.toml", b"").decode("utf-8", "replace")
@@ -4695,6 +5150,36 @@ class _ArtifactScan:
             answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
                                       use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS, what=what, names=order)
         self._reader_findings(answer, order)
+        if self.artifact != "gomod":
+            return
+        # (F-06) a testdata/ package the reader read is built: its files get the file rules too
+        read = {order[k] for k in answer.get("read", ()) if 0 <= k < len(order)}
+        for rel, (text, extra) in sorted(testdata.items()):
+            if rel in read:
+                self.add_decode_issues(extra)
+                self.scan_source(rel, text, "go")
+        self.scan_pending()
+
+    def _testdata_wanted(self, wanted, module, everything=False):
+        """(F-06) The folders (below the module's root) of the module's
+        testdata/ .go files that the Go reader's `wanted` import paths name:
+        the module's path and the folder, or, with no module path, a path that
+        ends in the folder (as the reader names its packages). `everything`:
+        every such folder when any is wanted (the passes' bound,
+        TESTDATA_PASSES: a chain longer than that is read at once)."""
+        if not wanted:
+            return set()
+        folders = {posixpath.dirname(_go_root_file(rel))
+                   for rel in set(self.testdata_go) | self.testdata_dropped | set(self.testdata_oversize)}
+        if everything:
+            return folders
+        out = set()
+        for imp in wanted:
+            for folder in folders:
+                if (imp == f"{module}/{folder}" if module
+                        else imp == folder or imp.endswith("/" + folder)):
+                    out.add(folder)
+        return out
 
     def _sdist_crates(self):
         """N-17 (Part C): the Rust crates inside an sdist. A maturin or
@@ -4781,7 +5266,12 @@ class _ArtifactScan:
         core.package_reader_issues; what its use-time step read goes to
         useTime."""
         issues, read = lazaret.package_reader_issues(answer, order)
-        self.issues.extend(issues)
+        for i in issues:
+            if i["rule"] == "SC-TRUNCATED":
+                # (F-06: a file the Go reader's parser refused) one per file: with its decoding's, if it has one
+                self.truncate(i["file"], i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "code")
+            else:
+                self.issues.append(i)
         mine = dict(read, boundChars=USE_RISK_CHARS)
         if self.use_time is None:
             self.use_time = mine
@@ -5028,6 +5518,7 @@ class _ArtifactScan:
 
     def finish(self, anomalies):
         self.scan_pending()
+        self._gradle_wrappers()
         self.first_pass = False
         for kind, path, detail in anomalies:
             self.issues.append(_archive_issue(kind, path, detail))
@@ -5052,11 +5543,14 @@ class _ArtifactScan:
             self._phase("the agent-hijack check", self._agent_hijack)
             if self.agent_docs:
                 self._phase("the agent skill and instruction files", self._agent_docs)
+            if self.models:
+                self._phase("the model files' imports", self._model_own)
             self._phase("the package's names", self._lookalike_names)
             self._phase("the dependencies nothing uses", self._unused_dependencies)
             self._phase("the devDependencies the code loads", self._dev_only_loads,
                         reachable if reachable is not None else set(self.entries))
             self._phase("the install scripts the parser refused", self._unparsed_install_scripts)
+            self._phase("the protobuf descriptors", self._b64_descriptors)
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
@@ -5080,7 +5574,7 @@ class _ArtifactScan:
         if self.shown is not None:            # (--show-secrets: while the texts are in hand)
             self.shown.update(lazaret.flagged_lines(self.issues, self.read_texts()))
         # F9b: the decompressed sources are no longer needed (nor the engine's copies of them: FE-1)
-        self.sources, self.deferred, self.shell, self.code_text = {}, {}, {}, {}
+        self.sources, self.deferred, self.shell, self.code_text, self.testdata_go, self.go_text = {}, {}, {}, {}, {}, {}
         self.release()
 
 
