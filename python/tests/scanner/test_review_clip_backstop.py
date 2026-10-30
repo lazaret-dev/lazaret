@@ -23,6 +23,7 @@ inside one rule's per-match loop.
 Timing bounds are loose (slow CI runners): far above today's cost, far below
 the old one. All content is inert.
 """
+import sysconfig
 import time
 import unittest
 from unittest import mock
@@ -30,7 +31,9 @@ from unittest import mock
 from lazaret.scanner import core, engine
 
 REPEATS = (2_500, 5_000, 10_000, 20_000)
-LIMIT_S = 4.0
+# (a Python built on musl is slower at this: test_clip_is_windowed took 12.7 s on the Wheels' musllinux x86_64 job
+# and 7.9 s on aarch64, Oct 29; the whole-line clip took over 44 s on glibc)
+LIMIT_S = 30.0 if "musl" in (sysconfig.get_config_var("HOST_GNU_TYPE") or "") else 4.0
 E = "…"
 
 
