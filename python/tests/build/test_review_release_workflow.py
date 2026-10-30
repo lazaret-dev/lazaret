@@ -322,8 +322,8 @@ class NpmEngineTests(unittest.TestCase):
         # a module whose tests skip without js/native/lazaret.wasm (NPM_READY)
         # is skipped by the jobs that run the whole suite: a job that builds
         # the engine must name it, or nothing runs it (every folder of tests:
-        # three scanner modules compared with an npm CLI that had no engine,
-        # CI's python-unit, PR #17, Oct 29)
+        # two scanner modules compared with an npm CLI that had no engine in
+        # CI's python-unit, and a third's npm tests no job ran; PR #17, Oct 29)
         tests = os.path.join(_support.REPO_ROOT, "python", "tests")
         gated = sorted(f"tests.{d}.{f[:-3]}" for d in sorted(os.listdir(tests)) if os.path.isdir(os.path.join(tests, d))
                        for f in os.listdir(os.path.join(tests, d)) if f.startswith("test_") and f.endswith(".py")
