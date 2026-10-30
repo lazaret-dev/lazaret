@@ -1476,6 +1476,22 @@ class WithoutFileIdsTests(_SwapCase):
                 self.assertNotRead("scan_directory", out, "a.py")
                 self.assertEqual([i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"], ["a.py"])
 
+    def test_windows_exact_path_takes_every_folder_form(self):
+        # (on every system: Windows' paths, made as Windows makes them, ntpath's; the review's L1: a \\.\ folder was
+        # kept as it was, and Windows rewrites the names under one)
+        for folder, want in (("C:\\x", "\\\\?\\C:\\x\\a.js."),
+                             ("C:\\", "\\\\?\\C:\\a.js."),
+                             ("C:/x/", "\\\\?\\C:\\x\\a.js."),
+                             ("\\\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js."),
+                             ("\\\\?\\C:\\x", "\\\\?\\C:\\x\\a.js."),
+                             ("\\\\?\\UNC\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js."),
+                             ("\\\\.\\C:\\x", "\\\\?\\C:\\x\\a.js."),
+                             ("\\\\.\\C:", "\\\\?\\C:\\a.js."),
+                             ("//./C:/x", "\\\\?\\C:\\x\\a.js."),
+                             ("\\\\.\\UNC\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js.")):
+            with self.subTest(folder=folder):
+                self.assertEqual(lazaret._windows_exact_path(folder, "a.js."), want)
+
     def test_the_exact_path_keeps_every_name_as_listed(self):
         # (Win32 drops a name's trailing dots and spaces: a.js. would name a.js; \\?\ takes it as it is, past MAX_PATH)
         if os.name != "nt":
@@ -1485,7 +1501,8 @@ class WithoutFileIdsTests(_SwapCase):
         for folder, want in ((drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js."),
                              (drive + "\\", "\\\\?\\" + drive + "\\a.js."),
                              ("\\\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js."),
-                             ("\\\\?\\" + drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js.")):
+                             ("\\\\?\\" + drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js."),
+                             ("\\\\.\\" + drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js.")):
             with self.subTest(folder=folder):
                 self.assertEqual(lazaret._exact_path(folder, "a.js."), want)
         inside, _outside = self.tree()
@@ -1494,6 +1511,8 @@ class WithoutFileIdsTests(_SwapCase):
         self.addCleanup(os.unlink, lazaret._exact_path(inside, "a.js."))    # (nor remove: shutil.rmtree's)
         st = os.lstat(lazaret._exact_path(inside, "a.js."))
         self.assertTrue(stat.S_ISREG(st.st_mode) and st.st_ino)
+        dev = "\\\\.\\" + lazaret._exact_path(inside, "a.js.")[4:]           # (the device form names it too)
+        self.assertEqual(lazaret._exact_path(os.path.dirname(dev), "a.js."), lazaret._exact_path(inside, "a.js."))
         out = server.tool_scan_directory({"path": inside})
         # (it is listed and has its own ID; opened by its path it is a.js, which is not there: not read, a change)
         self.assertNotRead("scan_directory", out, "a.js.")

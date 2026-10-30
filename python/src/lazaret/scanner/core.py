@@ -3492,14 +3492,22 @@ def _same_entry(st, rec):
 
 
 def _exact_path(folder, name):
-    """The path of `name` in `folder` as the system takes it exactly: on Windows, absolute and with the \\\\?\\ prefix,
-    so that no name in it is rewritten (Win32 drops a name's trailing dots and spaces, so `a.js.` would name `a.js`)
-    and its length is not capped at MAX_PATH (`name` is joined once `folder` is made absolute, which would rewrite it
-    too); elsewhere the two joined."""
+    """The path of `name` in `folder` as the system takes it exactly: on Windows, _windows_exact_path; elsewhere the
+    two joined."""
     if os.name != "nt":
         return os.path.join(folder, name)
-    folder = os.path.abspath(folder)
-    if not folder.startswith(("\\\\?\\", "\\\\.\\")):
+    return _windows_exact_path(folder, name)
+
+
+def _windows_exact_path(folder, name):
+    """Windows' path of `name` in `folder` as the system takes it exactly: absolute and with the \\\\?\\ prefix, so
+    that no name in it is rewritten (Win32 drops a name's trailing dots and spaces, so `a.js.` would name `a.js`) and
+    its length is not capped at MAX_PATH (`name` is joined once `folder` is made absolute, which would rewrite it too).
+    A \\\\.\\ folder is made \\\\?\\ (the device form still has its names rewritten), a UNC one \\\\?\\UNC\\."""
+    folder = ntpath.abspath(folder)
+    if folder.startswith("\\\\.\\"):
+        folder = "\\\\?\\" + folder[4:]
+    elif not folder.startswith("\\\\?\\"):
         folder = "\\\\?\\UNC\\" + folder[2:] if folder.startswith("\\\\") else "\\\\?\\" + folder
     return folder.rstrip("\\") + "\\" + name
 
