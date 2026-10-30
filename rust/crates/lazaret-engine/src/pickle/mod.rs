@@ -11,6 +11,12 @@
 //!   (PICKLE_SAFE_GLOBALS): a model of the formats — what PyTorch itself trusts to load — not an exemption; the
 //!   data types of modules of code, named exactly (PICKLE_DATA_GLOBALS: http.HTTPStatus, signal.Signals,
 //!   os.stat_result), are data too, while the rest of those modules is code;
+//! * a member of the standard library's data enums by the exact name a pickle writes for it (PICKLE_DATA_MEMBERS:
+//!   signal.SIGTERM, socket.AF_INET, ssl.CERT_REQUIRED, the module-level aliases Python 3.10 and 3.11.0 to 3.11.4
+//!   pickle a converted enum's member as, and ssl.TLSVersion.TLSv1_2, the getattr(ssl.TLSVersion, 'TLSv1_2') those
+//!   3.11 releases write for the others) is that data where it is only kept (pushed, stored, put in a container,
+//!   handed to a call); called, made, changed (BUILD, SETITEM, APPEND on it) or in a pickle that calls an object it
+//!   computed, it is judged as before, as code; its module and name each match exactly (FP-MODEL-FILES-PY311);
 //! * getattr(<a global>, '<a name>'), how pickle writes a bound method (zoneinfo's ZoneInfo._unpickle, an Arrow
 //!   extension type's deserializer), is read as that dotted global and judged by its name, its call as that global's;
 //!   getattr in any other use (on what the pickle computed, a chain, a default, anywhere but as such a callee) stays
@@ -115,6 +121,10 @@ pub struct Classes {
     /// the data types a module of code defines (an enum, a result's named tuple: http.HTTPStatus, os.stat_result):
     /// the format's, whatever their module
     data: HashSet<Vec<u8>>,
+    /// the members of the standard library's data enums by the exact (module, name) a pickle writes for them, in
+    /// modules of code (signal, SIGTERM; ssl, TLSVersion.TLSv1_2): data where they are only kept, code where they are
+    /// called. The pack writes each as `module.name`, its module the first dotted part
+    members: HashSet<(Vec<u8>, Vec<u8>)>,
     safe_prefixes: Vec<Vec<u8>>,
     code_modules: HashSet<Vec<u8>>,
     code_globals: HashSet<Vec<u8>>,
@@ -174,6 +184,12 @@ impl Classes {
         p.derived("PICKLE_SAFE_GLOBALS", |_| Classes {
             safe: set_of(p, "PICKLE_SAFE_GLOBALS"),
             data: set_of(p, "PICKLE_DATA_GLOBALS"),
+            members: set_of(p, "PICKLE_DATA_MEMBERS").into_iter()
+                .filter_map(|full| {
+                    let k = full.iter().position(|&c| c == b'.')?;
+                    Some((full[..k].to_vec(), full[k + 1..].to_vec()))
+                })
+                .collect(),
             safe_prefixes: p.strs("PICKLE_SAFE_PREFIXES").iter().map(|s| bytes(s)).collect(),
             code_modules: set_of(p, "PICKLE_CODE_MODULES"),
             code_globals: set_of(p, "PICKLE_CODE_GLOBALS"),
@@ -216,6 +232,17 @@ impl Classes {
         }
         // a name's own parts: an attribute that reaches code, or a module of code reached as an attribute
         name.split(|&c| c == b'.').any(|c| self.code_attrs.contains(c) || self.code_modules.contains(c))
+    }
+
+    /// Whether a global names a member of the standard library's data enums exactly (PICKLE_DATA_MEMBERS: the
+    /// module-level alias signal.SIGTERM that Python 3.10 and 3.11.0 to 3.11.4 pickle Signals.SIGTERM as, the dotted
+    /// ssl.TLSVersion.TLSv1_2 their getattr(ssl.TLSVersion, 'TLSv1_2') reads as). The module and the name each match
+    /// exactly: GLOBAL 'ssl.TLSVersion' 'TLSv1_2' imports a module ssl.TLSVersion, which is none (H3 of the review of
+    /// Oct 29). Its kind stays the module's (code): `findings` passes over such a global only when nothing called,
+    /// made or changed it (FP-MODEL-FILES-PY311).
+    pub fn is_member(&self, module: &[u8], name: &[u8]) -> bool {
+        let (m, n) = self.normalize(module, name);
+        self.members.contains(&(m, n)) || self.members.contains(&(module.to_vec(), name.to_vec()))
     }
 
     /// A global's kind and model, outside a TorchScript archive.
@@ -1472,6 +1499,16 @@ fn findings(book: &Book, parts: &[Part]) -> (Vec<(String, &'static str)>, Vec<(S
             // builtins.getattr put on the stack only as getattr(<a GLOBAL>, '<name>') each time: the attributes it
             // named are judged as globals (zoneinfo.ZoneInfo._unpickle), not getattr
             Kind::Code if g.model == Model::GetAttr && g.resolved > 0 && g.resolved == g.pushes => {}
+            // a member of the standard library's data enums by its exact name (signal.SIGTERM as Python 3.10 and 3.11
+            // pickle Signals.SIGTERM), only kept: pushed, stored, put in a container, handed to a call. Called (REDUCE,
+            // OBJ, INST, a helper's call), made (NEWOBJ, a reconstructor's class), changed (BUILD, SETITEM(S),
+            // APPEND(S), ADDITEMS on it) or given to a special method (those are `book.code`'s), it is code as before;
+            // an attribute reached through it is a global of its own name, which is none of these
+            // (FP-MODEL-FILES-PY311). Nor where the pickle calls an object it computed: what that object calls is not
+            // followed, so a member handed to it may be called (functools.partial(SIGTERM)(),
+            // itemgetter(0)((SIGTERM,))(): H1 of the review of Oct 29)
+            Kind::Code if g.member && g.ext.is_none() && g.called.is_none() && g.restored.is_none()
+                && book.dynamic.is_none() => {}
             Kind::Code => {
                 let (h, d) = if let Some((_, h)) = &g.called {
                     (h, format!("it calls {q}{} {}", with_text(h), at_of(parts, h)))

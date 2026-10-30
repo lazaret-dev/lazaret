@@ -24,7 +24,8 @@ import zlib
 
 __all__ = ["standins", "fn", "cls", "Storage", "Tensor", "tensor", "state_dict_pt", "full_model_pt",
            "lightning_ckpt", "legacy_pt", "plain_pickle", "joblib_dump", "npy", "npz", "torch_zip", "hostile",
-           "os_system", "stack_global_system", "build_setstate", "Reduce"]
+           "os_system", "stack_global_system", "build_setstate", "Reduce", "Member", "STD_MEMBERS", "STD_FORMS",
+           "std_members", "std_member_shapes"]
 
 
 @contextlib.contextmanager
@@ -420,6 +421,217 @@ def sklearn_tree():
                        "tree_": t, "_sklearn_version": "1.9.1"})
     return joblib_dump(e, extra={"sklearn.tree._classes": {"DecisionTreeClassifier": est},
                                  "sklearn.tree._tree": {"Tree": tree}})
+
+
+# ---- the standard library's enum members, as each Python writes them (FP-MODEL-FILES-PY311) ------------------------
+
+class Member(collections.namedtuple("Member", "module cls name value converted")):
+    """A member of one of the standard library's data enums: `converted`, its class made by IntEnum/IntFlag._convert_,
+    which exports the members at module level (signal.SIGTERM is signal.Signals.SIGTERM)."""
+
+
+# (the values are Linux's; the bytes, not the platform, are what the tests read)
+STD_MEMBERS = (
+    Member("signal", "Signals", "SIGTERM", 15, True), Member("signal", "Signals", "SIGINT", 2, True),
+    Member("signal", "Handlers", "SIG_DFL", 0, True), Member("signal", "Handlers", "SIG_IGN", 1, True),
+    Member("signal", "Sigmasks", "SIG_BLOCK", 0, True),
+    Member("socket", "AddressFamily", "AF_INET", 2, True), Member("socket", "AddressFamily", "AF_INET6", 10, True),
+    Member("socket", "SocketKind", "SOCK_STREAM", 1, True), Member("socket", "MsgFlag", "MSG_PEEK", 2, True),
+    Member("socket", "AddressInfo", "AI_PASSIVE", 1, True),
+    Member("ssl", "VerifyMode", "CERT_REQUIRED", 2, True), Member("ssl", "_SSLMethod", "PROTOCOL_TLS_CLIENT", 16, True),
+    Member("ssl", "Options", "OP_NO_COMPRESSION", 131072, True), Member("ssl", "VerifyFlags", "VERIFY_X509_STRICT", 32, True),
+    Member("ssl", "AlertDescription", "ALERT_DESCRIPTION_HANDSHAKE_FAILURE", 40, True),
+    Member("ssl", "SSLErrorNumber", "SSL_ERROR_EOF", 8, True),
+    Member("ssl", "TLSVersion", "TLSv1_2", 771, False),
+)
+
+# How each Python pickles a member (enum.py): 3.10 a converted enum's by its module-level name (_reduce_ex_by_name),
+# another's as its class called with its value; 3.11.0 to 3.11.4 a converted enum's by its module-level name
+# (_reduce_ex_by_global_name), another's as getattr(<its class>, '<its name>'); 3.11.5 and later, 3.12 to 3.14, every
+# member as its class called with its value.
+STD_FORMS = ("3.10", "3.11.0", "3.12")
+
+
+class _Writer:
+    """Opcodes as CPython's pickler writes them for a list of members: its memo (PUT, BINPUT, MEMOIZE; a module's name
+    or a class saved once), framing from protocol 4, Python 2's __builtin__ before protocol 3. Bytes only."""
+
+    def __init__(self, protocol):
+        self.proto, self.out, self.memo = protocol, bytearray(), {}
+
+    def put(self, key):
+        i = self.memo[key] = len(self.memo)
+        if self.proto >= 4:
+            self.out += b"\x94"
+        elif self.proto == 0:
+            self.out += b"p%d\n" % i
+        else:
+            self.out += b"q" + bytes([i]) if i < 256 else b"r" + struct.pack("<I", i)
+
+    def got(self, key):
+        if key not in self.memo:
+            return False
+        i = self.memo[key]
+        if self.proto == 0:
+            self.out += b"g%d\n" % i
+        else:
+            self.out += b"h" + bytes([i]) if i < 256 else b"j" + struct.pack("<I", i)
+        return True
+
+    def text(self, t):
+        if self.got(("str", t)):
+            return
+        b = t.encode()
+        if self.proto == 0:
+            self.out += b"V" + b + b"\n"
+        elif self.proto >= 4 and len(b) < 256:
+            self.out += b"\x8c" + bytes([len(b)]) + b
+        else:
+            self.out += b"X" + struct.pack("<I", len(b)) + b
+        self.put(("str", t))
+
+    def int(self, n):
+        if self.proto == 0:
+            self.out += b"I%d\n" % n
+        elif 0 <= n < 256:
+            self.out += b"K" + bytes([n])
+        elif 0 <= n < 65536:
+            self.out += b"M" + struct.pack("<H", n)
+        else:
+            self.out += b"J" + struct.pack("<i", n)
+
+    def glob(self, module, name, key=None):
+        """GLOBAL (STACK_GLOBAL from protocol 4), memoized as the object it names (`key`: a member's own)."""
+        key = key or ("global", module, name)
+        if self.got(key):
+            return
+        if self.proto >= 4:
+            self.text(module)
+            self.text(name)
+            self.out += b"\x93"
+        else:
+            m = "__builtin__" if module == "builtins" and self.proto < 3 else module
+            self.out += b"c" + m.encode() + b"\n" + name.encode() + b"\n"
+        self.put(key)
+
+    def tuple(self, items):
+        if self.proto >= 2:
+            for f in items:
+                f()
+            self.out += bytes([0x84 + len(items)])
+        else:
+            self.out += b"("
+            for f in items:
+                f()
+            self.out += b"t"
+        self.put(("tuple", len(self.memo)))
+
+    def member(self, m, form):
+        if self.got(("member", m)):
+            return
+        if m.converted and form in ("3.10", "3.11.0"):
+            self.glob(m.module, m.name, ("member", m))               # signal.SIGTERM
+            return
+        if form == "3.11.0":
+            self.glob("builtins", "getattr")                         # getattr(ssl.TLSVersion, 'TLSv1_2')
+            self.tuple([lambda: self.glob(m.module, m.cls), lambda: self.text(m.name)])
+            self.out += b"R"
+        else:
+            self.glob(m.module, m.cls)                               # signal.Signals(15)
+            self.tuple([lambda: self.int(m.value)])
+            self.out += b"R"
+        self.put(("member", m))
+
+    def pickle(self, members, form):
+        self.out += b"(l" if self.proto == 0 else b"]"
+        self.put(("list",))
+        if self.proto == 0 or len(members) == 1:
+            for m in members:
+                self.member(m, form)
+                self.out += b"a"
+        elif members:
+            self.out += b"("
+            for m in members:
+                self.member(m, form)
+            self.out += b"e"
+        self.out += b"."
+        head = b"\x80" + bytes([self.proto]) if self.proto >= 2 else b""
+        if self.proto >= 4:
+            head += b"\x95" + struct.pack("<Q", len(self.out))
+        return head + bytes(self.out)
+
+
+def std_members(members=STD_MEMBERS, protocol=2, form="3.10"):
+    """A list of the standard library's enum members pickled as the Python of `form` (STD_FORMS) writes it at
+    `protocol`, whatever Python runs the tests: 3.10's and 3.11.0's GLOBAL 'signal SIGTERM', 3.11.0's getattr(
+    ssl.TLSVersion, 'TLSv1_2'), 3.12's signal.Signals(15). Hand-built bytes (checked against those Pythons' own
+    pickle.dumps when they were written)."""
+    return _Writer(protocol).pickle(list(members), form)
+
+
+def std_member_shapes():
+    """Each use of a member a pickle can make (FP-MODEL-FILES-PY311), hand-built: kept as data (quiet), and called,
+    made, changed or reached through (SC-PICKLE-CODE, as before). {name: (bytes, quiet)}."""
+    g = lambda m, n: b"c" + m.encode() + b"\n" + n.encode() + b"\n"
+    su = lambda t: b"\x8c" + bytes([len(t)]) + t.encode()
+    p2 = b"\x80\x02"
+    return {
+        # kept: in a dict, as a dict's key, as an argument, as a BUILD's state, memoized and fetched again
+        "kept_dict.pkl": (p2 + b"}" + su("sig") + g("signal", "SIGTERM") + b"s" + su("fam") + g("socket", "AF_INET")
+                          + b"s.", True),
+        "kept_key.pkl": (p2 + b"}" + g("signal", "SIGINT") + su("interrupt") + b"s.", True),
+        "kept_argument.pkl": (p2 + g("collections", "OrderedDict") + su("mode") + g("ssl", "CERT_REQUIRED")
+                              + b"\x86\x85\x85R.", True),
+        "kept_state.pkl": (p2 + g("argparse", "Namespace") + b")\x81}" + su("sig") + g("signal", "SIG_DFL") + b"sb.",
+                           True),
+        "kept_state_keys.pkl": (p2 + g("argparse", "Namespace") + b")\x81}" + su("handlers") + b"}" + g("signal", "SIGTERM")
+                                + g("signal", "SIG_DFL") + b"ss" + b"b.", True),
+        "kept_memo.pkl": (b"(lp0\ncsignal\nSIGTERM\np1\nag1\na.", True),
+        "kept_stack_global.pkl": (b"\x80\x04" + su("socket") + b"\x94" + su("SOCK_STREAM") + b"\x94\x93\x94\x85.",
+                                  True),
+        "kept_getattr.pkl": (p2 + g("__builtin__", "getattr") + g("ssl", "TLSVersion") + su("TLSv1_2") + b"\x86R\x85.",
+                             True),
+        # called, made, changed, reached through: as before
+        "called_reduce.pkl": (p2 + g("signal", "SIGTERM") + b")R.", False),
+        "called_with_text.pkl": (p2 + g("socket", "AF_INET") + su("192.0.2.1") + b"\x85R.", False),
+        "called_inst.pkl": (b"(isignal\nSIG_DFL\n.", False),
+        "called_obj.pkl": (p2 + b"(" + g("socket", "SOCK_STREAM") + b"o.", False),
+        "called_stack_global.pkl": (b"\x80\x04" + su("signal") + su("SIGKILL") + b"\x93)R.", False),
+        "called_getattr_member.pkl": (p2 + g("__builtin__", "getattr") + g("ssl", "TLSVersion") + su("TLSv1_2")
+                                      + b"\x86R)R.", False),
+        "made_newobj.pkl": (p2 + g("ssl", "CERT_REQUIRED") + b")\x81.", False),
+        "made_reconstructor.pkl": (p2 + g("copyreg", "_reconstructor") + g("signal", "SIGTERM")
+                                   + g("__builtin__", "object") + b"N\x87R.", False),
+        "called_reconstructor_base.pkl": (p2 + g("copyreg", "_reconstructor") + g("argparse", "Namespace")
+                                          + g("signal", "SIGTERM") + su("x") + b"\x87R.", False),
+        "changed_build.pkl": (p2 + g("signal", "SIGTERM") + b"}" + su("value") + b"K\x01sb.", False),
+        "given_setstate.pkl": (p2 + g("argparse", "Namespace") + b")\x81}" + su("__setstate__")
+                               + g("signal", "SIGTERM") + b"sb" + su("id") + b"b.", False),
+        "reached_getattr.pkl": (p2 + g("__builtin__", "getattr") + g("signal", "SIGTERM") + su("__class__")
+                                + b"\x86RK\x0f\x85R.", False),
+        "reached_dotted.pkl": (b"\x80\x04" + su("signal") + su("SIGTERM.__class__") + b"\x93\x85.", False),
+        "signal_signal.pkl": (p2 + g("signal", "signal") + g("signal", "SIGTERM") + g("os", "system") + b"\x86R.", False),
+        "socket_connect.pkl": (p2 + g("__builtin__", "getattr") + g("socket", "socket") + g("socket", "AF_INET")
+                               + g("socket", "SOCK_STREAM") + b"\x86R" + su("connect") + b"\x86R" + su("192.0.2.1")
+                               + b"M\x5c\x11\x86\x85R.", False),
+        "os_system.pkl": (p2 + g("os", "system") + su("id") + b"\x85R.", False),
+        # (the review of Oct 29) called through an object the pickle computed, changed by SETITEM or APPEND, and the
+        # getattr form's name split after its class (GLOBAL 'ssl.TLSVersion' 'TLSv1_2' imports no module)
+        "called_partial.pkl": (p2 + g("functools", "partial") + g("signal", "SIGTERM") + b"\x85R)R.", False),
+        "called_itemgetter.pkl": (p2 + g("operator", "itemgetter") + b"K\x00\x85R" + g("signal", "SIGTERM")
+                                  + b"\x85\x85R)R.", False),
+        "changed_setitem.pkl": (p2 + g("signal", "SIGTERM") + b"K\x01K\x02s.", False),
+        "changed_append.pkl": (p2 + g("socket", "AF_INET") + b"K\x01a.", False),
+        "near_module_side.pkl": (p2 + g("ssl.TLSVersion", "TLSv1_2") + b"\x85.", False),
+        # names that are no member's exactly, kept as data: as before
+        "near_sigtermx.pkl": (p2 + g("signal", "SIGTERMX") + b"\x85.", False),
+        "near_signal_signal.pkl": (p2 + g("signal", "signal") + b"\x85.", False),
+        "near_socket_socket.pkl": (p2 + g("socket", "socket") + b"\x85.", False),
+        "near_class_member.pkl": (p2 + g("signal", "Signals.SIGTERM") + b"\x85.", False),
+        "other_module_signal.pkl": (p2 + g("_signal", "SIGTERM") + b"\x85.", False),
+        "other_module_ssl.pkl": (p2 + g("ssl", "SOCK_STREAM") + b"\x85.", False),
+        "other_module_http_client.pkl": (p2 + g("http.client", "OK") + b"\x85.", False),
+    }
 
 
 # ---- hostile shapes (inert) ---------------------------------------------------------------------------------------

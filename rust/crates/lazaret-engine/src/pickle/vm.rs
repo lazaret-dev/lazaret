@@ -214,6 +214,9 @@ pub struct Glob {
     /// an extension code (EXT1, EXT2, EXT4): the global the loading program registered for it with
     /// copyreg.add_extension (none by default), which the file does not name
     pub ext: Option<i64>,
+    /// it names a member of the standard library's data enums exactly (Classes::is_member): data unless it is
+    /// called or made
+    pub member: bool,
 }
 
 /// Bytes the pickle hands a loader (torch.storage._load_from_bytes, pickle.loads …): read as a file of their own.
@@ -293,6 +296,7 @@ impl<'c> Book<'c> {
             return g;
         }
         let (kind, model) = self.cls.classify_in(module, name, self.torchscript);
+        let member = self.cls.is_member(module, name);
         let g = self.globals.len() as u32;
         self.globals.push(Glob {
             module: module.to_vec(),
@@ -306,6 +310,7 @@ impl<'c> Book<'c> {
             pushes: 0,
             resolved: 0,
             ext: None,
+            member,
         });
         self.index.insert((module.to_vec(), name.to_vec()), g);
         g
@@ -331,6 +336,7 @@ impl<'c> Book<'c> {
             pushes: 0,
             resolved: 0,
             ext: Some(code),
+            member: false,
         });
         self.index.insert(key, g);
         g
@@ -551,8 +557,16 @@ impl<'b, 'm> Machine<'b, 'm> {
     }
 
     /// Items added to a container (APPEND, APPENDS, SETITEM, SETITEMS, ADDITEMS): kept while there is room. A fork
-    /// changes nothing (the container may be the reading's it was forked from); nor does anything but a container.
-    fn extend(&mut self, book: &mut Book, target: &V, items: Vec<V>) {
+    /// changes nothing (the container may be the reading's it was forked from); nor does anything but a container. A
+    /// member of the standard library's data enums given items is changed, as BUILD changes a global: code, in either
+    /// reading (H2 of the review of Oct 29: SETITEM or APPEND on signal.SIGTERM was passed over as the member's data).
+    fn extend(&mut self, book: &mut Book, target: &V, items: Vec<V>, at: usize, how: &'static str) {
+        if let V::Global(g) = target {
+            if book.globals.get(*g as usize).is_some_and(|gl| gl.member) {
+                let what = book.qual(*g);
+                book.code(format!("changes {what} itself ({how} on it sets its items)"), book.hit(at, how));
+            }
+        }
         if self.spec {
             return;
         }
@@ -807,18 +821,18 @@ impl<'b, 'm> Machine<'b, 'm> {
                 b'a' => {
                     let v = self.pop(at)?;
                     let t = self.top(at)?;
-                    self.extend(book, &t, vec![v]);
+                    self.extend(book, &t, vec![v], at, "APPEND");
                 }
                 b'e' | 0x90 => {
                     let items = self.pop_mark(at)?;
                     let t = self.top(at)?;
-                    self.extend(book, &t, items);
+                    self.extend(book, &t, items, at, if op == b'e' { "APPENDS" } else { "ADDITEMS" });
                 }
                 b's' => {
                     let v = self.pop(at)?;
                     let k = self.pop(at)?;
                     let t = self.top(at)?;
-                    self.extend(book, &t, vec![k, v]);
+                    self.extend(book, &t, vec![k, v], at, "SETITEM");
                 }
                 b'u' => {
                     let items = self.pop_mark(at)?;
@@ -826,7 +840,7 @@ impl<'b, 'm> Machine<'b, 'm> {
                         return self.err(at, "a SETITEMS of an odd number of items");
                     }
                     let t = self.top(at)?;
-                    self.extend(book, &t, items);
+                    self.extend(book, &t, items, at, "SETITEMS");
                 }
                 b'p' => {
                     let l = self.line(at)?;
@@ -1587,6 +1601,9 @@ fn scalar_is_data(m: &Made) -> bool {
 /// scalar, a UserString do).
 fn computed_key(book: &Book, k: &V) -> bool {
     match k {
+        // (a member of the standard library's data enums by its exact name, signal.SIGTERM as 3.10 writes it, is an
+        // int: a key no special method has, as signal.Signals(15), 3.12's, is: FP-MODEL-FILES-PY311)
+        V::Global(g) if book.globals.get(*g as usize).is_some_and(|gl| gl.member) => false,
         V::MadeStr | V::Opaque | V::Global(_) => true,
         V::Call(m) | V::Obj(m) => match data_maker(book, m) {
             None => true,

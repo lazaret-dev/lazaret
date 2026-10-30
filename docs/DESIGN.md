@@ -1400,7 +1400,29 @@ run, never unpickling them (`rust/crates/lazaret-engine/src/pickle/`, RUST_ENGIN
   not an exemption by package. The data types of modules of code, named exactly (`PICKLE_DATA_GLOBALS`: an enum or a
   named tuple such as `http.HTTPStatus`, `signal.Signals`, `socket.AddressFamily`, `os.stat_result`,
   `time.struct_time`, `subprocess.CompletedProcess`), are data; the rest of those modules stays code, and so does an
-  attribute reached through one of them (`signal.Signals.__new__`). `getattr(<a global>, '<a name>')`, how pickle
+  attribute reached through one of them (`signal.Signals.__new__`). A member of those enums is data by the exact name
+  a pickle writes for it (`PICKLE_DATA_MEMBERS`, FP-MODEL-FILES-PY311): Python 3.10 and 3.11.0 to 3.11.4 pickle a
+  member of an enum made by `IntEnum`/`IntFlag._convert_` (signal's `Signals`, `Handlers` and `Sigmasks`, socket's
+  `AddressFamily`, `SocketKind`, `MsgFlag` and `AddressInfo`, ssl's `_SSLMethod`, `Options`, `AlertDescription`,
+  `SSLErrorNumber`, `VerifyFlags` and `VerifyMode`) by the module-level alias `_convert_` exports
+  (`GLOBAL 'signal SIGTERM'`: enum.py's `_reduce_ex_by_name`, `_reduce_ex_by_global_name`), and 3.11.0 to 3.11.4 a
+  member of another (`ssl.TLSVersion`, `ssl.Purpose`) as `getattr(ssl.TLSVersion, 'TLSv1_2')`, read as the dotted
+  `ssl.TLSVersion.TLSv1_2`; 3.11.5 and later write the class called with the value (`signal.Signals(15)`), data
+  already. The 202 names are every constant CPython's `signalmodule.c`, `socketmodule.c` and `_ssl.c` can export on
+  any platform (3.10.0 to 3.14.6) that those enums' filters take, `ssl.PROTOCOL_SSLv23`, and `TLSVersion`'s and
+  `Purpose`'s members; each interpreter's own list (3.10, 3.11.1, 3.11.4, 3.11.17, 3.12, 3.13, 3.14, Linux x86-64 and
+  arm64) is within it. Such a global is data only where it is kept: pushed, stored, memoized, put in a container,
+  a dict's key (an int is no special method's name), handed to a call or a BUILD. Called (REDUCE, OBJ, INST, a
+  helper's call of it), made (NEWOBJ, a reconstructor's class), changed (BUILD, SETITEM(S), APPEND(S) or ADDITEMS on
+  it) or given to a special method, it is code as before, and so is every member of a pickle that calls an object it
+  computed (`functools.partial(signal.SIGTERM)()`: the call's target is not followed, so nothing in it is passed
+  over), an attribute reached through it (`signal.SIGTERM.__class__`) and any name that is not exactly one: the table
+  holds (module, name) pairs, the module the first dotted part (`signal.SIGTERMX`, `signal.signal`,
+  `socket.socket`, `signal.Signals.SIGTERM`, `_signal.SIGTERM`, `ssl.SOCK_STREAM`, `http.client.OK`, and
+  `GLOBAL 'ssl.TLSVersion' 'TLSv1_2'`, whose module is no module). Its kind stays its module's
+  (`Classes::is_member`, `Glob::member`): `findings` passes over it when nothing called, made or changed it and the
+  pickle calls nothing it computed. `ssl._SSLMethod` joins `PICKLE_DATA_GLOBALS` (3.12
+  writes `ssl.PROTOCOL_TLS_CLIENT` as `ssl._SSLMethod(16)`). `getattr(<a global>, '<a name>')`, how pickle
   writes a bound method (a datetime's zone: `getattr(zoneinfo.ZoneInfo, '_unpickle')`; an Arrow extension type's
   `__arrow_ext_deserialize__`), is read as that dotted global and judged by its name, its call as that global's call;
   `getattr` in any other use (on a value the pickle computed, in a chain, with a default, given a name that is not

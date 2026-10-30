@@ -2325,6 +2325,45 @@ aggregate):
   16 listed as before, so no verdict is weaker; the same on every route, native and WebAssembly). Owed:
   John's `bench.py all` (the popular set: a release that ships a checkpoint or a pickle moves; joblib's wheel becomes
   INCOMPLETE for its own `.pkl.bz2`/`.pkl.xz`/`.pkl.lzma` test files).
+- **A member of the standard library's data enums that Python 3.10 or 3.11 pickled is data, not code
+  (FP-MODEL-FILES-PY311, John's decision of Oct 29; rule set 2.114.0).** FP-MODEL-FILES reads
+  `signal.Signals`, `socket.AddressFamily`, `ssl.VerifyMode` and the like as data (`PICKLE_DATA_GLOBALS`) and the rest
+  of `signal`, `socket` and `ssl` as code. Python 3.12 and later pickle `signal.SIGTERM` through its class
+  (`signal.Signals(15)`), but Python 3.10 and 3.11.0 to 3.11.4 pickle a member of an enum that
+  `IntEnum`/`IntFlag._convert_` made by the module-level alias it exports (`GLOBAL 'signal SIGTERM'`; signal's
+  `Signals`, `Handlers` and `Sigmasks`, socket's `AddressFamily`, `SocketKind`, `MsgFlag` and `AddressInfo`, ssl's
+  `_SSLMethod`, `Options`, `AlertDescription`, `SSLErrorNumber`, `VerifyFlags` and `VerifyMode`), and 3.11.0 to 3.11.4 a
+  member of `ssl.TLSVersion` or `ssl.Purpose` as `getattr(ssl.TLSVersion, 'TLSv1_2')`: a benign pickle those Pythons
+  wrote holding a signal, a handler, an address family, a socket kind or an ssl constant was SC-PICKLE-CODE (CRITICAL),
+  and three of FP-MODEL-FILES's tests, which pickled with the running Python, failed there. A member named exactly
+  (`PICKLE_DATA_MEMBERS`, 202 names: every constant CPython 3.10.0 to 3.14.6's `signalmodule.c`, `socketmodule.c` and
+  `_ssl.c` can export on any platform that those enums take — Windows' `CTRL_C_EVENT`, `AF_HYPERV`, Linux's `AF_PACKET`,
+  macOS' `AF_SYSTEM` among them — `ssl.PROTOCOL_SSLv23`, and `TLSVersion`'s and `Purpose`'s members as
+  `ssl.TLSVersion.TLSv1_2`) is data where it is only kept: pushed, stored, memoized, put in a list, tuple, set or dict
+  (a dict's key too), handed to a call or a BUILD. Called (REDUCE, OBJ, INST, a helper's call of it), made (NEWOBJ, a
+  reconstructor's class), changed (BUILD, SETITEM, SETITEMS, APPEND, APPENDS or ADDITEMS on it), given to a special
+  method or in a pickle that calls an object it computed (`functools.partial(signal.SIGTERM)()`), it is SC-PICKLE-CODE
+  as before, and so are an attribute reached through it (`getattr(signal.SIGTERM, '__class__')`), `signal.signal`,
+  `socket.socket` and any name that is not exactly a member's, module and name each (`signal.SIGTERMX`,
+  `signal.Signals.SIGTERM`, `_signal.SIGTERM`, `ssl.SOCK_STREAM`, `http.client.OK`, `GLOBAL 'ssl.TLSVersion'
+  'TLSv1_2'`). `ssl._SSLMethod` joins `PICKLE_DATA_GLOBALS`: 3.12 pickles `ssl.PROTOCOL_TLS_CLIENT` as
+  `ssl._SSLMethod(16)`, CRITICAL before on every Python. The engine's, so every route alike, native and WebAssembly.
+  Measured on the runner, base `9ec8f832` → this change, 181 files on the 9 routes (github, project, --deps, sdist,
+  wheel, npm tarball, action; the npm CLI and its --deps in WebAssembly): 88 benign files — pickles of signal's,
+  socket's and ssl's members and plain data written by Python 3.10.22, 3.12.16 and 3.14.10 on the runner and 3.11.1,
+  3.11.4 and 3.11.17 here (a dict of members at protocols 0 to 5, every member at protocols 2 and 4, a `torch.save`
+  checkpoint, a joblib file), and 28 hand-built — were SUSPICIOUS on every route but 3 (85, SC-PICKLE-CODE CRITICAL:
+  every 3.10 and 3.11.0–3.11.4 file for the aliases, 3.10's and 3.11.0–3.11.4's with SC-TRUNCATED for
+  `{SIGTERM: SIG_DFL}` in an object's state; the later Pythons' but their checkpoints for `ssl._SSLMethod`) and are OK
+  on every route; the 31 hostile ones (each member called, called through `functools.partial` or
+  `operator.itemgetter`, made, changed by BUILD, SETITEM or APPEND, given to `__setstate__` or reached through,
+  `signal.signal` with a handler, a socket made and connected, `os.system`, near names, other modules' names,
+  checkpoints of them) stay SC-PICKLE-CODE CRITICAL and SUSPICIOUS on every route, losing only the "imports" of a
+  member handed beside them as an argument; the review's 62 (4 benign, OK now; 53 hostile, each as on base; 5
+  controls, as on base but one, a member as a key of a call's keyword arguments: OK now) too. No cell is louder; the
+  routes agree file by file. Amended after the review (Oct 29): a member in a pickle that calls an object it computed,
+  a member given items (SETITEM, APPEND) and `GLOBAL 'ssl.TLSVersion' 'TLSv1_2'` (the table matched the joined name)
+  were passed over as data; they are code again, as on base.
 - **The code a text hands an eval call as a string is read as code (EVAL-LITERAL; the engine's, for both packages;
   rule set 2.107.0).** `eval("…")`, `Function("…")`, `new Function("a", "…")` and a global object's eval
   or Function by a computed name (`globalThis["ev" + "al"]("…")`) run the string they are handed, and so do Python's

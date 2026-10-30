@@ -130,6 +130,33 @@ test("--deps reads a dependency's model files; its own module is its own", () =>
   assert.deepEqual(sc(scan(files).issues, ".venv/lib"), []);
 });
 
+test("a member of the standard library's data enums is data where it is kept, code where it is called (FP-MODEL-FILES-PY311)", () => {
+  // Python 3.10 and 3.11.0 to 3.11.4 pickle signal.Signals.SIGTERM as the module-level alias signal.SIGTERM, 3.11.0 to
+  // 3.11.4 ssl.TLSVersion.TLSv1_2 as getattr(ssl.TLSVersion, 'TLSv1_2'); 3.12 writes signal.Signals(15)
+  const p2 = [0x80, 2];
+  const r = scan({
+    "py310.pkl": b(p2, "]q\x00(", glob("signal", "SIGTERM"), "q\x01", glob("socket", "AF_INET"), "q\x02",
+      glob("ssl", "CERT_REQUIRED"), "q\x03h\x01e", STOP),
+    "py311.pkl": b(p2, glob("__builtin__", "getattr"), glob("ssl", "TLSVersion"), su("TLSv1_2"), [0x86], "R", [0x85], STOP),
+    "py312.pkl": b(p2, glob("signal", "Signals"), "K\x0f", [0x85], "R", [0x85], STOP),
+    "state.pkl": b(p2, glob("argparse", "Namespace"), ")", [0x81], "}", su("handlers"), "}", glob("signal", "SIGTERM"),
+      glob("signal", "SIG_DFL"), "ssb", STOP),
+    "called.pkl": b(p2, glob("signal", "SIGTERM"), ")R", STOP),
+    "made.pkl": b(p2, glob("ssl", "CERT_REQUIRED"), ")", [0x81], STOP),
+    "reached.pkl": b(p2, glob("__builtin__", "getattr"), glob("signal", "SIGTERM"), su("__class__"), [0x86], "RK\x0f", [0x85], "R", STOP),
+    "near.pkl": b(p2, glob("signal", "SIGTERMX"), [0x85], STOP),
+    "handler.pkl": b(p2, glob("signal", "signal"), glob("signal", "SIGTERM"), glob("os", "system"), [0x86], "R", STOP),
+    // (the review of Oct 29: called through an object the pickle computed, changed by SETITEM, split after its class)
+    "partial.pkl": b(p2, glob("functools", "partial"), glob("signal", "SIGTERM"), [0x85], "R)R", STOP),
+    "setitem.pkl": b(p2, glob("signal", "SIGTERM"), "K\x01K\x02s", STOP),
+    "split.pkl": b(p2, glob("ssl.TLSVersion", "TLSv1_2"), [0x85], STOP),
+    "app.py": "x = 1\n" });
+  const crit = [...new Set(sc(r.issues).filter(([, rule, sev]) => rule === "SC-PICKLE-CODE" && sev === "CRITICAL").map(([f]) => f))];
+  assert.deepEqual(crit.sort(), ["called.pkl", "handler.pkl", "made.pkl", "near.pkl", "partial.pkl", "reached.pkl",
+    "setitem.pkl", "split.pkl"]);
+  assert.deepEqual(sc(r.issues).filter(([f]) => ["py310.pkl", "py311.pkl", "py312.pkl", "state.pkl"].includes(f)), []);
+});
+
 // ---- a checkpoint of 200 MB, read by range (John's decision of Oct 21) -------------------------------------------
 
 /** torch.save's archive whose storages are runs of zeros of `sizes` bytes, as parts [Buffer, or a run's length]. */

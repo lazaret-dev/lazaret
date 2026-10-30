@@ -1041,6 +1041,224 @@ fn the_data_types_of_modules_of_code_are_data() {
     }
 }
 
+/// FP-MODEL-FILES-PY311: each name of PICKLE_DATA_MEMBERS pushed as a pickle writes it: `module.NAME` as GLOBAL (3.10
+/// and 3.11.0 to 3.11.4: signal.SIGTERM), as STACK_GLOBAL from memoized strings and as protocol 0's GLOBAL; and
+/// `module.Class.NAME` as getattr(<the class>, '<the name>') (3.11.0 to 3.11.4: ssl.TLSVersion.TLSv1_2), protocol 2's
+/// and 4's. Each is the opcodes that leave the member on the stack.
+fn member_pushes(full: &str) -> Vec<Vec<u8>> {
+    let (m, rest) = full.split_once('.').expect("module.name");
+    match rest.split_once('.') {
+        None => vec![
+            P::default().global(m, rest).0,
+            P::default().s(m).memoize().s(rest).memoize().stack_global().memoize().0,
+            P::default().raw(format!("c{m}\n{rest}\np7\n").as_bytes()).0,
+        ],
+        Some((cls, name)) => vec![
+            P::default().global("__builtin__", "getattr").global(m, cls).s(name).t2().reduce().0,
+            P::default().s("builtins").s("getattr").stack_global().s(m).s(cls).stack_global().s(name).t2().reduce().0,
+        ],
+    }
+}
+
+fn member_names() -> Vec<String> {
+    let p = crate::pack::current();
+    p.strs("PICKLE_DATA_MEMBERS").iter().map(|s| pystr::to_string(s)).collect()
+}
+
+#[test]
+fn a_data_enums_member_is_data_where_it_is_kept() {
+    // Python 3.10 and 3.11.0 to 3.11.4 pickle signal.Signals.SIGTERM as the module-level alias signal.SIGTERM (enum's
+    // _reduce_ex_by_name): it was code, CRITICAL, where 3.12's signal.Signals(15) was data
+    let names = member_names();
+    assert!(names.len() >= 200 && names.iter().any(|n| n == "signal.SIGTERM") && names.iter().any(|n| n == "ssl.TLSVersion.TLSv1_2"),
+            "{}", names.len());
+    for full in &names {
+        for push in member_pushes(full) {
+            let kept = [
+                // a tuple, a list, a dict's value and key, a set
+                P::default().proto(4).raw(&push).t1().stop(),
+                P::default().proto(4).raw(b"]").raw(&push).raw(b"a").stop(),
+                P::default().proto(4).ed().s("k").raw(&push).setitem().stop(),
+                P::default().proto(4).ed().raw(&push).s("v").setitem().stop(),
+                P::default().proto(4).raw(&[0x8f]).mark().raw(&push).raw(&[0x90]).stop(),
+                // a call's argument (another global's, a data constructor's), a NEWOBJ's, a BUILD's state
+                P::default().proto(4).global("mylib.settings", "Config").raw(&push).t1().reduce().stop(),
+                P::default().proto(4).global("collections", "OrderedDict").s("sig").raw(&push).t2().t1().t1().reduce().stop(),
+                P::default().proto(4).global("argparse", "Namespace").raw(&push).t1().newobj().stop(),
+                P::default().proto(4).global("argparse", "Namespace").et().newobj().ed().s("sig").raw(&push).setitem()
+                    .build().stop(),
+                // a dict's key, whatever its value, in a BUILD's state and a call's arguments ({SIGTERM: SIG_DFL}: a
+                // key no special method has, as 3.12's Signals(15) is)
+                P::default().proto(4).global("argparse", "Namespace").et().newobj().ed().s("handlers").ed().raw(&push)
+                    .raw(&push).setitem().setitem().build().stop(),
+                P::default().proto(4).global("mylib.settings", "Config").ed().raw(&push).raw(&push).setitem().t1().reduce()
+                    .stop(),
+                // memoized, popped, fetched again
+                P::default().proto(4).raw(&push).binput(9).raw(b"0").binget(9).binget(9).t2().stop(),
+            ];
+            for data in kept {
+                let f = one("m.pkl", &data);
+                assert!(f.is_empty(), "{full}: {f:?}");
+            }
+        }
+    }
+    // the bytes each Python writes for a list of members (python/tests/_model_files.std_members, checked against their
+    // own pickle.dumps): 3.10's at protocol 2 and 3.11.0's at protocol 4, quiet
+    let py310 = b"\x80\x02]q\x00(csignal\nSIGTERM\nq\x01csocket\nAF_INET\nq\x02cssl\nCERT_REQUIRED\nq\x03h\x01e.";
+    assert!(one("m.pkl", py310).is_empty());
+    let py311 = P::default().proto(4).raw(b"]").memoize().mark().s("signal").memoize().s("SIGTERM").memoize()
+        .stack_global().memoize().s("builtins").memoize().s("getattr").memoize().stack_global().memoize().s("ssl")
+        .memoize().s("TLSVersion").memoize().stack_global().memoize().s("TLSv1_2").memoize().t2().memoize().reduce()
+        .memoize().raw(b"e").stop();
+    assert!(one("m.pkl", &py311).is_empty());
+}
+
+#[test]
+fn a_data_enums_member_called_made_or_reached_through_is_code() {
+    // John's decision of Oct 29: a call of such a global, or any other global of those modules, is judged as before
+    for full in member_names() {
+        for push in member_pushes(&full) {
+            let uses: [(Vec<u8>, String); 8] = [
+                // called with nothing, with text; made by NEWOBJ; a reconstructor's base (called) and class (made)
+                (P::default().proto(4).raw(&push).et().reduce().stop(), format!("it calls {full}")),
+                (P::default().proto(4).raw(&push).s("192.0.2.1").t1().reduce().stop(), format!("it calls {full}")),
+                (P::default().proto(4).raw(&push).et().newobj().stop(), format!("it imports {full} and makes one")),
+                (P::default().proto(4).global("copyreg", "_reconstructor").global("argparse", "Namespace").raw(&push)
+                    .s("x").t3().reduce().stop(), format!("it calls {full}")),
+                (P::default().proto(4).global("copyreg", "_reconstructor").raw(&push).global("builtins", "object")
+                    .none().t3().reduce().stop(), format!("it imports {full} and makes one")),
+                // changed by BUILD; given an object as its __setstate__, which the next BUILD calls
+                (P::default().proto(4).raw(&push).ed().s("value").int(1).setitem().build().stop(),
+                 format!("changes {full} itself")),
+                (P::default().proto(4).global("argparse", "Namespace").et().newobj().ed().s("__setstate__").raw(&push)
+                    .setitem().build().s("id").build().stop(), "__setstate__".to_string()),
+                // kept once and called once: the call decides
+                (P::default().proto(4).raw(&push).binput(3).t1().raw(b"0").binget(3).et().reduce().stop(),
+                 format!("it calls {full}")),
+            ];
+            for (data, needle) in uses {
+                let f = one("m.pkl", &data);
+                assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &needle), "{full} ({needle}): {f:?}");
+            }
+            // handed to an object the pickle computed and then calls, whose own calls are not followed (H1 of the
+            // review of Oct 29): functools.partial(<member>)() and operator.itemgetter(0)((<member>,))()
+            let partial = P::default().proto(4).global("functools", "partial").raw(&push).t1().reduce().et().reduce().stop();
+            let itemgetter = P::default().proto(4).global("operator", "itemgetter").int(0).t1().reduce().raw(&push).t1()
+                .t1().reduce().et().reduce().stop();
+            for (what, data) in [("partial", partial), ("itemgetter", itemgetter)] {
+                let f = one("m.pkl", &data);
+                assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &format!("it imports {full}")), "{full} {what}: {f:?}");
+                assert!(has(&f, "SC-PICKLE-GLOBAL", "MAJOR", "a call the file builds as it loads"), "{full} {what}: {f:?}");
+            }
+            // given items: SETITEM, SETITEMS, APPEND, APPENDS, ADDITEMS on it change it, as BUILD does (H2)
+            let changes = [
+                ("SETITEM", P::default().proto(4).raw(&push).int(1).int(2).setitem().stop()),
+                ("SETITEMS", P::default().proto(4).raw(&push).mark().int(1).int(2).setitems().stop()),
+                ("APPEND", P::default().proto(4).raw(&push).int(1).raw(b"a").stop()),
+                ("APPENDS", P::default().proto(4).raw(&push).mark().int(1).int(2).raw(b"e").stop()),
+                ("ADDITEMS", P::default().proto(4).raw(&push).mark().int(1).raw(&[0x90]).stop()),
+            ];
+            for (how, data) in changes {
+                let f = one("m.pkl", &data);
+                assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &format!("changes {full} itself ({how} on it")),
+                        "{full} {how}: {f:?}");
+            }
+            // an attribute reached through it is a global of its own name, code in any use, and its call too (through
+            // a member getattr gave, a chain: getattr stays code)
+            let dotted = full.matches('.').count() > 1;
+            let reach = P::default().proto(4).global("__builtin__", "getattr").raw(&push).s("__class__").t2().reduce();
+            let needle = if dotted { "getattr".to_string() } else { format!("{full}.__class__") };
+            let f = one("m.pkl", &reach.clone().t1().stop());
+            assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &needle), "{full}: {f:?}");
+            let f = one("m.pkl", &reach.int(15).t1().reduce().stop());
+            assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &needle), "{full}: {f:?}");
+        }
+        // INST and OBJ name it as their callable
+        if let Some((m, n)) = full.split_once('.').filter(|(_, n)| !n.contains('.')) {
+            let f = one("m.pkl", format!("(i{m}\n{n}\n.").as_bytes());
+            assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &format!("it calls {full}")), "{full}: {f:?}");
+            let f = one("m.pkl", &P::default().proto(2).mark().global(m, n).raw(b"o").stop());
+            assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &format!("it calls {full}")), "{full}: {f:?}");
+        }
+    }
+    // the hostile shapes around them: signal.signal given a handler, a socket made and connected, os.system
+    let handler = P::default().proto(2).global("signal", "signal").global("signal", "SIGTERM").global("os", "system").t2()
+        .reduce().stop();
+    let f = one("m.pkl", &handler);
+    assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", "it calls signal.signal") && has(&f, "SC-PICKLE-CODE", "CRITICAL", "os.system"),
+            "{f:?}");
+    let connect = P::default().proto(2).global("__builtin__", "getattr").global("socket", "socket").global("socket", "AF_INET")
+        .global("socket", "SOCK_STREAM").t2().reduce().s("connect").t2().reduce().s("192.0.2.1").raw(b"M\x5c\x11").t2().t1()
+        .reduce().stop();
+    let f = one("m.pkl", &connect);
+    assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", "it calls socket.socket"), "{f:?}");
+    // it calls what getattr returned, so its members are named too (H1): no member is passed over in a file that
+    // calls something it computed
+    assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", "it imports socket.AF_INET")
+            && has(&f, "SC-PICKLE-CODE", "CRITICAL", "it imports socket.SOCK_STREAM"), "{f:?}");
+    // handed to a call of a global, they are passed over: the call is the finding
+    let made = P::default().proto(2).global("socket", "socket").global("socket", "AF_INET").global("socket", "SOCK_STREAM")
+        .t2().reduce().stop();
+    let f = one("m.pkl", &made);
+    assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", "it calls socket.socket"), "{f:?}");
+    assert!(!f.iter().any(|(_, _, m)| m.contains("socket.AF_INET") || m.contains("socket.SOCK_STREAM")), "{f:?}");
+    let f = one("m.pkl", &P::default().proto(2).global("os", "system").s("id").t1().reduce().stop());
+    assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", "it calls os.system"), "{f:?}");
+}
+
+#[test]
+fn a_name_that_is_no_members_exactly_is_judged_as_before() {
+    // kept as data: a near name, a module's code, a member reached by its class's attribute, an attribute through a
+    // member, the same name in a module not listed (_signal's plain int, ssl's import of socket's, http.client's)
+    for (m, n) in [("signal", "SIGTERMX"), ("signal", "sigterm"), ("signal", "SIGTERM_"), ("signal", "signal"),
+                   ("socket", "socket"), ("socket", "AF_INETX"), ("signal", "Signals.SIGTERM"), ("signal", "SIGTERM.__class__"),
+                   ("signal", "SIGTERM.real"), ("ssl", "TLSVersion.__new__"), ("ssl", "TLSVersion"), ("_signal", "SIGTERM"),
+                   ("ssl", "SOCK_STREAM"), ("http.client", "OK"), ("posix", "SIGTERM"), ("os", "SIGTERM"),
+                   ("socket", "AF_INET.__class__")] {
+        if (m, n) == ("ssl", "TLSVersion") {
+            // (a data type of its own: data, as before)
+            assert!(one("m.pkl", &P::default().proto(2).global(m, n).t1().stop()).is_empty());
+            continue;
+        }
+        let f = one("m.pkl", &P::default().proto(2).global(m, n).t1().stop());
+        assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &format!("it imports {m}.{n}")), "{m}.{n}: {f:?}");
+        let f = one("m.pkl", &P::default().proto(4).s(m).s(n).stack_global().t1().stop());
+        assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &format!("it imports {m}.{n}")), "{m}.{n}: {f:?}");
+    }
+    // a member's dotted name split anywhere but after its module: the module part names no module (GLOBAL
+    // 'ssl.TLSVersion' 'TLSv1_2' imports ssl.TLSVersion, H3 of the review of Oct 29), kept as data: code, as before
+    for full in member_names().iter().filter(|n| n.matches('.').count() > 1) {
+        let k = full.rfind('.').unwrap();
+        let (m, n) = (&full[..k], &full[k + 1..]);
+        for data in [P::default().proto(2).global(m, n).t1().stop(), P::default().proto(4).s(m).s(n).stack_global().t1().stop()] {
+            let f = one("m.pkl", &data);
+            assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &format!("it imports {m}.{n}")), "{m} {n}: {f:?}");
+        }
+    }
+    for (m, n) in [("signal.Signals", "SIGTERM"), ("socket.AddressFamily", "AF_INET")] {
+        let f = one("m.pkl", &P::default().proto(2).global(m, n).t1().stop());
+        assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", &format!("it imports {m}.{n}")), "{m} {n}: {f:?}");
+    }
+    // the same names the right way round stay data (the module exactly, the name the rest)
+    for (m, n) in [("ssl", "TLSVersion.TLSv1_2"), ("ssl", "Purpose.SERVER_AUTH"), ("signal", "SIGTERM")] {
+        assert!(one("m.pkl", &P::default().proto(4).s(m).s(n).stack_global().t1().stop()).is_empty(), "{m} {n}");
+    }
+    // a member's attribute reached with getattr on the member getattr gave (a chain): getattr stays code
+    let chain = P::default().proto(2).global("__builtin__", "getattr").global("__builtin__", "getattr").global("ssl", "TLSVersion")
+        .s("TLSv1_2").t2().reduce().s("__class__").t2().reduce().t1().stop();
+    let f = one("m.pkl", &chain);
+    assert!(has(&f, "SC-PICKLE-CODE", "CRITICAL", "__builtin__.getattr"), "{f:?}");
+    // a key the pickle computes (str()) over a member: SC-TRUNCATED, as over any global (it may name a special method)
+    let made_key = P::default().proto(2).global("argparse", "Namespace").et().newobj().ed().global("builtins", "str")
+        .s("x").t1().reduce().global("signal", "SIGTERM").setitem().build().stop();
+    let f = one("m.pkl", &made_key);
+    assert!(has(&f, "SC-TRUNCATED", "CRITICAL", "computes"), "{f:?}");
+    // the same names in modules that are no code stay as they were: re's flags and http's statuses, quiet when kept
+    for (m, n) in [("re", "IGNORECASE"), ("http", "HTTPStatus.OK"), ("calendar", "MONDAY")] {
+        assert!(one("m.pkl", &P::default().proto(2).global(m, n).t1().stop()).is_empty(), "{m}.{n}");
+    }
+}
+
 #[test]
 fn the_formats_own_helpers_are_the_format() {
     // pandas 3 with pyarrow: an array rebuilt from its buffers (the reviewer's HIGH-2)
