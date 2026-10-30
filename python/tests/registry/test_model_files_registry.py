@@ -75,6 +75,25 @@ class Releases(unittest.TestCase):
             self.assertEqual(sorted((i["file"], i["sev"]) for i in issues(res, "SC-PICKLE-GLOBAL")),
                              [("x/assets/enum.pkl", "INFO"), ("x/assets/enum.pkl", "MAJOR")])
 
+    def test_the_standard_librarys_enum_members(self):
+        # FP-MODEL-FILES-PY311: each Python's form of signal's, socket's and ssl's enum members kept as data, quiet in
+        # each kind; called, made, changed or reached through, and a name no member's exactly, SC-PICKLE-CODE
+        shapes = mf.std_member_shapes()
+        files = {f"x/m/{k}": v for k, (v, _) in shapes.items()}
+        files.update({f"x/m/members.{form}.p{p}.pkl": mf.std_members(protocol=p, form=form)
+                      for form in mf.STD_FORMS for p in range(6)})
+        files["x/m/kept.pt"] = mf.torch_zip(mf.std_members(protocol=2, form="3.11.0"))
+        bad = sorted(f"x/m/{k}" for k, (_, quiet) in shapes.items() if not quiet)
+        for res in (scan_sdist({"setup.py": SETUP, "x/__init__.py": "", **files}),
+                    scan_wheel({"x/__init__.py": "", **files, **WHEEL_META}),
+                    scan_npm({"package.json": NPM, "index.js": "1;\n", **files})):
+            got = {}
+            for f, r, sev in sc(res):
+                got.setdefault(f, set()).add((r, sev))
+            self.assertEqual(sorted(got), bad, res["issues"])
+            for f in bad:
+                self.assertIn(("SC-PICKLE-CODE", "CRITICAL"), got[f], f)
+
     def test_unreadable_is_incomplete(self):
         res = scan_sdist({"setup.py": SETUP, "x/__init__.py": "", "x/m.pkl": mf.os_system("id")[:-2]})
         self.assertIn(("x/m.pkl", "SC-TRUNCATED", "CRITICAL"), sc(res))

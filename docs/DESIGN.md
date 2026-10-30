@@ -1436,33 +1436,104 @@ run, never unpickling them (`rust/crates/lazaret-engine/src/pickle/`, RUST_ENGIN
   not an exemption by package. The data types of modules of code, named exactly (`PICKLE_DATA_GLOBALS`: an enum or a
   named tuple such as `http.HTTPStatus`, `signal.Signals`, `socket.AddressFamily`, `os.stat_result`,
   `time.struct_time`, `subprocess.CompletedProcess`), are data; the rest of those modules stays code, and so does an
-  attribute reached through one of them (`signal.Signals.__new__`). `getattr(<a global>, '<a name>')`, how pickle
-  writes a bound method (a datetime's zone: `getattr(zoneinfo.ZoneInfo, '_unpickle')`; an Arrow extension type's
+  attribute reached through one of them (`signal.Signals.__new__`). A member of those enums is data by the exact name
+  a pickle writes for it (`PICKLE_DATA_MEMBERS`, FP-MODEL-FILES-PY311): Python 3.10 and 3.11.0 to 3.11.4 pickle a
+  member of an enum made by `IntEnum`/`IntFlag._convert_` (signal's `Signals`, `Handlers` and `Sigmasks`, socket's
+  `AddressFamily`, `SocketKind`, `MsgFlag` and `AddressInfo`, ssl's `_SSLMethod`, `Options`, `AlertDescription`,
+  `SSLErrorNumber`, `VerifyFlags` and `VerifyMode`) by the module-level alias `_convert_` exports
+  (`GLOBAL 'signal SIGTERM'`: enum.py's `_reduce_ex_by_name`, `_reduce_ex_by_global_name`), and 3.11.0 to 3.11.4 a
+  member of another (`ssl.TLSVersion`, `ssl.Purpose`) as `getattr(ssl.TLSVersion, 'TLSv1_2')`, read as the dotted
+  `ssl.TLSVersion.TLSv1_2`; 3.11.5 and later write the class called with the value (`signal.Signals(15)`), data
+  already. The 202 names are every constant CPython's `signalmodule.c`, `socketmodule.c` and `_ssl.c` can export on
+  any platform (3.10.0 to 3.14.6) that those enums' filters take, `ssl.PROTOCOL_SSLv23`, and `TLSVersion`'s and
+  `Purpose`'s members; each interpreter's own list (3.10, 3.11.1, 3.11.4, 3.11.17, 3.12, 3.13, 3.14, Linux x86-64 and
+  arm64) is within it. Such a global is data only where it is kept: pushed, stored, memoized, put in a container,
+  a dict's key (an int is no special method's name), handed to a call or a BUILD. Called (REDUCE, OBJ, INST, a
+  helper's call of it; APPEND, APPENDS or ADDITEMS calling the `extend`, `append` or `add` the pickle gave an object,
+  which pickle's `load_append`, `load_appends` and `load_additems` look up on it: the reader keeps, for each object,
+  what its BUILDs' states (their dicts and slots, a slot state's `__dict__`, and a tuple state's dicts), SETITEM on it
+  and the helpers that set an object's attributes from a state — torch's `_rebuild_parameter_with_state` and
+  `_rebuild_from_type(_v2)`, `types.SimpleNamespace` — gave it under those names; and, for the whole file (`AnyGiven`,
+  noted where the pair is written, whatever the dict becomes), every member written under the name `extend`, `append`
+  or `add` wherever a dict may be built or filled — DICT, SETITEM and SETITEMS on anything, a call's arguments (a name
+  beside a member, as `_operator.setitem(d, 'extend', m)` and `dict.setdefault` take them, and a 2-item tuple or list
+  in a list or tuple argument, as `dict.update` does), a list or tuple state each of whose items is a 2-item tuple or
+  list (`torch.nn.Module.__setstate__`'s `__dict__.update`; any other tuple state only at its attribute positions, the
+  halves of a (state, slots) pair and `functools.partial`'s dict), a helper's pairs — and, only where a dict is or
+  becomes an object's attributes (a BUILD's state and its halves, a helper's state, SETITEM on an object that is no
+  plain mapping, a dict installed as an object's `__dict__` by reference and filled later, followed by its address up
+  to 65,536 such dicts), an object the pickle computed that may be called under a key it computes (in a state of pairs
+  no helper reads, its literal names only), which APPEND, APPENDS or ADDITEMS on anything but a list, set, dict or
+  tuple the pickle built calls, since an alias the reader does not follow — a memo entry,
+  `operator.getitem((obj,), 0)`, `logging.getLogger('x')` twice, an enum's member, joblib's memoised wrapper — may
+  reach the object given it; an object the pickle computed given so, or a mapping of attributes it computed, passes no
+  member over. A plain dict keyed by an enum's member or a class is data: Python writes an object's APPENDS before its
+  own state, but another object's dict may come before them (a deque after `{socket.AddressFamily.AF_INET: …}`), so a
+  key the pickle computes counts only where it may name an attribute. Three kinds of file Python writes still read as
+  code, as on base: an object the pickle computed under a key it computes in the items of a dict subclass or an
+  OrderedDict subclass (no plain mapping by its name: `Bunch` and `ModelOutput` serve their items as attributes), with
+  a member kept, and a member under the literal name `append`, `extend` or `add` anywhere (an object's attribute of
+  that name, `SimpleNamespace(extend=…)`, a plain dict's key), and an object whose own state (a `__getstate__`'s dict)
+  is keyed by an enum member or another object the pickle computes and holds an object, with a member kept elsewhere
+  (CRITICAL as on base, where the first amendment read it SC-TRUNCATED), each before a deque or a list subclass's
+  APPENDS. Known
+  limits, passed over (parity with base is backlog PY311-MEMBER-PARITY): a member under a key the pickle computes, in
+  a dict, a state or a state of pairs (`[(Transport.TCP, SOCK_STREAM)]`, `list({int: SIGTERM}.items())`,
+  `{Transport.TCP: AF_INET}` as a state); a member a dict a call fills gives by a key the pickle computes or through a
+  mapping or iterable the pickle builds (`setitem(d, str(b'extend', 'ascii'), m)`,
+  `dict.update(d, [(<computed>, m)])`, `dict.update(d, OrderedDict([('extend', m)]))`, `dict.fromkeys`, `zip`,
+  `setitem` on a dict subclass, `getitem((m,), 0)` as the value); and one under a key
+  `codecs.encode('rkgraq', 'rot13')` makes. Each for one reason: every `PICKLE_DATA_MEMBERS` name is a plain int or
+  str enum member, none is callable, so calling one raises TypeError and runs nothing. Looking at what objects are
+  given and calling what APPEND calls have their own count, `GIVE_WORK`, apart from the reading's other looks
+  (`STATE_WORK`): past it nothing more is looked at or called and no member is passed over; an object's record full is
+  not looked at again (a record only unseen, for a state the pickle computed, is); and an APPEND whose call is not
+  made, or on an object part of whose state the reader did not look at for a bound of its own (the looks spent, the
+  record full, a container's items past what it keeps), is SC-TRUNCATED: what a bound of the reader's hides from an
+  APPEND is said, not passed over; a dict a state holds twice is looked at once, and a global of no helper's model
+  called again with items of no object, of the same text kind and number, is not called again), made (NEWOBJ, a
+  reconstructor's class, the class numpy's `_reconstruct`, `_internal._reconstruct` and `_mareconstruct`,
+  `array._array_reconstructor`, `__pyx_unpickle_SeedSequence`, torch's `_rebuild_wrapper_subclass` or a joblib array
+  wrapper's state make an object of), changed (BUILD, SETITEM(S), APPEND(S) or ADDITEMS on it) or given to a special
+  method, it is code as before, and so is every member of a pickle that calls an object it computed
+  (`functools.partial(signal.SIGTERM)()`: the call's target is not followed, so nothing in it is passed over) or that
+  calls what it may have given an object and the reader does not see (a dict subclass made by a call as a BUILD's
+  state, a dict past what the reader keeps), an attribute reached through it (`signal.SIGTERM.__class__`) and any name
+  that is not exactly one: the table holds (module, name) pairs, the module the first dotted part (`signal.SIGTERMX`,
+  `signal.signal`, `socket.socket`, `signal.Signals.SIGTERM`, `_signal.SIGTERM`, `ssl.SOCK_STREAM`, `http.client.OK`,
+  and `GLOBAL 'ssl.TLSVersion' 'TLSv1_2'`, whose module is no module). A dotted name is a member's only where Python
+  walks it: through the getattr form, and through GLOBAL and STACK_GLOBAL from protocol 4 on (find_class's
+  `_getattribute`); below protocol 4 and in numpy's `_ufunc_reconstruct` it is looked up with a plain `getattr`, which
+  raises, and it is code, once so everywhere in the file (`Book::plain_lookup`). Its kind stays its module's
+  (`Classes::is_member`, `Glob::member`): `findings` passes over it when nothing called, made or changed it and the
+  pickle calls nothing it computed or does not see. `ssl._SSLMethod` joins `PICKLE_DATA_GLOBALS` (3.12 writes
+  `ssl.PROTOCOL_TLS_CLIENT` as `ssl._SSLMethod(16)`). `getattr(<a global>, '<a name>')`, how pickle writes a bound
+  method (a datetime's zone: `getattr(zoneinfo.ZoneInfo, '_unpickle')`; an Arrow extension type's
   `__arrow_ext_deserialize__`), is read as that dotted global and judged by its name, its call as that global's call;
   `getattr` in any other use (on a value the pickle computed, in a chain, with a default, given a name that is not
   one, put anywhere but as the callee of such a call, in either reading of a joblib array's bytes) stays builtins'
-  `getattr`, CRITICAL. A global that runs code or touches the system (`PICKLE_CODE_MODULES`,
-  `PICKLE_CODE_GLOBALS`, a dotted name through `PICKLE_CODE_ATTRS`) is SC-PICKLE-CODE (CRITICAL) in any use, and so
-  are the shapes that run code whatever the names: a callable given to a special method in a dict a BUILD or a call
-  receives (the next BUILD calls an object's `__setstate__`), BUILD on a class or function (it changes its
-  attributes), a class made with `type()`, a dotted name of code handed to a call (`import_string('os.system')`).
-  Any other global made by NEWOBJ and BUILD, or handed to a reconstructor as the class it rebuilds, is an object
-  restored by its own class (sklearn's estimators, an omegaconf config, a Lightning AttributeDict, Cython's
-  `__pyx_unpickle_*`, pandas' `_new_Index`): quiet. Called with text it is told to use — anything but a plain name: a
-  command, code, a path, a URL, a module path, bytes — it is SC-PICKLE-GLOBAL (MAJOR), and so is an object the
-  pickle computed and then calls (a gadget chain's shape); called with numbers, plain names and objects the pickle
-  made (sklearn's `Tree(n_features, n_classes, n_outputs)`, pandas' `StringDtype('python', nan)`), quiet. A global
-  of the scanned package's own modules (its module is a `.py` file of the project, the release, or the dependency's
-  own folder under `--deps`: `torch.save(model)` of the package's own class) is SC-PICKLE-GLOBAL as INFO, listed and
-  setting no verdict (John's decision of Oct 21): importing it runs that module's code when the file is loaded, and
-  that code is the package's, which the scan reads (`pickle::own_imports`, the `model_own` call, once the scan knows
-  its files). Such a function called with text it is told to use stays SC-PICKLE-GLOBAL, MAJOR, as any function's:
-  the text decides what the code does. An enum's member pickles as its class called with its value
-  (`Source('https://...')`): it is such a call, MAJOR, whatever the scan's source defines (model_file holds it in its
-  `calls` for `model_own`, which reports it beside the own module's INFO). A waiver of a plain enum's member lookup
-  (the precision review of Oct 21) was dropped by the external re-review of Oct 27: which file a module name is when
-  the file is loaded is the loading program's import path (sys.path set by its code, PYTHONPATH, `.pth` files, the
-  folder it runs in, what is installed, a project `enum.py`), which no scan of the files establishes.
+  `getattr`, CRITICAL. A global that runs code or touches the system (`PICKLE_CODE_MODULES`, `PICKLE_CODE_GLOBALS`, a
+  dotted name through `PICKLE_CODE_ATTRS`) is SC-PICKLE-CODE (CRITICAL) in any use, and so are the shapes that run
+  code whatever the names: a callable given to a special method in a dict a BUILD or a call receives (the next BUILD
+  calls an object's `__setstate__`), BUILD on a class or function (it changes its attributes), a class made with
+  `type()`, a dotted name of code handed to a call (`import_string('os.system')`). Any other global made by NEWOBJ and
+  BUILD, or handed to a reconstructor as the class it rebuilds, is an object restored by its own class (sklearn's
+  estimators, an omegaconf config, a Lightning AttributeDict, Cython's `__pyx_unpickle_*`, pandas' `_new_Index`):
+  quiet. Called with text it is told to use — anything but a plain name: a command, code, a path, a URL, a module
+  path, bytes — it is SC-PICKLE-GLOBAL (MAJOR), and so is an object the pickle computed and then calls (a gadget
+  chain's shape); called with numbers, plain names and objects the pickle made (sklearn's
+  `Tree(n_features, n_classes, n_outputs)`, pandas' `StringDtype('python', nan)`), quiet. A global of the scanned
+  package's own modules (its module is a `.py` file of the project, the release, or the dependency's own folder under
+  `--deps`: `torch.save(model)` of the package's own class) is SC-PICKLE-GLOBAL as INFO, listed and setting no verdict
+  (John's decision of Oct 21): importing it runs that module's code when the file is loaded, and that code is the
+  package's, which the scan reads (`pickle::own_imports`, the `model_own` call, once the scan knows its files). Such a
+  function called with text it is told to use stays SC-PICKLE-GLOBAL, MAJOR, as any function's: the text decides what
+  the code does. An enum's member pickles as its class called with its value (`Source('https://...')`): it is such a
+  call, MAJOR, whatever the scan's source defines (model_file holds it in its `calls` for `model_own`, which reports
+  it beside the own module's INFO). A waiver of a plain enum's member lookup (the precision review of Oct 21) was
+  dropped by the external re-review of Oct 27: which file a module name is when the file is loaded is the loading
+  program's import path (sys.path set by its code, PYTHONPATH, `.pth` files, the folder it runs in, what is installed,
+  a project `enum.py`), which no scan of the files establishes.
 - **What cannot be read** is SC-TRUNCATED (INCOMPLETE): a pickle cut short or garbled (what ran before the cut is
   reported too: a payload before a deliberate break, nullifAI's shape), a joblib array whose shape or dtype cannot be
   read or that runs past the file's end, a compression the engine cannot undo, a member in a zip method it cannot

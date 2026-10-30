@@ -524,7 +524,21 @@ rust/
                              each global by the pack's tables (`PICKLE_SAFE_GLOBALS`: PyTorch's
                              weights-only set, numpy's pickling, pyarrow's, dateutil's and pytz's,
                              plain data; `PICKLE_DATA_GLOBALS`, the data types of modules of code
-                             named exactly; `PICKLE_CODE_MODULES`,
+                             named exactly; `PICKLE_DATA_MEMBERS`, their enums' members by the
+                             names Python 3.10 and 3.11.0 to 3.11.4 write (signal.SIGTERM,
+                             ssl.TLSVersion.TLSv1_2) as exact (module, name) pairs, a dotted one
+                             only where Python walks it (getattr's, protocol 4's GLOBAL), data
+                             where they are only kept, code where called (APPEND calling the
+                             extend an object was given too: `Given`, and on any object the
+                             extend any dict, call or attribute state gave: `AnyGiven`, charged
+                             to `GIVE_WORK`, apart from `STATE_WORK`; past it, or past what a
+                             record keeps (64 globals, a container's items), an APPEND that
+                             cannot call what it was given is SC-TRUNCATED; a member under a key
+                             the pickle computes is passed over, a known limit, backlog
+                             PY311-MEMBER-PARITY), made (numpy's _reconstruct's class too) or
+                             changed, or in a pickle that calls what it computed
+                             (`Classes::is_member`, `Glob::member`, `Book::plain_lookup`:
+                             FP-MODEL-FILES-PY311); `PICKLE_CODE_MODULES`,
                              `PICKLE_CODE_GLOBALS`, `PICKLE_CODE_ATTRS`; Python 2's names,
                              `PICKLE_MODULE_ALIASES` and `PICKLE_NAME_ALIASES`) and by its use:
                              SC-PICKLE-CODE, SC-PICKLE-GLOBAL, SC-TRUNCATED (`model_sniff`,

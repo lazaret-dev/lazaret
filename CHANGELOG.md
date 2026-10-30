@@ -2336,6 +2336,110 @@ aggregate):
   16 listed as before, so no verdict is weaker; the same on every route, native and WebAssembly). Owed:
   John's `bench.py all` (the popular set: a release that ships a checkpoint or a pickle moves; joblib's wheel becomes
   INCOMPLETE for its own `.pkl.bz2`/`.pkl.xz`/`.pkl.lzma` test files).
+- **A member of the standard library's data enums that Python 3.10 or 3.11 pickled is data, not code
+  (FP-MODEL-FILES-PY311, John's decision of Oct 29; rule set 2.114.0).** FP-MODEL-FILES reads
+  `signal.Signals`, `socket.AddressFamily`, `ssl.VerifyMode` and the like as data (`PICKLE_DATA_GLOBALS`) and the rest
+  of `signal`, `socket` and `ssl` as code. Python 3.12 and later pickle `signal.SIGTERM` through its class
+  (`signal.Signals(15)`), but Python 3.10 and 3.11.0 to 3.11.4 pickle a member of an enum that
+  `IntEnum`/`IntFlag._convert_` made by the module-level alias it exports (`GLOBAL 'signal SIGTERM'`; signal's
+  `Signals`, `Handlers` and `Sigmasks`, socket's `AddressFamily`, `SocketKind`, `MsgFlag` and `AddressInfo`, ssl's
+  `_SSLMethod`, `Options`, `AlertDescription`, `SSLErrorNumber`, `VerifyFlags` and `VerifyMode`), and 3.11.0 to 3.11.4 a
+  member of `ssl.TLSVersion` or `ssl.Purpose` as `getattr(ssl.TLSVersion, 'TLSv1_2')`: a benign pickle those Pythons
+  wrote holding a signal, a handler, an address family, a socket kind or an ssl constant was SC-PICKLE-CODE (CRITICAL),
+  and three of FP-MODEL-FILES's tests, which pickled with the running Python, failed there. A member named exactly
+  (`PICKLE_DATA_MEMBERS`, 202 names: every constant CPython 3.10.0 to 3.14.6's `signalmodule.c`, `socketmodule.c` and
+  `_ssl.c` can export on any platform that those enums take — Windows' `CTRL_C_EVENT`, `AF_HYPERV`, Linux's `AF_PACKET`,
+  macOS' `AF_SYSTEM` among them — `ssl.PROTOCOL_SSLv23`, and `TLSVersion`'s and `Purpose`'s members as
+  `ssl.TLSVersion.TLSv1_2`) is data where it is only kept: pushed, stored, memoized, put in a list, tuple, set or dict
+  (a dict's key too), handed to a call or a BUILD. Called (REDUCE, OBJ, INST, a helper's call of it, or APPEND,
+  APPENDS or ADDITEMS calling the `extend`, `append` or `add` the pickle gave an object), made (NEWOBJ, the class of a
+  reconstructor, of numpy's `_reconstruct` and the format's other constructors of their argument's class, of a joblib
+  array wrapper), changed (BUILD, SETITEM, SETITEMS, APPEND, APPENDS or ADDITEMS on it), given to a special method or
+  in a pickle that calls an object it computed (`functools.partial(signal.SIGTERM)()`) or what it may have given an
+  object and the reader does not see, it is SC-PICKLE-CODE as before, and so are an attribute reached through it
+  (`getattr(signal.SIGTERM, '__class__')`), `signal.signal`, `socket.socket` and any name that is not exactly a
+  member's, module and name each (`signal.SIGTERMX`, `signal.Signals.SIGTERM`, `_signal.SIGTERM`, `ssl.SOCK_STREAM`,
+  `http.client.OK`, `GLOBAL 'ssl.TLSVersion' 'TLSv1_2'`), and a dotted member's name where Python looks it up with a
+  plain `getattr` (GLOBAL or STACK_GLOBAL below protocol 4, numpy's `_ufunc_reconstruct`: it raises there); the getattr
+  form and protocol 4's GLOBAL walk it. `ssl._SSLMethod` joins `PICKLE_DATA_GLOBALS`: 3.12 pickles `ssl.PROTOCOL_TLS_CLIENT` as
+  `ssl._SSLMethod(16)`, CRITICAL before on every Python. The engine's, so every route alike, native and WebAssembly.
+  Measured on the runner, base `9ec8f832` → this change, 181 files on the 9 routes (github, project, --deps, sdist,
+  wheel, npm tarball, action; the npm CLI and its --deps in WebAssembly): 88 benign files — pickles of signal's,
+  socket's and ssl's members and plain data written by Python 3.10.22, 3.12.16 and 3.14.10 on the runner and 3.11.1,
+  3.11.4 and 3.11.17 here (a dict of members at protocols 0 to 5, every member at protocols 2 and 4, a `torch.save`
+  checkpoint, a joblib file), and 28 hand-built — were SUSPICIOUS on every route but 3 (85, SC-PICKLE-CODE CRITICAL:
+  every 3.10 and 3.11.0–3.11.4 file for the aliases, 3.10's and 3.11.0–3.11.4's with SC-TRUNCATED for
+  `{SIGTERM: SIG_DFL}` in an object's state; the later Pythons' but their checkpoints for `ssl._SSLMethod`) and are OK
+  on every route; the 31 hostile ones (each member called, called through `functools.partial` or
+  `operator.itemgetter`, made, changed by BUILD, SETITEM or APPEND, given to `__setstate__` or reached through,
+  `signal.signal` with a handler, a socket made and connected, `os.system`, near names, other modules' names,
+  checkpoints of them) stay SC-PICKLE-CODE CRITICAL and SUSPICIOUS on every route, losing only the "imports" of a
+  member handed beside them as an argument; the review's 62 (4 benign, OK now; 53 hostile, each as on base; 5
+  controls, as on base but one, a member as a key of a call's keyword arguments: OK now) too. No cell is louder; the
+  routes agree file by file. Amended after the review (Oct 29): a member in a pickle that calls an object it computed,
+  a member given items (SETITEM, APPEND) and `GLOBAL 'ssl.TLSVersion' 'TLSv1_2'` (the table matched the joined name)
+  were passed over as data; they are code again, as on base. Amended after the re-review (Oct 30): a member an object
+  was given as the `extend`, `append` or `add` that APPEND, APPENDS or ADDITEMS call (pickle's `load_append`,
+  `load_appends` and `load_additems` look them up on the object; the reader now keeps what BUILD's state and slots,
+  SETITEM on an object and the helpers that set attributes from a state — torch's `_rebuild_parameter_with_state` and
+  `_rebuild_from_type(_v2)`, `types.SimpleNamespace` — give an object under those names, and calls it there), a member
+  as the class numpy's `_reconstruct`, `_mareconstruct`, `array._array_reconstructor`, `__pyx_unpickle_SeedSequence`,
+  torch's `_rebuild_wrapper_subclass` or a joblib array wrapper makes an object of, and a member's dotted name that
+  Python looks up with a plain `getattr` (`GLOBAL 'ssl' 'TLSVersion.TLSv1_2'` below protocol 4,
+  `_ufunc_reconstruct('ssl', 'TLSVersion.TLSv1_2')`) were passed over as data, though Python raises at each; they are
+  code again, as on base: the re-review's 19 such probes and 21 more of the same shapes, SUSPICIOUS on base and OK on
+  the first amendment, are SUSPICIOUS again on all 9 routes, while the getattr form 3.11.0 to 3.11.4 write (protocols 0
+  to 5), the dotted name at protocols 4 and 5 and Python's own order (APPENDS, then the BUILD that names `append`) stay
+  OK. Amended after the re-check (Oct 30): a member given as that `extend`, `append` or `add` in ways the record of
+  each object did not see — a slot state's `__dict__` or torch's setattr-style state, a dict installed as an object's
+  attributes by reference and filled later, the object reached through an alias (`operator.getitem((obj,), 0)`,
+  `logging.getLogger('x')` twice, an enum's member), joblib's memoised array wrapper — was passed over as data, and the
+  record's walk of each BUILD's state and its calls at each APPEND were unbounded (a 300 KB pickle took 13 s). Now
+  every member written under those names wherever a dict may be built or filled — DICT, SETITEM and SETITEMS on
+  anything, a call's arguments (`_operator.setitem(d, 'extend', m)`, `dict.setdefault`,
+  `dict.update(d, [('extend', m)])`), a list or tuple state each of whose items is a 2-item tuple or list
+  (`torch.nn.Module.__setstate__`'s `__dict__.update`), a helper's pairs — is the whole file's (vm.rs `AnyGiven`, noted
+  where the pair is written), and so, only where a dict is or becomes an object's attributes (a BUILD's or a helper's
+  state, SETITEM on an object, a dict installed by reference, followed by its address), is an object the pickle
+  computed that may be called under a key it computes (in a state of pairs no helper reads, its literal names only);
+  APPEND, APPENDS and ADDITEMS on anything but a list, set, dict or tuple the pickle built call each, so an alias
+  reaches it; an object the pickle computed given so, or a mapping of attributes it computed in a dict's place, passes
+  no member over. The walks and the calls have their own count (`GIVE_WORK`, apart from the `STATE_WORK` the reading's
+  other looks charge): past it nothing more is looked at or called and no member is passed over; a record full is not
+  walked again (a record only unseen is); an APPEND whose call is not made, or on an object part of whose state the
+  reader did not look at for a bound of its own (the count spent, the record full, a container's items past what it
+  keeps), is SC-TRUNCATED; a dict a state holds twice is walked once, and a global no helper models, called again with
+  items of the same text kind and number, is not called again. The re-check's 11 such probes and the third re-check's 6
+  more (a state of pairs reached through an alias, a dict filled by a call) are SC-PICKLE-CODE CRITICAL again on every
+  route, as on base; a plain dict keyed by an enum's member or a class before a deque or a list subclass is filled (the
+  third re-check's 12 benign files in 3.10's form) stays OK, as on the second amendment, and so do 300,000 objects
+  BUILT before a deque, which reached the reading's looks when the two counts were one. After the fourth re-check: a
+  tuple state's 2-item containers were each read as a pair, so a frame's BlockManager axes, a numpy object array of two
+  objects, `functools.partial`'s two arguments, a custom `__setstate__`'s list of (enum member, object) pairs and an
+  (n, (obj, obj)) state, each before a deque, were CRITICAL again (its 14 benign files), and are OK; past `GIVE_WORK` a
+  function given as `extend` that APPEND would call was passed over silently (4 of its probes: OK where the second and
+  third amendments were CRITICAL), and is SC-TRUNCATED (so, louder, are the same shapes with an int or plain text).
+  After the fifth re-check: an object's record unseen (a state the pickle computed, a dict past what the reader keeps)
+  was not walked again, so a function given as `extend` by a later BUILD was passed over silently (its 3 probes, OK
+  since the third amendment; the second read two of them CRITICAL), and is called (CRITICAL) or, where the reader's
+  bounds hide it, SC-TRUNCATED; and a state of (computed key, member) pairs, `[(Transport.TCP, SOCK_STREAM)]`,
+  `list({int: SIGTERM}.items())` or a dict state `{Transport.TCP: AF_INET}`, each before a deque, read as code (its 12
+  benign files), and reads as on the second amendment. Still read as code, as on base, though Python writes them: an
+  object the pickle computed under a computed key in a dict subclass's or an OrderedDict subclass's items with a member
+  kept, a member under the literal name `append`, `extend` or `add` anywhere, and an object whose own state is keyed
+  by an enum member or another object the pickle computes and holds an object, with a member kept elsewhere (the
+  first amendment read it SC-TRUNCATED), each before a deque. Known limits,
+  passed over (parity with base is backlog PY311-MEMBER-PARITY): a member under a key the pickle computes, in a dict, a
+  state or a state of pairs; a member a dict a call fills gives by a computed key or through a mapping or iterable the
+  pickle builds (`dict.update(d, [(<computed>, m)])`, `dict.fromkeys`, `zip`); one under a key
+  `codecs.encode(…, 'rot13')` makes. Each for one reason: every `PICKLE_DATA_MEMBERS` name is a plain int or str enum
+  member, none is callable, so calling one raises TypeError and runs nothing. The cost probes take 0.9 to 1.6 times
+  base's time (BUILDs of one memoised list state of 64 pairs 1.0 to 1.3, which took 1.5 to 2.0; 300,000 objects each
+  given a function and kept, 200,000 SETITEMs of a `__dict__` and 200,000 objects each BUILT with a tuple of 64 dicts,
+  1.4 to 1.6; APPENDs of text that names code to a function an object was given, which base never calls, 6 to 8,
+  bounded by `GIVE_WORK`; a record only unseen is walked again at a cost of at most one `GIVE_WORK` walk, about
+  0.3 s in WebAssembly, so a small file of that shape takes up to 1.7 times), where they took up to 20 times; the
+  earlier probes and the 380-file corpus read as on the second amendment.
 - **On Windows, `--deps` no longer reads a dependency's nested manifest as its root (WIN-DEP-PATHS, PR #17's CI of
   Oct 30; rule set: assigned at stacking).** Both packages give the engine a manifest's path as their walk names it,
   root-relative with the system's separator. `scan_manifest` reads SC-DEP-URL from a package's root manifest only
