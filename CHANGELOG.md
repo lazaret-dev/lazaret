@@ -1919,9 +1919,15 @@ aggregate):
   without them. What this does not cover (`docs/DESIGN.md`): a file written while it is being read, or the tree
   changed after the scan and before it is installed; on a disk whose times are coarse (FAT, exFAT) a file written in
   place within the same tick at the same size, and a name that briefly reaches nothing while its folder's times do
-  not move; on Windows, whose listing has no inodes, a file replaced by another of the same size with its
-  modification time set back; and on Windows, the npm package's walk of a path longer than `MAX_PATH` if Windows
-  reports it as missing rather than too long.
+  not move; on Windows, a file written in place at the same size with its times set back (its writer can set every
+  time NTFS keeps); and on Windows, the npm package's walk of a path longer than `MAX_PATH` if Windows reports it as
+  missing rather than too long. Windows' listing (`DirEntry.stat`) has no file IDs, and the walk held a file it
+  listed there to its kind, size and modification time alone: another file put in its place with the same size and
+  times (a copy made within one tick of the system's clock has them on NTFS; PR #17's Windows runs met it) was read
+  as the walk's file, the call complete, and one that could not be opened was the walk's unreadable file, a
+  Q-UNREADABLE note with the gate passed. The walk now lstat's each entry it lists on Windows by its exact path
+  (`\\?\`) for its volume and file ID and holds every later lstat and fstat to them, as to an inode on POSIX: such
+  a file is a change (SC-TRUNCATED, incomplete). An entry whose ID cannot be had is not taken for one that has one.
 
 - **Security: a Go module proxy's redirect, or an SCA feed's, can no longer send Lazaret to this machine, its network
   or the cloud's metadata service (LZ-02, the external security report of Oct 27; CWE-918, server-side request forgery; no

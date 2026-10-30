@@ -2018,7 +2018,7 @@ def _tree_stats_at(tree, parts):
     while stack:
         cur = stack.pop()
         try:
-            entries = tree.listdir(cur)
+            entries = tree.listdir(cur, identify=False)
         except OSError:
             continue
         for e in entries:
@@ -3418,8 +3418,8 @@ def _file_record(st):
 
 def _unwritten(st, then, inode_known):
     """Is `st` unwritten since `then` (st_size, st_mtime_ns, st_ctime_ns, or () where none was kept)? Its change time
-    is compared only where both have an inode: a listing without one (Windows' DirEntry.stat) has a change time of its
-    own making, which an fstat need not share."""
+    is compared only where both have an inode: a listing without one (a disk that keeps no file IDs) has a change time
+    of its own making, which an fstat need not share."""
     if not then:
         return True
     size, mtime, ctime = then
@@ -3428,11 +3428,15 @@ def _unwritten(st, then, inode_known):
 
 def _same_file(st, expect):
     """Is `st` (an lstat or an fstat) the regular file `expect` (_file_record: as the walk's lstat gave it), unwritten
-    since? Where an inode is not known (0: Windows' DirEntry.stat), its kind, size and modification time are compared."""
+    since? Its device and inode (a file ID on Windows: _Root.listdir) are compared, then its size and times. Where
+    neither has an inode (0: a disk that keeps no file IDs), its kind, size and modification time are; where one has
+    and the other has not, it is not told to be that file (fail closed)."""
     if not _stat.S_ISREG(st.st_mode):
         return False
     dev, ino = expect[:2]
-    known = bool(ino and st.st_ino)
+    if bool(ino) != bool(st.st_ino):
+        return False
+    known = bool(ino)
     if known and (st.st_dev, st.st_ino) != (dev, ino):
         return False
     return _unwritten(st, expect[2:], known)
@@ -3440,15 +3444,31 @@ def _same_file(st, expect):
 
 def _same_entry(st, rec):
     """Is `st` (an lstat) the entry `rec`, (st_dev, st_ino, its kind: S_IFMT) as the walk's listing gave them, and a
-    regular file's size and times (_file_record) after them, unwritten since? Where an inode is not known (0: Windows'
-    DirEntry.stat), its kind (and a regular file's size and modification time) are compared."""
+    regular file's size and times (_file_record) after them, unwritten since? Where neither has an inode (0: a disk
+    that keeps no file IDs), its kind (and a regular file's size and modification time) are compared; where one has
+    and the other has not, it is not told to be that entry (fail closed)."""
     dev, ino, kind = rec[:3]
     if _stat.S_IFMT(st.st_mode) != kind:
         return False
-    known = bool(ino and st.st_ino)
+    if bool(ino) != bool(st.st_ino):
+        return False
+    known = bool(ino)
     if known and (st.st_dev, st.st_ino) != (dev, ino):
         return False
     return _unwritten(st, rec[3:], known)
+
+
+def _exact_path(folder, name):
+    """The path of `name` in `folder` as the system takes it exactly: on Windows, absolute and with the \\\\?\\ prefix,
+    so that no name in it is rewritten (Win32 drops a name's trailing dots and spaces, so `a.js.` would name `a.js`)
+    and its length is not capped at MAX_PATH (`name` is joined once `folder` is made absolute, which would rewrite it
+    too); elsewhere the two joined."""
+    if os.name != "nt":
+        return os.path.join(folder, name)
+    folder = os.path.abspath(folder)
+    if not folder.startswith(("\\\\?\\", "\\\\.\\")):
+        folder = "\\\\?\\UNC\\" + folder[2:] if folder.startswith("\\\\") else "\\\\?\\" + folder
+    return folder.rstrip("\\") + "\\" + name
 
 
 def _name_keys(name):
@@ -3529,7 +3549,9 @@ class _Root:
     its final path, its links followed (CreateFileW with FILE_FLAG_BACKUP_SEMANTICS, GetFinalPathNameByHandleW), is
     under `within` (the root's real path); every file is opened and read only when its handle's final path is
     (_open_verified), so no file outside the root is read. A folder swapped between that check and its listing can
-    still show its names there (not its files' contents): the gap docs/DESIGN.md states."""
+    still show its names there (not its files' contents): the gap docs/DESIGN.md states. Its listing gives no file
+    IDs: each entry is lstat'ed by its exact path for its volume and file ID (`listdir`), which the walk holds what
+    it found to, as to a device and inode elsewhere."""
 
     _KEEP = 16
     _STRIDE = 16
@@ -3819,10 +3841,18 @@ class _Root:
                 self.changed_at(parts[:n])
                 return
 
-    def listdir(self, parts=()):
+    def listdir(self, parts=(), identify=True):
         """[_Entry] of the folder `parts`, each lstat'ed while it is open. The folder itself is opened afresh (a
         descriptor of it kept from before is let go): what is listed is the folder its name names now, and a folder
-        that is a link or no folder now is _PathChanged."""
+        that is a link or no folder now is _PathChanged.
+
+        Where the listing gives an entry no identity (Windows' DirEntry.stat: st_ino and st_dev 0), the entry is
+        lstat'ed by its exact path (_exact_path) for its volume and file ID, which every later lstat and fstat of it
+        is held to (_same_file, _same_entry): a file replaced by another, whose size and times can be the same (a
+        copy made within one tick of the system's clock has them on NTFS, and SetFileTime sets them), is a change, as
+        it is by its inode on POSIX. Where that lstat fails or gives no ID either, the entry keeps the listing's stat:
+        no lstat or fstat with an ID is taken for it. `identify` False (a count or a probe of names and kinds, which
+        nothing is held to): the listing's stat as it is."""
         parts = tuple(parts)
         where = self._dir(parts, fresh=True)
         out = []
@@ -3832,8 +3862,20 @@ class _Root:
                     st = e.stat(follow_symlinks=False)
                 except OSError as exc:
                     st = exc
+                else:
+                    if identify and not st.st_ino and not _ANCHORED_OPEN:
+                        st = self._identified(where, e.name, st)
                 out.append(_Entry(e.name, st))
         return out
+
+    @staticmethod
+    def _identified(where, name, st):
+        """The lstat of `name` in the folder `where` (a path) by its exact path, where it has a file ID; else `st`."""
+        try:
+            now = os.lstat(_exact_path(where, name))
+        except (OSError, ValueError):
+            return st
+        return now if now.st_ino else st
 
     def listdir_after(self, parts):
         """listdir, for a reader after the walk: a regular file the walk listed in that folder that is gone from it,
@@ -4195,7 +4237,7 @@ def _listing(path):
 def _listing_at(tree, parts):
     """_listing of the folder `parts` of a _Root (a probe: None when it cannot be listed, a link now among them)."""
     try:
-        return [[_fs_display(e.name), e.is_dir(follow_symlinks=False)] for e in tree.listdir(parts)]
+        return [[_fs_display(e.name), e.is_dir(follow_symlinks=False)] for e in tree.listdir(parts, identify=False)]
     except OSError:
         return None
 
@@ -4548,7 +4590,11 @@ def _walk_tree(tree, excludes, include_deps, col):
             if _stat.S_ISLNK(mode) or (_stat.S_ISDIR(mode) and _is_reparse_point(st)):
                 listed.append([name, "link", _readlink((tree, parts + (e.name,)))])
             elif _stat.S_ISDIR(mode):
-                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino else None
+                # (a loop is a folder met again by its identity, where it is opened beneath its parent; where the
+                # tree is read by path (Windows) no link is followed and NTFS has no hard-linked folders, and a file
+                # ID there (_Root.listdir's) need not tell folders apart: 3.10's and 3.11's 64-bit one of ReFS's
+                # 128-bit IDs is not unique, so none is used)
+                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino and _ANCHORED_OPEN else None
                 listed.append([name, "dir", key, key in seen_dirs])
             elif not _stat.S_ISREG(mode):
                 listed.append([name, "special", next((c for test, c in _SPECIAL_CODES if test(mode)), "other")])

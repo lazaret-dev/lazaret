@@ -422,8 +422,8 @@ class _DirectoryCase(unittest.TestCase):
             self.reads.append(data)
             return data
 
-        def listdir(tree, parts=()):
-            got = real_listdir(tree, parts)
+        def listdir(tree, parts=(), **kwargs):
+            got = real_listdir(tree, parts, **kwargs)
             self.listed.extend(e.name for e in got)
             if swap and when == "listed" and state["walking"] and not state["swapped"] and tuple(parts) == after:
                 swap_now(tree)
@@ -673,7 +673,8 @@ class _SwapCase(_DirectoryCase):
 
     def change(self, inside, outside, rel, how):
         """`rel` under inside/ swapped: for a link to its twin outside, a folder, another file (another inode, the same
-        text), or nothing."""
+        text, size and modification time: what a copy made within one tick of the system's clock has on NTFS, which
+        stamps a file's times from it), or nothing."""
         at = os.path.join(inside, *rel.split("/"))
         if how == "link":
             twin = os.path.join(outside, *rel.split("/"))
@@ -684,7 +685,9 @@ class _SwapCase(_DirectoryCase):
             os.rename(at, at + ".old")
             os.mkdir(at)
         elif how == "other file":
+            st = os.stat(at)
             shutil.copyfile(at, at + ".new")
+            os.utime(at + ".new", ns=(st.st_atime_ns, st.st_mtime_ns))
             os.replace(at + ".new", at)
         else:
             os.unlink(at)
@@ -1115,6 +1118,151 @@ class RewrittenFileTests(_SwapCase):
                 if name == "scan_directory":
                     self.assertIn(("SC-INSTALL-HOOK", "CRITICAL"), self.rules(out, "package.json"))
                     self.assertFalse([i for i in out["issues"] if i["rule"] == "SC-TRUNCATED"], out["issues"])
+
+
+class _EntryWithoutId:
+    """An os.scandir entry as Windows' gives one: its lstat (stat(follow_symlinks=False)) without an identity, st_ino,
+    st_dev and st_nlink 0 (Windows' DirEntry.stat reads the folder's listing, which has no file IDs)."""
+
+    def __init__(self, entry):
+        self._entry, self.name, self.path = entry, entry.name, entry.path
+
+    def stat(self, *, follow_symlinks=True):
+        st = self._entry.stat(follow_symlinks=follow_symlinks)
+        if follow_symlinks:
+            return st
+        return os.stat_result((st.st_mode, 0, 0, 0) + tuple(st)[4:],
+                              {k: getattr(st, k) for k in ("st_atime", "st_mtime", "st_ctime", "st_atime_ns",
+                                                           "st_mtime_ns", "st_ctime_ns")})
+
+    def is_dir(self, *, follow_symlinks=True):
+        return self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+    def is_file(self, *, follow_symlinks=True):
+        return self._entry.is_file(follow_symlinks=follow_symlinks)
+
+    def is_symlink(self):
+        return self._entry.is_symlink()
+
+
+@contextlib.contextmanager
+def _listing_without_ids():
+    """os.scandir as Windows' lists a folder: its entries' lstat have no identity (_EntryWithoutId)."""
+    real = os.scandir
+
+    @contextlib.contextmanager
+    def scandir(path="."):
+        with real(path) as it:
+            yield (_EntryWithoutId(e) for e in it)
+    with mock.patch.object(os, "scandir", scandir):
+        yield
+
+
+class WithoutFileIdsTests(_SwapCase):
+    """LZ-03 on Windows (PR #17's Windows runs: windows-11-arm, and once windows-latest on 3.10). Windows' listing
+    (os.scandir's DirEntry.stat) gives no file ID, and the walk held a file it listed to its kind, size and modification
+    time alone. A copy of a file made within one tick of the system's clock (some 15.6 ms: NTFS stamps a file's times
+    from it) has the same size and times, as one whose times its writer set back (SetFileTime) has, so another file
+    put in its place was read as the walk's file (the call complete), and one that could not be opened then was the
+    walk's unreadable file: a Q-UNREADABLE note, the gate passed for a file that changed. Now an entry the listing
+    gives no ID is lstat'ed by its exact path for its volume and file ID (core._Root.listdir), every later lstat and
+    fstat is held to it, and an entry whose ID cannot be had is not taken for one that has one.
+
+    The listing is Windows' here on every system (_listing_without_ids, around the call), and the tree is read by path,
+    as on Windows."""
+
+    def setUp(self):
+        super().setUp()
+        if lazaret._folder_final_path(self.base) is None:
+            self.skipTest("this platform cannot say where an opened folder is")
+        for patch in (mock.patch.object(lazaret, "_ANCHORED_OPEN", False),
+                      mock.patch.object(lazaret, "_OPEN_FLAGS", lazaret._OPEN_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_the_listing_has_the_entries_ids(self):
+        inside, _outside = self.tree()
+        tree = lazaret._Root(inside)
+        self.addCleanup(tree.close)
+        with _listing_without_ids():
+            got = {e.name: e.stat() for e in tree.listdir(())}
+            bare = {e.name: e.stat() for e in tree.listdir((), identify=False)}
+        for name in ("a.py", "sub"):
+            st = os.lstat(os.path.join(inside, name))
+            self.assertEqual((got[name].st_dev, got[name].st_ino), (st.st_dev, st.st_ino))
+            self.assertEqual((bare[name].st_dev, bare[name].st_ino), (0, 0))      # (a count's: as listed)
+
+    def test_another_file_with_the_same_text_size_and_times_is_a_change(self):
+        # (the swap the Windows runs made by chance, made every time: lib/run.dat after the walk, before the hook's
+        # reader reads it; package.json once the walk has listed the root, before it reads it)
+        for name, tool in TOOLS:
+            for rel, when in (("lib/run.dat", "walked"), ("package.json", "listed")):
+                with self.subTest(tool=name, file=rel):
+                    inside, outside = self.tree()
+                    self.put(inside, {"package.json": GATE_PKG if when == "listed" else HOOK_PKG,
+                                      "lib/run.dat": RISKY_JS})
+                    with _listing_without_ids():
+                        out = tool({"path": inside})
+                    self.assertFalse(out.get("incomplete"), out)       # (unswapped: complete, as before)
+                    with _listing_without_ids(), \
+                            self.watching(lambda: self.change(inside, outside, rel, "other file"), when=when,
+                                          after=()):
+                        out = tool({"path": inside})
+                    self.assertNotRead(name, out, os.path.join(*rel.split("/")))
+
+    def test_a_file_that_cannot_be_opened_is_unreadable_only_while_it_is_the_walks(self):
+        real = lazaret._Root._open
+        for changed in (False, True):
+            with self.subTest(changed=changed):
+                inside, outside = self.tree()
+
+                def deny(tree, parts):
+                    if parts[-1] == "a.py":
+                        if changed:
+                            self.change(inside, outside, "a.py", "other file")
+                        raise PermissionError(13, "Permission denied")
+                    return real(tree, parts)
+                with _listing_without_ids(), mock.patch.object(lazaret._Root, "_open", deny):
+                    out = server.tool_scan_directory({"path": inside})
+                if changed:                         # (Windows' runs: a Q-UNREADABLE note, and the gate passed)
+                    self.assertNotRead("scan_directory", out, "a.py")
+                else:
+                    self.assertEqual(self.rules(out, "a.py"), {("Q-UNREADABLE", "INFO")})
+                    self.assertFalse(out.get("incomplete"))
+
+    def test_an_entry_whose_id_cannot_be_had_is_not_taken_for_the_file_opened(self):
+        # (its lstat failed, or the disk keeps none: the walk's entry has no ID, the file opened has one)
+        real = lazaret._Root._identified
+
+        def identified(where, name, st):
+            return st if name == "a.py" else real(where, name, st)
+        inside, _outside = self.tree()
+        with _listing_without_ids(), mock.patch.object(lazaret._Root, "_identified", staticmethod(identified)):
+            out = server.tool_scan_directory({"path": inside})
+        self.assertNotRead("scan_directory", out, "a.py")
+        self.assertEqual([i["file"] for i in out["issues"] if i["rule"] == "SC-TRUNCATED"], ["a.py"])
+
+    def test_the_exact_path_keeps_every_name_as_listed(self):
+        # (Win32 drops a name's trailing dots and spaces: a.js. would name a.js; \\?\ takes it as it is, past MAX_PATH)
+        if os.name != "nt":
+            self.assertEqual(lazaret._exact_path(self.base, "a.js."), os.path.join(self.base, "a.js."))
+            return
+        drive = os.path.splitdrive(os.path.abspath(self.base))[0]
+        for folder, want in ((drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js."),
+                             (drive + "\\", "\\\\?\\" + drive + "\\a.js."),
+                             ("\\\\srv\\share\\x", "\\\\?\\UNC\\srv\\share\\x\\a.js."),
+                             ("\\\\?\\" + drive + "\\x", "\\\\?\\" + drive + "\\x\\a.js.")):
+            with self.subTest(folder=folder):
+                self.assertEqual(lazaret._exact_path(folder, "a.js."), want)
+        inside, _outside = self.tree()
+        with open(lazaret._exact_path(inside, "a.js."), "wb") as fh:        # (a name Win32 cannot make)
+            fh.write(RISKY_JS.encode())
+        self.addCleanup(os.unlink, lazaret._exact_path(inside, "a.js."))    # (nor remove: shutil.rmtree's)
+        st = os.lstat(lazaret._exact_path(inside, "a.js."))
+        self.assertTrue(stat.S_ISREG(st.st_mode) and st.st_ino)
+        out = server.tool_scan_directory({"path": inside})
+        # (it is listed and has its own ID; opened by its path it is a.js, which is not there: not read, a change)
+        self.assertNotRead("scan_directory", out, "a.js.")
 
 
 @unittest.skipUnless(_can_link(), "symbolic links cannot be made here")

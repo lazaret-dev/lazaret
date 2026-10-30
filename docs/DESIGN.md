@@ -401,11 +401,22 @@ another now, or the folder changed while it was looked at (its modification
 and change times, which every entry made, renamed or removed in it moves);
 otherwise it names nothing, as when the walk listed the folder. On a disk
 that tells names apart (Linux's usual ones) a hook's `LIB/RUN.DAT` is a file
-that is not there, as before. Where the walk's listing has no inodes
-(Windows' `DirEntry.stat`), a name is the entry it is one name with, by the
-identity both have now, and a regular file by its size and modification
-time (its change time only where the inode is known: Windows' listing has a
-creation time there).
+that is not there, as before. Windows' listing (`DirEntry.stat`) has no file
+IDs, so the walk lstat's each entry it lists there by its exact path (`\\?\`
+and the absolute path: no name rewritten, no `MAX_PATH`) for its volume and
+file ID (`_Root.listdir`), and holds every later lstat and fstat to them, as
+to an inode: a file replaced by another is a change there too, whatever its
+size and times (a copy made within one tick of the system's clock, some
+15.6 ms, has the same ones on NTFS, which stamps a file's times from it; the
+Windows runs of PR #17 met it by chance). An entry whose ID cannot be had (its
+lstat fails) keeps the listing's stat, and no lstat or fstat with an ID is
+taken for it; where neither has one (a disk that keeps no file IDs), a name
+is the entry it is one name with, by the identity both have now, and a
+regular file by its size and modification time. The counts and probes that
+hold nothing to the listing (the pruned trees', the MCP budget's, a
+dependency tree's probe) take the listing as it is, and the walk's loop
+check uses no Windows file ID (3.10's and 3.11's 64-bit one of ReFS's
+128-bit IDs is not unique; nothing is followed there to loop).
 
 These checks keep what is read consistent with what the walk found while the
 tree is changed during a call (fail closed: SC-TRUNCATED and incomplete). The
@@ -420,9 +431,12 @@ LZ-03's re-check 2:
   while its folder's times did not move is taken for one that reached nothing
   then, so a file renamed away and back between two lookups on such a disk
   can be missed (N6, timing-dependent).
-- Windows, whose listing has no inodes: a file replaced by another of the
-  same size whose modification time is set back (`SetFileTime`) is taken for
-  the file the walk listed.
+- Windows, where a file's writer can set every time NTFS keeps (creation,
+  modification, change: `SetFileTime`, `SetFileInformationByHandle`): a file
+  written in place at the same size with its times set back is not told from
+  the file the walk listed (POSIX's change time is the system's alone). A
+  file replaced by another is told apart by its file ID; on Python 3.10 and
+  3.11 a ReFS file ID is cut to 64 bits, which need not be unique.
 - A disk that takes names for one some other way (another Unicode version's
   case folding), for a name that reaches nothing because the walk's entry it
   stood for is gone.
