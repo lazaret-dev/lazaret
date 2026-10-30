@@ -11,7 +11,9 @@ document, a broken promise (`check` raises `Violation`), or too much time (the d
   as pacote runs it (`npm_extract.cjs`, with the node and the npm on PATH). A file npm writes is read,
   under the path npm writes it at, or the reader calls the archive corrupt; and `registry.npmtar`, the reader's
   model of npm's, says what npm writes (by the node-tar that npm bundles: 6.2 in npm 10, 7.5 in npm 11;
-  `LAZARET_NPM_DIR` names another npm's folder). Without node and npm's node-tar it compares nothing.
+  `LAZARET_NPM_DIR` names another npm's folder), where npm runs on Linux or macOS: the model is of that npm, and
+  npm on Windows, which it does not model, writes otherwise (`NPM_MODEL_HERE`). Without node and npm's node-tar
+  it compares nothing.
 - `xml`, `xml-minidom`: `safexml.ElementTree.fromstring` and `safexml.minidom.parseString`, with the options the
   scanner uses and the limits it can be given.
 - `sca-*`: `scanner.sca.scan_all` over one file of each kind the inventory reads (the npm, yarn, pnpm and bun
@@ -362,6 +364,15 @@ def npm_diff_seeds():
             + [npm_generated(rng) for _ in range(16)])
 
 
+#: Is `registry.npmtar`'s model held to the npm here (the `npm-model` promise)? It is the model of npm on Linux and
+#: macOS (its docstring: "Not modelled: ... npm on Windows"; `written_path`, `WRITERS`). npm on Windows writes
+#: otherwise, by Windows' rules: a backslash is a separator there (`package\win\c.js` is `win/c.js`, which npm on
+#: Linux does not write), and a name Windows cannot hold (a newline or a carriage return in it) is not written.
+#: There the other promises hold all the same: a file npm writes is read, at the path npm writes it at, or the
+#: archive is called corrupt.
+NPM_MODEL_HERE = sys.platform != "win32"
+
+
 def npm_model(npmtar, tar_version):
     """registry.npmtar's model of where npm writes an entry, for the node-tar of this version (6: npm 10's)."""
     return npmtar.written_path_npm10 if str(tar_version).split(".")[0] == "6" else npmtar.written_path
@@ -460,7 +471,7 @@ def npm_diff_start():
         if npm is None or not npm["ok"]:
             return
         written = {rel: digest for rel, digest, _size in npm["files"] if digest != "other"}
-        predicted = npm_predicted(data, npm.get("tar", "7"))
+        predicted = npm_predicted(data, npm.get("tar", "7")) if NPM_MODEL_HERE else None
         if predicted is not None:
             check(predicted == written, "npm-model", f"registry.npmtar says {sorted(predicted)[:6]}, npm writes "
                                                      f"{sorted(written)[:6]}")

@@ -626,8 +626,17 @@ class ReviewTests(GqlCase):
         self.assertEqual((out["stopped"], out["caughtUp"]), (None, True))     # (the listing goes on)
 
     def test_the_graphql_part_has_a_wall_clock_bound(self):
+        # (each call takes a second of the run's clock: the fakes answer at once, and Windows' monotonic clock moves
+        # in steps of some 16 ms, so there a call took no time and three were made before the 1e-9 s were spent)
         gh = FakeGitHub(repos(1001, 300))
-        with mock.patch.object(ghdiscover, "GRAPHQL_RUN_SECONDS", 1e-9):
+        clock, post = [0.0], gh._graphql
+
+        def timed(*a):
+            clock[0] += 1
+            return post(*a)
+        gh._graphql = timed
+        with mock.patch.object(ghdiscover, "GRAPHQL_RUN_SECONDS", 1e-9), \
+                mock.patch.object(ghdiscover, "_clock", lambda: clock[0]):
             out = self.scan_all(gh)
         self.assertEqual(len(gh.posts), 1)
         self.assertEqual(out["graphql"]["stopped"], "the GraphQL part's 1e-09 seconds for a run were spent")

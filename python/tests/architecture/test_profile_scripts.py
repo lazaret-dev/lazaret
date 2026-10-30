@@ -777,12 +777,15 @@ class SCABundleTests(unittest.TestCase):
         self.assertNotEqual(self.script.digest_of(a), self.script.digest_of([a[0], match("B", "other")]))
 
     def test_the_peak_is_in_megabytes_whatever_the_platform_counts_in(self):
+        # (getrusage as a stand-in module's: Windows has no `resource`, and the script's is None there)
         usage = mock.Mock(ru_maxrss=2048 * 1024)
-        with mock.patch.object(self.script.resource, "getrusage", return_value=usage):
+        resource = mock.Mock(RUSAGE_SELF=0, getrusage=mock.Mock(return_value=usage))
+        with mock.patch.object(self.script, "resource", resource):
             with mock.patch.object(self.script.sys, "platform", "linux"):
                 self.assertEqual(self.script.peak_mb(), 2048.0)               # (kilobytes)
             with mock.patch.object(self.script.sys, "platform", "darwin"):
                 self.assertEqual(self.script.peak_mb(), 2.1)                  # (bytes)
+        resource.getrusage.assert_called_with(resource.RUSAGE_SELF)
         with mock.patch.object(self.script, "resource", None):
             self.assertIsNone(self.script.peak_mb())
 

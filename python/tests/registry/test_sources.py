@@ -634,8 +634,16 @@ class CheckoutGitHub(Tmp):
             "dot.": "could not be written (a name ending in a dot or a space, which Windows does not keep as given)",
             "lpt¹": "could not be written (a device's name, which Windows does not keep as given)"})
         self.assertEqual(len(sources.not_covered(ck)), 7)
-        ck, trees = self.kept({"CONTRIBUTING.md": b"1", "console.js": b"2", "nul.d/x": b"3"}, check_tree=False)
-        self.assertEqual(len(trees[0]), 3)                                   # (elsewhere, and names like them: kept)
+        like = {"CONTRIBUTING.md": b"1", "console.js": b"2"}
+        with mock.patch.object(sources, "WINDOWS", True):
+            ck, trees = self.kept(like, check_tree=False)
+        self.assertEqual((trees, ck.skipped), ([like], []))                 # (names like a device's: kept on Windows)
+        ck, trees = self.kept({**like, "nul.d/x": b"3"}, check_tree=False)
+        if sources.WINDOWS:                                                  # (nul.d is NUL's name with an extension)
+            self.assertEqual((trees, dict(ck.skipped)), ([like], {
+                "nul.d/x": "could not be written (a device's name, which Windows does not keep as given)"}))
+        else:
+            self.assertEqual(len(trees[0]), 3)                               # (elsewhere, a device's name too: kept)
 
     def test_an_entry_again_is_written_over_its_own_file(self):
         # (an archive's later entry of a path wins, as an extractor writes it, in the tree it went to; the reader

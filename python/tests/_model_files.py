@@ -459,7 +459,34 @@ def hostile():
 
 def peak_kib():
     """The process's peak resident memory in KiB: getrusage gives KiB on Linux and bytes on macOS (where the
-    200 MB checkpoint tests read 156,270,592 as KiB, Oct 29)."""
+    200 MB checkpoint tests read 156,270,592 as KiB, Oct 29). Windows has no getrusage: its peak working set
+    (GetProcessMemoryInfo's PeakWorkingSetSize, in bytes), what it counts as resident."""
+    if sys.platform == "win32":
+        return _peak_working_set() // 1024
     import resource
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak // 1024 if sys.platform == "darwin" else peak
+
+
+def _peak_working_set():
+    """Windows: this process's PeakWorkingSetSize (PROCESS_MEMORY_COUNTERS, psapi.h), in bytes."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    counters = Counters()
+    counters.cb = ctypes.sizeof(Counters)
+    if not psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return counters.PeakWorkingSetSize

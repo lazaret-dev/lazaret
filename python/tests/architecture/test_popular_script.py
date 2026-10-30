@@ -527,7 +527,9 @@ class FetchTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 code = pop.cmd_fetch(args, reg)
             with open(manifest, encoding="utf-8") as fh:
-                text = fh.read().replace(cache, "CACHE")
+                text = fh.read()
+            for written in (cache, json.dumps(cache)[1:-1]):   # (and as JSON writes it: Windows' backslashes doubled)
+                text = text.replace(written, "CACHE")
             return code, text, sorted(os.listdir(cache)), sorted(reg.asked)
 
     def test_fetch_with_jobs_writes_what_one_job_writes(self):
