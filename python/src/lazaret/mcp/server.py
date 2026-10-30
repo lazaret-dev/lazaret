@@ -411,7 +411,7 @@ def _preflight(tree, exclude, include_deps, ctx):
             return f"time budget of {ctx.max_seconds:g} s spent while listing files"
         parts, in_dep = stack.pop()
         try:
-            entries = tree.listdir(parts)
+            entries = tree.listdir(parts, identify=False)
         except OSError:
             continue
         for e in entries:
