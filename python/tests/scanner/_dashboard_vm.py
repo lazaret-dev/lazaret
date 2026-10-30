@@ -107,7 +107,11 @@ def as_the_cli_names_them(page, rels):
     (core._collect), where it names one: a finding's file, perFile's keys, and the files' and folders' paths in a
     finding's message (a cross-file flow's ends, an orphaned .pyc). The findings are then in the engine's order for
     those names (result.rs `order`: severity, then file by code point, then line; stable). `rels`: the files given
-    ('/'-separated). Nothing changes where os.sep is '/'."""
+    ('/'-separated). Where os.sep is '/' the page's result is returned as it is: its order is held to the CLI's
+    there, untouched."""
+    if os.sep == "/":
+        return page
+
     def native(path):
         return path.replace("/", os.sep)
     issues = page.get("issues", [])
