@@ -8,7 +8,7 @@ import { scanFile, scanConfigFile, treeReader } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 import { taintHelpers, call, packValues } from "./lib/native.js";
-import { modelOwnIssues } from "./lib/collect.js";
+import { modelOwnIssues, WINDOWS } from "./lib/collect.js";
 
 /** What scanFile reads of a collected file (`helpers`: projectHelpers' Map). */
 export const scanTask = (f, helpers = null) => {
@@ -108,10 +108,11 @@ export function collectionIssues(col, { extraIssues = [], scanAll = scanEach, ch
   }
   for (const mf of manifests) {
     // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json
-    // → scanManifest, with the registry hook set inside a dependency tree.
+    // → scanManifest, with the registry hook set inside a dependency tree; its
+    // path is the walk's ("\" separated on Windows: WIN-DEP-PATHS).
     try {
       add(mf.kind !== "package.json" ? scanGyp(mf.path, mf.content)
-        : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
+        : scanManifest(mf.path, mf.content, { registry: !!mf.dep, windows: WINDOWS }));
     } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
   }
   if (checks) checks(issues);

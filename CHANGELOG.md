@@ -2336,6 +2336,27 @@ aggregate):
   16 listed as before, so no verdict is weaker; the same on every route, native and WebAssembly). Owed:
   John's `bench.py all` (the popular set: a release that ships a checkpoint or a pickle moves; joblib's wheel becomes
   INCOMPLETE for its own `.pkl.bz2`/`.pkl.xz`/`.pkl.lzma` test files).
+- **On Windows, `--deps` no longer reads a dependency's nested manifest as its root (WIN-DEP-PATHS, PR #17's CI of
+  Oct 30; rule set: assigned at stacking).** Both packages give the engine a manifest's path as their walk names it,
+  root-relative with the system's separator. `scan_manifest` reads SC-DEP-URL from a package's root manifest only
+  (the top of the tree, or `node_modules/<name>/`), and its test of that (`manifest::at_package_root`,
+  `is_package_root`) read the path '/'-separated, as core reads a path on POSIX, where a backslash is a file name's.
+  On Windows a dependency's fixture, `node_modules\dep\test\package.json`, then had no folder: it was read as a
+  package's root manifest, and the dependencies it names from an insecure source were SC-DEP-URL (MAJOR: the gate
+  failed) in both CLIs' `--deps` scans there alone, which `test_js_parity_dep_url` met on the `js (windows-latest,
+  24)` job. `scan_manifest` now takes `windows`, as `collect_file`, `binary_classify` and the SARIF calls do: the
+  walks pass it (`core._scan_manifest_entry` with `_WINDOWS_PATHS`, `scancollection.js` with collect.js `WINDOWS`), and
+  with it a backslash separates the path's folders. Nothing changes on POSIX, a file name that holds a backslash
+  included, nor in the registry's routes, whose member paths are '/'-separated on every system and pass none, nor in
+  the dashboard (its uploads are '/'-separated). The engine's other readers of a walk's paths read either separator,
+  take `windows` or the separator, or are given '/'-separated paths (the root test of SC-MANIFEST-UNPARSEABLE, the
+  dependency-folder test, the .gyp reader, the walk's `collect_dir`, `collect_file` and `collect_pycache`, the .pth and
+  .pyc readers, the `--deps` and descriptor calls, the cross-file follower, the taint helpers, the settings, agent and
+  CI readers, the vendored Go and Rust readers); the npm CLI, run with Windows' separator on a POSIX disk over the
+  parity tests' trees, now differs from its POSIX run only in how its messages name paths. Tests:
+  `test_dep_url`'s `WindowsPathTests` (3) and `dep-url.test.js` (2), which give the engine Windows' form on every
+  system (they fail on the old code), and `manifest::tests`. Route scans, base and this change, 8 inert manifests on
+  the 9 routes (the runner: a project's own, and a dependency's nested one): the same 72 results.
 - **The code a text hands an eval call as a string is read as code (EVAL-LITERAL; the engine's, for both packages;
   rule set 2.107.0).** `eval("…")`, `Function("…")`, `new Function("a", "…")` and a global object's eval
   or Function by a computed name (`globalThis["ev" + "al"]("…")`) run the string they are handed, and so do Python's
