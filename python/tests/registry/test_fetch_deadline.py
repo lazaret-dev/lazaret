@@ -48,15 +48,11 @@ BODY = bytes(range(256)) * 1200                 # 300 KiB
 #: something to read once the time is up ends at once, as the drips' tests show). CI's windows-2025 (PR #17, Oct 29):
 #: a recv waited out its 10 s timeout through the shutdown and one begun after it its 5 s, and a head dripped then
 #: silent ended at 3.92 s, its socket's timeout cut to the time left when it connected, for a 2 s deadline. The
-#: download still fails with the deadline's error, at most that timeout late. A gap in the product there, not in the
-#: tests: the tests of it are expected to fail on Windows (`until_the_watchdog_wakes`), so that one passing (the gap
-#: closed) fails the run until its mark goes.
+#: download still fails with the deadline's error, at most that timeout late: a gap in the product there (a call is
+#: not ended at the deadline), not a fail-open. Its tests hold there what does hold: such a call ends within the
+#: deadline, its socket's timeout (cut to the time left) and the allowance; a read begun after the shutdown with no
+#: wait first fails at once; the other end sees the shutdown.
 WATCHDOG_WAKES = sys.platform != "win32"
-
-
-def until_the_watchdog_wakes(test):
-    """A test of the watchdog waking a call that waits: an expected failure where it cannot (WATCHDOG_WAKES)."""
-    return test if WATCHDOG_WAKES else unittest.expectedFailure(test)
 
 
 def head(status=200, headers=(), length=None):
@@ -340,24 +336,46 @@ class WatchdogTests(_Case):
     def test_a_flood_of_100_continue(self):
         self.assert_stops_in_time("/continue")
 
-    @until_the_watchdog_wakes
     def test_it_wakes_a_call_waiting_on_its_socket(self):
         d = guard._Deadline(DEADLINE, "u")
         self.addCleanup(d.close)
         a, b = socket.socketpair()
         self.addCleanup(a.close)
         self.addCleanup(b.close)
-        a.settimeout(10)
+        # (where the watchdog wakes a call (POSIX), the socket's timeout is 10 s, which only the shutdown cuts short;
+        # where it cannot (Windows), what the fetcher gives a socket: its timeout cut to the time left)
+        cut, _ = d.wait(10)
+        a.settimeout(10 if WATCHDOG_WAKES else cut)
         d.watch(a)
         started = time.monotonic()
-        try:
-            got = a.recv(10)                                    # (the watchdog shut it down: the end)
-        except socket.timeout:
-            self.fail("the watchdog did not wake the call")
+        if WATCHDOG_WAKES:
+            try:
+                got = a.recv(10)                                # (the watchdog shut it down: the end)
+            except socket.timeout:
+                self.fail("the watchdog did not wake the call")
+            self.assertEqual(got, b"")
+            self.assertLess(time.monotonic() - started, DEADLINE + ALLOWANCE)
+        else:
+            # (Windows: the call waits out its own timeout, the time left, through the shutdown, and ends: its timeout,
+            # or the end or WSAESHUTDOWN should it be woken, within the deadline, that timeout and the allowance)
+            try:
+                a.recv(10)
+            except OSError:
+                pass
+            self.assertLess(time.monotonic() - started, DEADLINE + cut + ALLOWANCE)
+        self.assertTrue(wait_for(lambda: d._fired), "the watchdog did not fire")
+        a.setblocking(False)                                    # (a read begun after the shutdown, no select first:
+        try:                                                    # at once)
+            got = a.recv(10)
+        except BlockingIOError:
+            self.fail("the socket was not shut down")
         except OSError:
+            if WATCHDOG_WAKES:
+                raise
             got = b""                                           # (Windows: WSAESHUTDOWN)
         self.assertEqual(got, b"")
-        self.assertLess(time.monotonic() - started, DEADLINE + ALLOWANCE)
+        b.settimeout(5)                                         # (and the other end sees it shut)
+        self.assertEqual(b.recv(10), b"")
 
 
 class RedirectTests(_Case):
@@ -600,8 +618,6 @@ class DeadlineTests(unittest.TestCase):
                 got = a.recv(10)                                # (the watchdog shut it down: the end, at once)
             except socket.timeout:
                 self.fail("the socket was not shut down")
-            except OSError:
-                got = b""                                       # (the read refused: the end too)
         else:                                                   # (a read waits there: the other end sees it shut)
             b.settimeout(5)
             try:

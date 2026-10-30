@@ -20,6 +20,7 @@ import http.server
 import io
 import ipaddress
 import os
+import re
 import socket
 import ssl
 import tempfile
@@ -543,19 +544,31 @@ class _RedirectTests:
         # (2130706433, 0x7f000001, 127.1 and 0177.0.0.1 are names to the URL and addresses to the resolver: judged
         # by the address the lookup gives, before anything is connected. Resolvers differ on them: glibc's reads
         # 0177.0.0.1 as octal, 127.0.0.1, and macOS's as decimal, 177.0.0.1, a public address that is connected to
-        # there, as it may be, and a test must not reach out to; Windows' reads none of them as an address; so a form
-        # this system's resolver does not read as 127.0.0.1 is skipped here, never fetched)
+        # there, as it may be, and a test must not reach out to; Windows' reads none of them as an address. A form
+        # this system's resolver reads as no address (Windows': it looks it up as a name and finds none) is a hop that
+        # fails, there being nothing to judge or to connect to, and nothing past the proxy asked; one it reads as
+        # another address (macOS's 0177.0.0.1) is skipped here, never fetched)
         f = self.fetcher({"proxy.test": PUBLIC_PROXY})
-        judged = 0
+        asked = 0
         for host in ("2130706433", "0x7f000001", "127.1", "0177.0.0.1"):
             with self.subTest(host=host):
                 read = read_as_an_address(host)
-                if read != {"127.0.0.1"}:
-                    self.skipTest(f"this system's resolver reads {host} as {', '.join(sorted(read)) or 'no address'}")
-                self.refused(f, f"/hop/{host}/blob", f"redirect to {host}, a loopback address (127.0.0.1), refused: "
-                                                     f"the proxy is on a public address")
-                judged += 1
-        self.assertEqual(set(self.server.hosts()), {"proxy.test"} if judged else set())     # (nothing else asked)
+                if read and read != {"127.0.0.1"}:
+                    self.skipTest(f"this system's resolver reads {host} as {', '.join(sorted(read))}")
+                with self.server.lock:
+                    self.server.connections, self.server.requests = 0, []
+                asked += 1
+                if not read:
+                    url = self.url("proxy.test", f"/hop/{host}/blob")
+                    with self.assertRaises(repo.FetchError) as caught:
+                        f.get(url, max_bytes=1000)
+                    self.assertNotIsInstance(caught.exception, guard.HopRefused)    # (no address: nothing judged)
+                    self.assertRegex(str(caught.exception), rf"^(URL|network) error fetching {re.escape(url)}: ")
+                else:
+                    self.refused(f, f"/hop/{host}/blob", f"redirect to {host}, a loopback address (127.0.0.1), "
+                                                         f"refused: the proxy is on a public address")
+                self.assertEqual(self.server.hosts(), ["proxy.test"], "only the proxy was asked")
+        self.assertTrue(asked, "every form was skipped")
 
     def test_a_name_with_one_address_it_may_not_reach_is_refused(self):
         self.names["cdn.test"] = ["127.0.0.1", "10.9.9.9"]           # (every address the name gives is judged)
