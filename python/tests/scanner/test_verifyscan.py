@@ -124,9 +124,15 @@ class LinesTests(Case):
         os.symlink(outside, os.path.join(self.root, "link.env"))
         os.symlink(os.path.join(self.root, "app.py"), os.path.join(self.root, "inner.py"))
         os.mkdir(os.path.join(self.root, "d"))
-        for rel in ("link.env", "inner.py", "../outside.env", "d", "missing.py", os.path.join("d", "..", "..", "outside.env")):
+        # (inner.py, a link to a file under the root: where a file is opened by its path (Windows: no open beneath a
+        # folder's descriptor, no O_NOFOLLOW), it is followed, and kept as what it reaches is under the root
+        # (core._open_verified): app.py's line, which the scan reads too. link.env, which leads outside, is not read
+        # there either.)
+        inner = {} if core._ANCHORED_OPEN else {1: "import os"}
+        for rel, want in (("link.env", {}), ("inner.py", inner), ("../outside.env", {}), ("d", {}), ("missing.py", {}),
+                          (os.path.join("d", "..", "..", "outside.env"), {})):
             with self.subTest(rel):
-                self.assertEqual(verifyscan.lines_of(self.root, rel, [1]), {})
+                self.assertEqual(verifyscan.lines_of(self.root, rel, [1]), want)
         with mock.patch.object(core, "SOURCE_SIZE_CAP", 10):
             self.assertEqual(verifyscan.lines_of(self.root, "app.py", [1]), {})
 

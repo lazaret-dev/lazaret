@@ -14,6 +14,7 @@ import types
 import unittest
 from unittest import mock
 
+from tests._support import native_rel
 from tests.registry._review_support import scan_npm, scan_sdist, scan_wheel
 from tests.scanner.test_review_gradle_wrapper import (JAR, PROPS, genuine, hostile, next_release, one_byte, props,
                                                       with_class)
@@ -96,7 +97,8 @@ class Releases(unittest.TestCase):
 
 
 class GitHubScans(unittest.TestCase):
-    """A repository's checkout scanned as a project, its verdict decided as a registry's (ghdiscover.result)."""
+    """A repository's checkout scanned as a project, its verdict decided as a registry's (ghdiscover.result). Its
+    findings are at the checkout's files' paths, as a project scan reports them (os.sep-separated: `native_rel`)."""
 
     def verdict(self, files):
         from lazaret.registry import ghdiscover
@@ -114,19 +116,20 @@ class GitHubScans(unittest.TestCase):
 
     def test_a_gradle_project(self):
         base = {"build.gradle": "plugins { id 'java' }\n", "README.md": "# x\n", PROPS: props("9.8.1")}
+        jar = native_rel(JAR)
         self.assertEqual(self.verdict({**base, JAR: genuine("9.8")}), ("OK", []))
         verdict, got = self.verdict({**base, JAR: with_class(genuine("9.8"))})
-        self.assertEqual(got, [(JAR, "SC-GRADLE-WRAPPER", "CRITICAL")])
+        self.assertEqual(got, [(jar, "SC-GRADLE-WRAPPER", "CRITICAL")])
         self.assertNotEqual(verdict, "OK")
         self.assertEqual(self.verdict({**base, PROPS: props(next_release()), JAR: one_byte(genuine("9.8"))}),
-                         ("WARN", [(JAR, "SC-GRADLE-WRAPPER", "MAJOR")]))
+                         ("WARN", [(jar, "SC-GRADLE-WRAPPER", "MAJOR")]))
         # a genuine wrapper whose distribution comes over plain HTTP
         http = props("9.8.1").replace("https\\://services.gradle.org", "http\\://192.0.2.1")
-        self.assertEqual(self.verdict({**base, PROPS: http, JAR: genuine("9.8")}), ("WARN", [(JAR, "SC-GRADLE-WRAPPER", "MAJOR")]))
+        self.assertEqual(self.verdict({**base, PROPS: http, JAR: genuine("9.8")}), ("WARN", [(jar, "SC-GRADLE-WRAPPER", "MAJOR")]))
         # (the re-review of Oct 27, N3) the distribution Java reads: an escaped key, a continuation across a CRLF
         for how in ("escape", "crlf", "long"):
             self.assertEqual(self.verdict({**base, PROPS: hostile(how), JAR: genuine("8.14")}),
-                             ("WARN", [(JAR, "SC-GRADLE-WRAPPER", "MAJOR")]), how)
+                             ("WARN", [(jar, "SC-GRADLE-WRAPPER", "MAJOR")]), how)
 
 
 if __name__ == "__main__":

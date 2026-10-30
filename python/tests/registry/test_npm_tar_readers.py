@@ -85,8 +85,9 @@ NPM_X = ("const tar=require(process.argv[1]);const fs=require('fs');const path=r
          "tar.x({file:process.argv[2],cwd:process.argv[3],strip:1,sync:true,noChmod:true,noMtime:true,"
          "preserveOwner:false,filter:(p,e)=>{if(/Link$/.test(e.type))return false;if(/File$/.test(e.type))return true}"
          ",onwarn:()=>{}});const out={};const walk=(d)=>{for(const n of fs.readdirSync(d).sort()){const f=path.join(d,n);"
-         "if(fs.lstatSync(f).isDirectory())walk(f);else out[path.relative(process.argv[3],f)]="
-         "fs.readFileSync(f).toString('latin1')}};walk(process.argv[3]);console.log(JSON.stringify(out))")
+         "if(fs.lstatSync(f).isDirectory())walk(f);"
+         "else out[path.relative(process.argv[3],f).split(path.sep).join('/')]=fs.readFileSync(f).toString('latin1')}};"
+         "walk(process.argv[3]);console.log(JSON.stringify(out))")
 
 
 def bundled_tar_major():
@@ -104,7 +105,8 @@ def by_npm(npm10, npm11):
 
 
 def npm_writes(data):
-    """{path: bytes} npm writes from this tarball (node-tar as pacote runs it), or None without node-tar."""
+    """{path: bytes} npm writes from this tarball (node-tar as pacote runs it), or None without node-tar. A path is
+    '/'-separated, as an archive's member is (on Windows, where a backslash is a separator, Node names them so)."""
     found = node_tar()
     if not found:
         return None
@@ -184,10 +186,11 @@ class DisagreementTests(unittest.TestCase):
 
     def test_a_nul_before_a_newline(self):
         # node-tar's /\0.*/ stops at a line terminator, so a name goes on after it (a field filled to its end, or
-        # its NULs would stay in the path, which Node refuses); tarfile stops at the NUL
+        # its NULs would stay in the path, which Node refuses); tarfile stops at the NUL. (npm on Windows writes no
+        # such file: Windows refuses a line break in a name. The archive is INCOMPLETE all the same.)
         name = b"package/a.js\x00\n" + b"b" * 86
         data = tgz(entry(b"package/package.json", PJ), entry(name, EVIL))
-        self.check(data, "this reader read it as 'a.js'", "a.js\n" + "b" * 86)
+        self.check(data, "this reader read it as 'a.js'", "a.js\n" + "b" * 86, None if os.name == "nt" else EVIL)
 
     def test_a_unc_root_written_with_backslashes(self):
         # node-tar 7 takes a UNC root off by Windows' rules on every platform: npm 11 on Linux and macOS writes
@@ -196,7 +199,7 @@ class DisagreementTests(unittest.TestCase):
         # the first part) as a file of that name, backslashes and all
         data = tgz(entry(b"package/package.json", PJ), entry(b"package/\\\\srv\\sh\\index.js", EVIL))
         self.check(data, "as 'index.js', this reader read it as 'srv/sh/index.js'",
-                   by_npm("\\\\srv\\sh\\index.js", "index.js"))
+                   "srv/sh/index.js" if os.name == "nt" else by_npm("\\\\srv\\sh\\index.js", "index.js"))
 
 
 class RootTests(unittest.TestCase):
