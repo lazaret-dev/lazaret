@@ -390,10 +390,10 @@ def _post_urllib(url, headers, data, max_bytes, what, has_token, kind, reply_hea
         _keep_headers(reply_headers, exc.headers.items())
         raise _refused(exc.code, exc.headers.items(), url, what, has_token, kind) from None
     except urllib.error.URLError as exc:
-        deadline.check()
+        deadline.check(exc.reason, isinstance(exc.reason, TimeoutError))  # (a timeout of a call cut to the time left)
         raise SourceError(f"{what}: {exc.reason}") from None
     except (OSError, http.client.HTTPException) as exc:
-        deadline.check()
+        deadline.check(exc, isinstance(exc, TimeoutError))  # (a timeout of a call cut to the time left)
         raise SourceError(f"{what}: network error ({type(exc).__name__})") from None
     too_big = f"{what}: response exceeds the {max_bytes // 1024} KB budget"
     with guard._Timed(resp, deadline, timeout) as r:
