@@ -777,9 +777,8 @@ class Fetcher:
                 return new
 
         handlers = [Redirects, _HTTPHandler(), _HTTPSHandler()]         # (TLS 1.2 at least: nativenet.TLS_FLOOR)
-        if _is_loopback(urllib.parse.urlsplit(url).hostname):
-            handlers.append(urllib.request.ProxyHandler({}))      # never through a proxy
-        return urllib.request.build_opener(*handlers)
+        proxies = {} if _is_loopback(urllib.parse.urlsplit(url).hostname) else None   # loopback: never through a proxy
+        return nativenet.build_opener(*handlers, proxies=proxies)
 
     def _http_error(self, code, clean, req):
         hint = ""

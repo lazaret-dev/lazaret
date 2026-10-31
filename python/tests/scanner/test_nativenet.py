@@ -22,6 +22,7 @@ import threading
 import types
 import time
 import unittest
+import urllib.error
 import urllib.request
 from unittest import mock
 
@@ -736,6 +737,68 @@ class PythonTransportPolicyTests(unittest.TestCase):
         # them and the chain is valid; the native transport, which processes none, refuses it: PolicyExtensionTests)
         self.assertEqual(self.download(intermediate=[self.LZ01[1]], leaf_extensions=[
             (_pki.OID_CERT_POLICIES, _pki.certificate_policies("1.2.3.4"), True)]), ("answered", b"hello"))
+
+
+class PythonProxyHandlerTests(unittest.TestCase):
+    """An HTTPS proxy is refused before urllib can expose its credentials in a cleartext CONNECT request."""
+
+    URL = "https://origin.example/package"
+
+    def test_an_https_proxy_is_refused_without_mutating_the_request_or_echoing_secrets(self):
+        for proxy in ("https://proxy-user:proxy-secret@proxy.example:8443",
+                      " HTTPS://proxy-user:proxy-secret@proxy.example:8443 "):
+            with self.subTest(proxy=proxy):
+                request = urllib.request.Request(self.URL)
+                handler = nativenet.ProxyHandler({"https": proxy})
+                with mock.patch.object(urllib.request, "proxy_bypass", return_value=False), \
+                        self.assertRaises(urllib.error.URLError) as caught:
+                    handler.proxy_open(request, proxy, "https")
+                message = str(caught.exception)
+                self.assertIn("HTTPS proxies are not supported", message)
+                self.assertNotIn("proxy-user", message)
+                self.assertNotIn("proxy-secret", message)
+                self.assertEqual(request.host, "origin.example")
+                self.assertFalse(any(name.lower() == "proxy-authorization" for name, _ in request.header_items()))
+
+    def test_no_proxy_bypass_still_means_a_direct_connection(self):
+        proxy = "https://proxy-user:proxy-secret@proxy.example:8443"
+        request = urllib.request.Request(self.URL)
+        handler = nativenet.ProxyHandler({"https": proxy})
+        with mock.patch.object(urllib.request, "proxy_bypass", return_value=True):
+            self.assertIsNone(handler.proxy_open(request, proxy, "https"))
+        self.assertEqual(request.host, "origin.example")
+        self.assertFalse(any(name.lower() == "proxy-authorization" for name, _ in request.header_items()))
+
+    def test_supported_proxy_forms_keep_urllibs_behavior(self):
+        for proxy in ("http://proxy-user:proxy-secret@proxy.example:3128", "proxy.example:3128"):
+            with self.subTest(proxy=proxy):
+                request = urllib.request.Request(self.URL)
+                handler = nativenet.ProxyHandler({"https": proxy})
+                answer = object()
+                with mock.patch.object(urllib.request.ProxyHandler, "proxy_open", autospec=True,
+                                       return_value=answer) as parent:
+                    self.assertIs(handler.proxy_open(request, proxy, "https"), answer)
+                parent.assert_called_once_with(handler, request, proxy, "https")
+
+    def assert_opener_refuses_before_connecting(self, opener):
+        with mock.patch.object(urllib.request, "proxy_bypass", return_value=False), \
+                mock.patch.object(socket, "create_connection", side_effect=AssertionError("socket opened")) as connect, \
+                self.assertRaises(urllib.error.URLError) as caught:
+            opener.open(self.URL, timeout=1)
+        self.assertEqual(str(caught.exception.reason), "HTTPS proxies are not supported")
+        connect.assert_not_called()
+
+    def test_environment_proxy_is_refused_before_connecting(self):
+        env = {"HTTPS_PROXY": "https://proxy-user:proxy-secret@proxy.example:8443", "NO_PROXY": ""}
+        with mock.patch.dict(os.environ, env, clear=True):
+            opener = nativenet.build_opener(nativenet.HTTPSHandler())
+        self.assert_opener_refuses_before_connecting(opener)
+
+    def test_system_proxy_is_refused_before_connecting(self):
+        with mock.patch.object(urllib.request, "getproxies", return_value={
+                "https": "https://proxy-user:proxy-secret@proxy.example:8443"}):
+            opener = nativenet.build_opener(nativenet.HTTPSHandler())
+        self.assert_opener_refuses_before_connecting(opener)
 
 
 class ChoiceTests(unittest.TestCase):
