@@ -880,12 +880,15 @@ class Fetcher:
                 return resp if deadline is None else _Timed(resp, deadline, timeout)
             except keepalive_.Unsupported:
                 pass                                        # a proxy or URL the pool does not carry: urllib, as before
-        if deadline is not None:
-            req.lazaret_deadline = deadline
-        if hops is not None:
+        cut = False                                     # (the socket's timeout, cut to the time left by the
+        if deadline is not None:                        # connection — netaddr.open_socket — carries through its
+            req.lazaret_deadline = deadline             # handshake and status line, and on Windows fires before
+        if hops is not None:                            # the watchdog: F-07, a cut call's timeout is the deadline's)
             req.lazaret_hops = hops
         try:
-            with timings.span("network", "request"):
+            if deadline is not None:
+                timeout, cut = deadline.wait(timeout)   # (already up: its TimeoutError is the deadline's own,
+            with timings.span("network", "request"):    # taken below as every other give-up is)
                 resp = self._opener(clean).open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             exc.close()
@@ -894,12 +897,12 @@ class Fetcher:
             raise self._http_error(exc.code, clean, req) from None
         except urllib.error.URLError as exc:
             if deadline is not None:
-                deadline.check()
+                deadline.check(exc.reason if isinstance(exc.reason, BaseException) else exc, cut)
             raise repo.FetchError(f"URL error fetching {clean}: {exc.reason}") from exc
         except (OSError, http.client.HTTPException) as exc:
             if deadline is not None:
-                deadline.check()                            # (a status line cut short by the watchdog: BadStatusLine)
-            raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+                deadline.check(exc, cut)                # (a status line cut short: BadStatusLine, or the cut's own
+            raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc  # timeout, not a network fault)
         return resp if deadline is None else _Timed(resp, deadline, timeout)
 
     def _open_kept(self, req, clean, timeout, deadline=None, hops=None):
@@ -912,22 +915,26 @@ class Fetcher:
         while True:
             via = None if _is_loopback(urllib.parse.urlsplit(url).hostname) else keepalive_.proxy_for(url)
             try:
-                with timings.span("network", "request"):
+                cut = False
+                if deadline is not None:
+                    timeout, cut = deadline.wait(timeout)     # (the pool cuts the socket's timeout to the time
+                with timings.span("network", "request"):      # left; on Windows that fires before the watchdog)
                     resp = self.pool.request(url, headers, timeout, via, deadline=deadline, **held)
             except (OSError, http.client.HTTPException, UnicodeError) as exc:
                 if deadline is not None:
-                    deadline.check()
+                    deadline.check(exc, cut)                 # (F-07: a cut call's timeout is the deadline's)
                 raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
             code = resp.status
             if 200 <= code < 300:
                 return resp
             try:
-                if deadline is not None:
-                    deadline.arm(timeout)
+                cut = False                             # (arm's answer: whether the read it sets up is cut to
+                if deadline is not None:                # the time left — only such a cut's timeout is the
+                    cut = deadline.arm(timeout)         # deadline's give-up, not a network fault: F-07)
                 resp.drain()
             except (OSError, http.client.HTTPException) as exc:
                 if deadline is not None:
-                    deadline.check()
+                    deadline.check(exc, cut)
                 raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
             finally:
                 resp.close()
