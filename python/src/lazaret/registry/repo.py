@@ -1875,7 +1875,13 @@ def _tar_sparse_map(info):
     for offset, length in sparse:
         if offset < 0 or length < 0:
             return "a negative offset or length", 0
-        if length == 0:                      # empty slots in an old-GNU header
+        if length == 0:
+            # Old-GNU's unused header slots are (0, 0).  A zero-width entry
+            # at any other offset is not inert to tarfile._FileInFile: it can
+            # insert a hole and reset lastpos, hiding a later real extent from
+            # extractfile() even though pip's extractor writes that extent.
+            if offset != 0:
+                return "a zero-length extent has a nonzero offset", 0
             continue
         extent_end = offset + length
         if offset < end:

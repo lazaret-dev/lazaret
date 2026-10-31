@@ -123,6 +123,61 @@ def overlapping_sparse_sdist(sparse_format, first, second):
     return gzip.compress(raw)
 
 
+def zero_length_sparse_sdist(sparse_format, prefix, payload):
+    """setup.py whose zero-width marker hides the later payload from extractfile()."""
+    size, physical = len(prefix) + len(payload), prefix + payload
+    extents = ((0, len(prefix)), (size, 0), (len(prefix), len(payload)))
+    if sparse_format == "pax-0.1":
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.size = len(physical)
+        info.pax_headers = {
+            "GNU.sparse.map": ",".join(str(value) for extent in extents for value in extent),
+            "GNU.sparse.size": str(size),
+        }
+        raw = info.tobuf(tarfile.PAX_FORMAT) + physical
+    elif sparse_format == "pax-0.0":
+        records = b"".join(
+            record
+            for offset, length in extents
+            for record in (_pax_record("GNU.sparse.offset", offset),
+                           _pax_record("GNU.sparse.numbytes", length))
+        ) + _pax_record("GNU.sparse.size", size)
+        header = tarfile.TarInfo("././@PaxHeader")
+        header.type, header.size = tarfile.XHDTYPE, len(records)
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.size = len(physical)
+        raw = (header.tobuf(tarfile.USTAR_FORMAT) + records + b"\0" * (-len(records) % 512)
+               + info.tobuf(tarfile.USTAR_FORMAT) + physical)
+    elif sparse_format == "pax-1.0":
+        fields = [str(len(extents))]
+        fields.extend(str(value) for extent in extents for value in extent)
+        sparse_map = ("\n".join(fields) + "\n").encode()
+        sparse_map += b"\0" * (-len(sparse_map) % 512)
+        info = tarfile.TarInfo("placeholder")
+        info.size = len(sparse_map) + len(physical)
+        info.pax_headers = {"GNU.sparse.major": "1", "GNU.sparse.minor": "0",
+                            "GNU.sparse.name": "x-1.0/setup.py",
+                            "GNU.sparse.realsize": str(size)}
+        raw = info.tobuf(tarfile.PAX_FORMAT) + sparse_map + physical
+    else:
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.type, info.size = tarfile.GNUTYPE_SPARSE, len(physical)
+        header = bytearray(info.tobuf(tarfile.GNU_FORMAT))
+        for number in range(4):
+            offset, length = extents[number] if number < len(extents) else (0, 0)
+            at = 386 + number * 24
+            header[at:at + 12] = tarfile.itn(offset, 12, tarfile.GNU_FORMAT)
+            header[at + 12:at + 24] = tarfile.itn(length, 12, tarfile.GNU_FORMAT)
+        header[482] = 0
+        header[483:495] = tarfile.itn(size, 12, tarfile.GNU_FORMAT)
+        header[148:156] = b"        "
+        checksum = tarfile.calc_chksums(header)[0]
+        header[148:156] = bytes(f"{checksum:06o}\0 ", "ascii")
+        raw = bytes(header) + physical
+    raw += b"\0" * (-len(raw) % 512) + b"\0" * 1024
+    return gzip.compress(raw)
+
+
 def _node_tar():
     return _support.npm_node_tar()                  # (npm's own, found through PATH: MAC-TESTS)
 
@@ -593,6 +648,20 @@ class SparseAndAliasBudgetTests(unittest.TestCase):
                 self.assertFalse(any(m[0] == "setup.py" and m[3] is None for m in members), members)
                 self.assertTrue(any(m[0] == "setup.py" and m[3] == "corrupt"
                                     and "sparse map" in m.detail for m in members), members)
+                res = scan_bytes(data, artifact="sdist", eco="pypi")
+                self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+                self.assertIn("SC-TRUNCATED", rules(res))
+
+    def test_a_nonzero_zero_length_sparse_marker_is_incomplete_in_every_encoding(self):
+        installed = DECODE_EXEC_PY.encode()
+        prefix = b"#" + b"x" * 254 + b"\n"
+        for sparse_format in ("pax-0.0", "pax-0.1", "pax-1.0", "old-gnu"):
+            with self.subTest(sparse_format=sparse_format):
+                data = zero_length_sparse_sdist(sparse_format, prefix, installed)
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertFalse(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+                self.assertTrue(any(m[0] == "setup.py" and m[3] == "corrupt"
+                                    and "zero-length extent" in m.detail for m in members), members)
                 res = scan_bytes(data, artifact="sdist", eco="pypi")
                 self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
                 self.assertIn("SC-TRUNCATED", rules(res))
