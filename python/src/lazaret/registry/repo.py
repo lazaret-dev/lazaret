@@ -1857,6 +1857,50 @@ def _wants_walk(rel, first):
     return lazaret.classify_needs_whole(rel, first[:SAMPLE], len(first), "repo")
 
 
+def _tar_sparse_map(info):
+    """Validate a tar member's sparse extents -> (problem, synthesized holes).
+
+    Python's tar extractor applies sparse extents in their archive order, so a
+    later overlapping extent overwrites an earlier one.  ``extractfile()``,
+    which this scanner uses, instead serves the first mapping for an overlap.
+    Refuse every ambiguous map before choosing either view.  Old-GNU headers
+    contain unused zero-length slots; those do not describe output and are
+    ignored.  Stored extent bytes already pass through ``_Inflater``; only the
+    zero-filled logical holes need an additional archive-budget charge.
+    """
+    sparse = getattr(info, "sparse", None)
+    if sparse is None:
+        return None, 0
+    end, stored = 0, 0
+    for offset, length in sparse:
+        if offset < 0 or length < 0:
+            return "a negative offset or length", 0
+        if length == 0:                      # empty slots in an old-GNU header
+            continue
+        extent_end = offset + length
+        if offset < end:
+            return "extents overlap or are out of order", 0
+        if extent_end > info.size:
+            return "an extent ends past the logical file size", 0
+        end, stored = extent_end, stored + length
+    return None, info.size - stored
+
+
+def _tar_member_prefix(stream, limit, budget):
+    """Read at most `limit` logical member bytes, checking between chunks."""
+    if stream is None:
+        return b""
+    chunks, left = [], limit
+    while left:
+        budget.check()
+        chunk = stream.read(min(left, _OUTPUT_CHUNK))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        left -= len(chunk)
+    return b"".join(chunks)
+
+
 def _folder_oversized_member(rel, path, first, budget):
     """_oversized_member for an oversized file of a folder (`first`: its first bytes), the rest read as _read_regular
     reads one, charged to `budget`; (None, None, None) when what is there is no longer a regular file. OSError when
@@ -1995,6 +2039,10 @@ def _iter_tar(data, container, artifact, budget, anomalies):
                 read[m.offset_data] = (None if problem else rel, m.size)
             if m.issym() or m.islnk():
                 if artifact != "npm":                  # pacote drops links
+                    count += 1
+                    if count > MAX_FILES:
+                        yield Member(rel or m.name, 0, b"", "files")
+                        return
                     links.append((m.name, m.linkname, m.issym(), rel, problem))
                 continue
             if not m.isfile():
@@ -2014,13 +2062,23 @@ def _iter_tar(data, container, artifact, budget, anomalies):
                 return
             _note_member(seen, rel, anomalies)
             last = rel
+            sparse_problem, sparse_holes = _tar_sparse_map(m)
+            if sparse_problem:
+                yield Member(rel, 0, b"", "corrupt",
+                             f"{rel} has an ambiguous sparse map ({sparse_problem})")
+                continue
+            budget.check()
+            budget.charge(sparse_holes)       # zero bytes the installer materializes, absent from the tar stream
             f = tf.extractfile(m)
-            raw = f.read(MAX_MEMBER + 1) if f is not None else b""
+            raw = _tar_member_prefix(f, MAX_MEMBER + 1, budget)
             if len(raw) > MAX_MEMBER:
                 big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
                 # (FP-MODEL-FILES: a zip model file of any size, read for its pickles as the stream passes; a .pth
                 # file for its import lines)
-                big.model, big.pth, big.media = _oversized_member(rel, raw, f.read)
+                def more(n):
+                    budget.check()
+                    return f.read(n)
+                big.model, big.pth, big.media = _oversized_member(rel, raw, more)
                 yield big
                 continue
             yield Member(rel, len(raw), raw, None)
@@ -2068,7 +2126,7 @@ def _iter_tar(data, container, artifact, budget, anomalies):
             for _where, detail in _npmtar.disagreements(tee.node.finish(), read):
                 yield Member("(archive)", 0, b"", "corrupt", detail)
     if links:
-        yield from _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, count)
+        yield from _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies)
 
 
 def _link_target(member_name, linkname, symbolic):
@@ -2084,7 +2142,13 @@ def _link_target(member_name, linkname, symbolic):
 
 
 def _link_plan(links, artifact, anomalies):
-    """{target rel: [link rel, ...]} with link chains followed (8 hops)."""
+    """({regular-target rel: [link rel, ...]}, [(bad link rel, reason)]).
+
+    Resolve the whole link graph once, with path compression.  A publisher can
+    otherwise hide an executable name behind a chain longer than a small hop
+    cap.  Failed chains stay explicit: the caller turns them into incomplete
+    members instead of silently omitting installer-visible paths.
+    """
     by_rel = {}
     for name, linkname, symbolic, rel, problem in links:
         if problem or rel is None:
@@ -2101,21 +2165,50 @@ def _link_plan(links, artifact, anomalies):
             anomalies.append(("link", rel, f"link to {linkname!r} points outside the archive"))
             continue
         by_rel[rel] = trel
-    plan = {}
-    for rel, trel in by_rel.items():
-        hops = 0
-        while trel in by_rel and hops < 8:
-            trel, hops = by_rel[trel], hops + 1
-        plan.setdefault(trel, []).append(rel)
-    return plan
+    resolved = {}
+    for start in by_rel:
+        if start in resolved:
+            continue
+        path, positions, current = [], {}, start
+        while True:
+            if current in resolved:
+                result = resolved[current]
+                break
+            if current not in by_rel:
+                result = (current, None)
+                break
+            if current in positions:
+                result = (None, f"its link chain contains a cycle at {current}")
+                break
+            if len(path) >= MAX_FILES:
+                result = (None, f"its link chain exceeds the {MAX_FILES:,}-member limit")
+                break
+            positions[current] = len(path)
+            path.append(current)
+            current = by_rel[current]
+        for rel in path:
+            resolved[rel] = result
+
+    plan, problems = {}, []
+    for rel in by_rel:
+        target, problem = resolved[rel]
+        if problem:
+            problems.append((rel, problem))
+        else:
+            plan.setdefault(target, []).append(rel)
+    return plan, problems
 
 
-def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, count):
-    plan = _link_plan(links, artifact, anomalies)
-    if not plan:
-        return
+def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies):
+    plan, problems = _link_plan(links, artifact, anomalies)
     last = "(archive)"
     try:
+        for link_rel, problem in problems:
+            last = link_rel
+            budget.check()
+            yield Member(link_rel, 0, b"", "corrupt", f"{link_rel} cannot be resolved because {problem}")
+        if not plan:
+            return
         reader = _Inflater(data, codec, budget)
         tf = tarfile.open(fileobj=reader, mode="r|", ignore_zeros=True)
         for m in tf:
@@ -2125,19 +2218,35 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, co
             rel, _problem = canonical_member_path(m.name, artifact)
             if rel not in plan:
                 continue
-            f = tf.extractfile(m)
-            raw = f.read(MAX_MEMBER + 1) if f is not None else b""
             links_to = plan.pop(rel)
+            last = links_to[0]
+            sparse_problem, sparse_holes = _tar_sparse_map(m)
+            if sparse_problem:
+                for link_rel in links_to:
+                    last = link_rel
+                    yield Member(link_rel, 0, b"", "corrupt",
+                                 f"the target of {link_rel} has an ambiguous sparse map ({sparse_problem})")
+                if not plan:
+                    return
+                continue
+            budget.check()
+            budget.charge(sparse_holes)
+            f = tf.extractfile(m)
+            raw = _tar_member_prefix(f, MAX_MEMBER + 1, budget)
             # (the target read on once for all its links: as a .pth file when one of them is named so)
             name = next((n for n in links_to if n.lower().endswith(".pth")), links_to[0])
-            read_as = _oversized_member(name, raw, f.read) if len(raw) > MAX_MEMBER else (None, None, None)
+            if len(raw) > MAX_MEMBER:
+                def more(n):
+                    budget.check()
+                    return f.read(n)
+                read_as = _oversized_member(name, raw, more)
+            else:
+                read_as = (None, None, None)
             for link_rel in links_to:
-                count += 1
-                if count > MAX_FILES:
-                    yield Member(link_rel, 0, b"", "files")
-                    return
-                _note_member(seen, link_rel, anomalies)
                 last = link_rel
+                budget.check()
+                budget.charge(len(raw))       # one installer-visible file, and one path's scan work
+                _note_member(seen, link_rel, anomalies)
                 if len(raw) > MAX_MEMBER:
                     big = Member(link_rel, SAMPLE, raw[:SAMPLE], "member")
                     big.model, big.pth, big.media = read_as
@@ -2146,6 +2255,12 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, co
                     yield Member(link_rel, len(raw), raw, None)
             if not plan:
                 return
+        for target, links_to in plan.items():
+            for link_rel in links_to:
+                last = link_rel
+                budget.check()
+                yield Member(link_rel, 0, b"", "corrupt",
+                             f"{link_rel} points through the archive to {target}, which is not a regular file")
     except ArchiveLimit as lim:
         yield Member(last, 0, b"", lim.reason, lim.detail)
     except (tarfile.TarError, EOFError, OSError, zlib.error, lzma.LZMAError, ValueError) as exc:
@@ -3250,6 +3365,7 @@ class _ArtifactScan:
         self.cut = set()           # why the scan is incomplete, of INCOMPLETE_KINDS (T-1, decision 9)
         self.timed_out = False     # the deadline passed (recorded once)
         self.sources = {}          # rel -> (text, lang) scanned as source
+        self.last_source_text = None   # consecutive equal texts share storage (link aliases in particular)
         self.shown = None          # --show-secrets: {(file, line): the line as read}, filled by finish (scan_members)
         self.pending = []          # source files queued for scan_pending (a batch)
         self.first_pass = True     # members as they stream by; finish() is the second pass
@@ -3442,6 +3558,10 @@ class _ArtifactScan:
 
     def scan_source(self, rel, text, lang):
         self._deadline(rel)                  # not one more file past the deadline
+        if text == self.last_source_text:
+            text = self.last_source_text
+        else:
+            self.last_source_text = text
         self.sources[rel] = (text, lang)
         self.pending.append((rel, text, lang))
         # The engine reads a batch of the first pass's files on threads
@@ -3481,7 +3601,7 @@ class _ArtifactScan:
         digests. Called at the end of the scan, and in scan_members' `finally` whatever happened."""
         self.texts.close()
         self.digests.clear()
-        self._spawned, self._candidates = {}, {}
+        self._spawned, self._candidates, self.last_source_text = {}, {}, None
 
     def read_texts(self):
         """The members read as text, as core.flagged_lines takes them ([{path, content, lang}]): the sources, the
@@ -3503,7 +3623,13 @@ class _ArtifactScan:
         def compute(missing):
             return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
                     for a in _engine.call_answers([asked[key] for key in missing], texts=self.texts)]
-        answers = self.memo.get_or_compute_many(keys, compute)
+        # The content memo normally coalesces equal questions.  The guard's
+        # --no-cache mode intentionally uses NullMemo, so coalesce within
+        # this batch as well: link aliases still need path-specific issues,
+        # but the path-free engine answer needs to be computed only once.
+        unique = list(dict.fromkeys(keys))
+        by_key = dict(zip(unique, self.memo.get_or_compute_many(unique, compute)))
+        answers = [by_key[key] for key in keys]
         out = [[] for _ in items]
         for k, answer in zip(todo, answers):
             rel, text, lang, _dep = items[k]
