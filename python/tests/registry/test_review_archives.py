@@ -24,6 +24,7 @@ import io
 import lzma
 import os
 import posixpath
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -75,6 +76,16 @@ def sparse_member(name, logical_size, payload):
                         "GNU.sparse.size": str(logical_size)}
     raw = info.tobuf(tarfile.PAX_FORMAT) + payload
     return raw + b"\0" * (-len(raw) % tarfile.BLOCKSIZE) + b"\0" * 1024
+
+
+def tar_xz_with_dictionary_property(prop):
+    """A valid tiny tar.xz whose LZMA2 dictionary property is replaced."""
+    raw = tar_member("x-1.0/a.py", b"x = 1\n") + b"\0" * 1024
+    encoded = bytearray(lzma.compress(raw, format=lzma.FORMAT_XZ, preset=0))
+    assert encoded[12:16] == b"\x02\x00\x21\x01"
+    encoded[16] = prop
+    encoded[20:24] = struct.pack("<I", zlib.crc32(encoded[12:20]))
+    return bytes(encoded)
 
 
 def overlapping_sparse_sdist(sparse_format, first, second):
@@ -638,6 +649,25 @@ class EntryTypeTests(unittest.TestCase):
 
 
 class SparseAndAliasBudgetTests(unittest.TestCase):
+    def test_tar_xz_and_auto_lzma_bound_decoder_memory(self):
+        ordinary = tar_xz_with_dictionary_property(28)  # 64 MiB dictionary: xz -9's tier
+        hostile = tar_xz_with_dictionary_property(36)   # 1 GiB dictionary
+        for container in ("txz", "tlz"):
+            with self.subTest(container=container, dictionary="64 MiB"):
+                members = list(repo.iter_archive(ordinary, container, "sdist"))
+                self.assertTrue(any(m[0] == "a.py" and m[3] is None for m in members), members)
+            with self.subTest(container=container, dictionary="1 GiB"):
+                members = list(repo.iter_archive(hostile, container, "sdist"))
+                self.assertFalse(any(m[3] is None for m in members), members)
+                self.assertTrue(any(m[3] == "corrupt" and "decompression failed" in m.detail
+                                    for m in members), members)
+
+        with mock.patch.object(repo.lzma, "LZMADecompressor", wraps=lzma.LZMADecompressor) as make:
+            list(repo.iter_archive(ordinary, "txz", "sdist"))
+        self.assertTrue(make.call_args_list)
+        self.assertTrue(all(call.kwargs.get("memlimit") == repo.MAX_LZMA_MEMORY
+                            for call in make.call_args_list), make.call_args_list)
+
     def test_overlapping_sparse_extents_are_incomplete_in_every_encoding(self):
         installed = DECODE_EXEC_PY.encode()
         scanned = b"#" + b"x" * (len(installed) - 2) + b"\n"

@@ -377,6 +377,11 @@ FEED_MAX_BYTES = MAX_FEED_BYTES            # XML parser cap: never above the fet
 # Every byte the decompressor produces counts, including member data that is
 # skipped rather than read (F9b): a 2 MB gzip that inflates to 2 GiB stops here.
 MAX_ARCHIVE_TOTAL = 500 * 1024 * 1024
+# The ZIP preflight and tar decoders accept a dictionary through 64 MiB (xz
+# -9 / 7-Zip ultra).  liblzma's memlimit includes decoder bookkeeping as well
+# as the dictionary, so give the streaming tar decoder 8 MiB of overhead.
+MAX_LZMA_DICT = 64 << 20
+MAX_LZMA_MEMORY = MAX_LZMA_DICT + (8 << 20)
 MAX_REDIRECTS = 3                          # no redirect loops / long hop chains
 FETCH_CHUNK = 64 * 1024
 METADATA_TIMEOUT = 30                      # seconds for registry metadata / feeds
@@ -1077,8 +1082,8 @@ class _Inflater:
         if self.codec == "bz2":
             return bz2.BZ2Decompressor()
         if self.codec == "lzma":                  # .tlz / .tar.lz / .tar.lzma, as pip reads them
-            return lzma.LZMADecompressor(format=lzma.FORMAT_AUTO)
-        return lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+            return lzma.LZMADecompressor(format=lzma.FORMAT_AUTO, memlimit=MAX_LZMA_MEMORY)
+        return lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=MAX_LZMA_MEMORY)
 
     def readable(self):
         return True
@@ -2441,11 +2446,10 @@ def _zip_preflight(data, max_files=None):
 # dictionary the host can't allocate: fuzz finding F-7).
 _ZIP_READ_ERRORS = (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
                     lzma.LZMAError, NotImplementedError, RuntimeError, MemoryError)
-#: The largest LZMA dictionary a zip entry may declare (xz -9 and 7-Zip's
-#: ultra level use 64 MiB). zipfile allocates it before a byte is decoded:
+#: MAX_LZMA_DICT above is the largest LZMA dictionary a zip entry may declare
+#: (xz -9 and 7-Zip's ultra level use 64 MiB). zipfile allocates it before a byte is decoded:
 #: a 625-byte wheel declaring 4 GiB ended the scan with MemoryError on a host
 #: whose memory is capped (F-7). Wheels are stored or deflated (PEP 427).
-MAX_LZMA_DICT = 64 << 20
 _ZIP_LOCAL = struct.Struct("<4s22xHH")       # signature ... name length, extra length
 
 
