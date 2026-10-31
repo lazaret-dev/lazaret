@@ -790,7 +790,7 @@ class Fetcher:
                 hint = " (its credentials are sent over https only)"
             elif not req.has_header("Authorization"):
                 hint = " (the package manager's settings give no credentials for this registry)"
-        err = repo.FetchError(f"HTTP {code} fetching {clean}{hint}")
+        err = repo.FetchError(f"HTTP {code} fetching {pmsettings.shown(clean)}{hint}")
         err.status = code
         return err
 
@@ -838,14 +838,14 @@ class Fetcher:
             return None
         except nativenet.NetError as exc:
             if exc.kind == "too-large":
-                raise TooLarge(f"response over {budget // (1024 * 1024)}MB: {clean}") from None
+                raise TooLarge(f"response over {budget // (1024 * 1024)}MB: {pmsettings.shown(clean)}") from None
             if exc.kind == "refused":
                 if self.https_redirects and netaddr.refused_elsewhere(exc):
                     return None                             # (a redirect off the fetcher's hosts: Python's path, LZ-02)
-                raise repo.FetchError(f"URL error fetching {clean}: redirect blocked: {exc}") from None
+                raise repo.FetchError(f"URL error fetching {pmsettings.shown(clean)}: redirect blocked: {exc}") from None
             if deadline is not None:
                 deadline.check()
-            raise repo.FetchError(f"network error fetching {clean}: {exc}") from None
+            raise repo.FetchError(f"network error fetching {pmsettings.shown(clean)}: {exc}") from None
         if not 200 <= stream.status < 300:
             stream.close()
             raise self._http_error(stream.status, clean, req)
@@ -866,7 +866,7 @@ class Fetcher:
         except HopRefused as exc:
             if deadline is not None:
                 deadline.close()
-            raise HopRefused(f"URL error fetching {clean}: {exc}") from None
+            raise HopRefused(f"URL error fetching {pmsettings.shown(clean)}: {exc}") from None
         except BaseException:
             if deadline is not None:
                 deadline.close()
@@ -897,11 +897,11 @@ class Fetcher:
         except urllib.error.URLError as exc:
             if deadline is not None:
                 deadline.check()
-            raise repo.FetchError(f"URL error fetching {clean}: {exc.reason}") from exc
+            raise repo.FetchError(f"URL error fetching {pmsettings.shown(clean)}: {exc.reason}") from exc
         except (OSError, http.client.HTTPException) as exc:
             if deadline is not None:
                 deadline.check()                            # (a status line cut short by the watchdog: BadStatusLine)
-            raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+            raise repo.FetchError(f"network error fetching {pmsettings.shown(clean)}: {exc}") from exc
         return resp if deadline is None else _Timed(resp, deadline, timeout)
 
     def _open_kept(self, req, clean, timeout, deadline=None, hops=None):
@@ -919,7 +919,7 @@ class Fetcher:
             except (OSError, http.client.HTTPException, UnicodeError) as exc:
                 if deadline is not None:
                     deadline.check()
-                raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+                raise repo.FetchError(f"network error fetching {pmsettings.shown(clean)}: {exc}") from exc
             code = resp.status
             if 200 <= code < 300:
                 return resp
@@ -930,7 +930,7 @@ class Fetcher:
             except (OSError, http.client.HTTPException) as exc:
                 if deadline is not None:
                     deadline.check()
-                raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+                raise repo.FetchError(f"network error fetching {pmsettings.shown(clean)}: {exc}") from exc
             finally:
                 resp.close()
             if deadline is not None:
@@ -948,7 +948,7 @@ class Fetcher:
             except HopRefused:
                 raise
             except repo.FetchError as exc:
-                raise repo.FetchError(f"URL error fetching {clean}: redirect blocked: {exc}") from exc
+                raise repo.FetchError(f"URL error fetching {pmsettings.shown(clean)}: redirect blocked: {exc}") from exc
             visited[target] = visited.get(target, 0) + 1
             if visited[target] > 4 or len(visited) > repo.MAX_REDIRECTS:
                 raise self._http_error(code, clean, req)
@@ -1226,7 +1226,7 @@ def with_prior(ctx, check, hit, fetcher, filename, kind, scan_file=None, history
             if fetcher is None:
                 raise repo.FetchError("no registry document is read here")
             raw = fetcher.get(url, prior_.MAX_HISTORY_BYTES, accept, repo.METADATA_TIMEOUT)
-            return repo._deep_safe_loads(raw, f"registry response from {url}")
+            return repo._deep_safe_loads(raw, f"registry response from {pmsettings.shown(url)}")
         per = [{"filename": filename, "kind": kind, **({"compiledCode": compiled} if compiled else {})}]
         issues, summary = prior_.compare(check.eco, check.name, check.version, asked, per, fetch_json,
                                          scan_file or _prior_scan(ctx, fetcher, check.eco, check.name),
@@ -1244,7 +1244,7 @@ def with_lookalikes(check, hit, fetcher, published, due):
     the crates module's own fetch (as prior.py reads it). `lookalikes` is never kept with the verdict."""
     def fetch_json(url, accept):
         raw = fetcher.get(url, lookalikes_.MAX_HISTORY_BYTES, accept, repo.METADATA_TIMEOUT)
-        return repo._deep_safe_loads(raw, f"registry response from {url}")
+        return repo._deep_safe_loads(raw, f"registry response from {pmsettings.shown(url)}")
     return lookalikes_.guard_settle(check.eco, hit, published, fetch_json if due else None)
 
 

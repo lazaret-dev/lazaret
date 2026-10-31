@@ -188,8 +188,23 @@ def split_userinfo(url):
 
 
 def shown(url):
-    """A URL as the guard prints it: without user:password@."""
-    return split_userinfo(url)[0] if isinstance(url, str) else url
+    """A URL as the guard prints it: without userinfo, fragment or query values. A query is named so two failure
+    locations remain distinguishable without copying signed URLs or opaque tokens into terminals and reports."""
+    if not isinstance(url, str):
+        return url
+    clean = split_userinfo(url)[0]
+    without_fragment = clean.split("#", 1)[0]
+    base, query, _value = without_fragment.partition("?")
+    # urlsplit can reject a malformed bracketed host before split_userinfo removes credentials. Keep display fail-safe
+    # for that error path too, without treating an @ in the URL's path as userinfo.
+    start = 2 if base.startswith("//") else (base.find("://") + 3 if "://" in base else -1)
+    if start >= 0:
+        end = base.find("/", start)
+        end = len(base) if end < 0 else end
+        at = base.rfind("@", start, end)
+        if at >= 0:
+            base = base[:start] + base[at + 1:]
+    return base + (" [query redacted]" if query else "")
 
 
 def basic(user, password):
