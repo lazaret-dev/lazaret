@@ -746,7 +746,10 @@ class PythonProxyHandlerTests(unittest.TestCase):
 
     def test_an_https_proxy_is_refused_without_mutating_the_request_or_echoing_secrets(self):
         for proxy in ("https://proxy-user:proxy-secret@proxy.example:8443",
-                      " HTTPS://proxy-user:proxy-secret@proxy.example:8443 "):
+                      " HTTPS://proxy-user:proxy-secret@proxy.example:8443 ",
+                      "https:proxy-user:proxy-secret@proxy.example:8443",
+                      "https:/proxy-user:proxy-secret@proxy.example:8443",
+                      "https:///proxy-user:proxy-secret@proxy.example:8443"):
             with self.subTest(proxy=proxy):
                 request = urllib.request.Request(self.URL)
                 handler = nativenet.ProxyHandler({"https": proxy})
@@ -799,6 +802,14 @@ class PythonProxyHandlerTests(unittest.TestCase):
                 "https": "https://proxy-user:proxy-secret@proxy.example:8443"}):
             opener = nativenet.build_opener(nativenet.HTTPSHandler())
         self.assert_opener_refuses_before_connecting(opener)
+
+    def test_malformed_https_proxy_forms_are_refused_before_connecting(self):
+        for proxy in ("https:proxy-user:proxy-secret@proxy.example:8443",
+                      "https:/proxy-user:proxy-secret@proxy.example:8443",
+                      "https:///proxy-user:proxy-secret@proxy.example:8443"):
+            with self.subTest(proxy=proxy):
+                opener = nativenet.build_opener(nativenet.HTTPSHandler(), proxies={"https": proxy})
+                self.assert_opener_refuses_before_connecting(opener)
 
 
 class ChoiceTests(unittest.TestCase):

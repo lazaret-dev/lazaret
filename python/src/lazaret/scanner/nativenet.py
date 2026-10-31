@@ -144,6 +144,14 @@ class ProxyHandler(urllib.request.ProxyHandler):
 
     def proxy_open(self, req, proxy, request_type):
         shown = proxy.strip() if isinstance(proxy, str) else proxy
+        # urllib treats a malformed ``https:user:password@proxy`` (without ``//``) as a
+        # scheme-less proxy authority, then sends its credential on a cleartext CONNECT. Refuse
+        # every spelling that declares the unsupported scheme before asking urllib to parse it;
+        # this also keeps a malformed proxy and its credential out of _parse_proxy's ValueError.
+        if isinstance(shown, str) and shown.lower().startswith("https:"):
+            if req.host and urllib.request.proxy_bypass(req.host):
+                return None
+            raise urllib.error.URLError("HTTPS proxies are not supported")
         scheme, _user, _password, _hostport = urllib.request._parse_proxy(shown)
         if scheme is not None and scheme.lower() == "https":
             if req.host and urllib.request.proxy_bypass(req.host):
