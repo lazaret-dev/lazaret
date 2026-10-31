@@ -88,6 +88,18 @@ def tar_xz_with_dictionary_property(prop):
     return bytes(encoded)
 
 
+def pax_metadata_archive(entries):
+    """A gzip tar containing (member name, raw local-PAX records) pairs."""
+    raw = b""
+    for number, (name, metadata) in enumerate(entries):
+        header = tarfile.TarInfo(f"././@PaxHeader{number}")
+        header.type, header.size = tarfile.XHDTYPE, len(metadata)
+        raw += header.tobuf(tarfile.USTAR_FORMAT)
+        raw += metadata + b"\0" * (-len(metadata) % tarfile.BLOCKSIZE)
+        raw += tar_member(name, b"x = 1\n")
+    return gzip.compress(raw + b"\0" * 1024)
+
+
 def overlapping_sparse_sdist(sparse_format, first, second):
     """setup.py whose two sparse extents cover the same complete file."""
     assert len(first) == len(second)
@@ -646,6 +658,48 @@ class EntryTypeTests(unittest.TestCase):
                 names, anomalies = self.read(data, artifact)
                 self.assertEqual(anomalies, [])
                 self.assertIn("README.md", names)
+
+
+class TarResourceLimitTests(unittest.TestCase):
+    def test_a_pax_block_just_under_the_limit_is_read(self):
+        metadata = _pax_record("comment", "A" * (repo.MAX_TAR_METADATA_BLOCK - 64))
+        self.assertLessEqual(len(metadata), repo.MAX_TAR_METADATA_BLOCK)
+        members = list(repo.iter_archive(
+            pax_metadata_archive([("x-1.0/a.py", metadata)]), "tgz", "sdist"))
+        self.assertTrue(any(m[0] == "a.py" and m[3] is None for m in members), members)
+        self.assertFalse(any(m[3] is not None for m in members), members)
+
+    def test_large_pax_values_and_record_sets_are_refused_before_tarfile_parses_them(self):
+        cases = {
+            "large-value": _pax_record("comment", "A" * repo.MAX_TAR_METADATA_BLOCK),
+            "many-records": b"5 x=\n" * (repo.MAX_TAR_METADATA_BLOCK // 5 + 1),
+        }
+        for shape, metadata in cases.items():
+            self.assertGreater(len(metadata), repo.MAX_TAR_METADATA_BLOCK)
+            for artifact, name in (("sdist", "x-1.0/a.py"), ("npm", "package/a.js")):
+                with self.subTest(shape=shape, artifact=artifact):
+                    data = pax_metadata_archive([(name, metadata)])
+                    with mock.patch.object(tarfile.TarInfo, "_proc_pax",
+                                           side_effect=AssertionError("tarfile parsed oversized metadata")):
+                        members = list(repo.iter_archive(data, "tgz", artifact))
+                    self.assertFalse(any(m[3] is None for m in members), members)
+                    self.assertTrue(any(m[3] == "corrupt" and "tar metadata" in m.detail
+                                        for m in members), members)
+
+        result = scan_bytes(pax_metadata_archive([("x-1.0/a.py", cases["large-value"])]),
+                            artifact="sdist", eco="pypi")
+        self.assertEqual(result["verdict"], "INCOMPLETE", result["issues"])
+        self.assertIn("SC-TRUNCATED", rules(result))
+
+    def test_tar_metadata_has_a_cumulative_bound(self):
+        metadata = _pax_record("comment", "A" * 160)
+        data = pax_metadata_archive([(f"x-1.0/a{number}.py", metadata) for number in range(3)])
+        with mock.patch.object(repo, "MAX_TAR_METADATA_BLOCK", 256), \
+                mock.patch.object(repo, "MAX_TAR_METADATA_TOTAL", 400):
+            members = list(repo.iter_archive(data, "tgz", "sdist"))
+        complete = [m[0] for m in members if m[3] is None]
+        self.assertEqual(complete, ["a0.py", "a1.py"])
+        self.assertTrue(any(m[3] == "corrupt" and "tar metadata" in m.detail for m in members), members)
 
 
 class SparseAndAliasBudgetTests(unittest.TestCase):

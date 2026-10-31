@@ -377,6 +377,11 @@ FEED_MAX_BYTES = MAX_FEED_BYTES            # XML parser cap: never above the fet
 # Every byte the decompressor produces counts, including member data that is
 # skipped rather than read (F9b): a 2 MB gzip that inflates to 2 GiB stops here.
 MAX_ARCHIVE_TOTAL = 500 * 1024 * 1024
+# One PAX/GNU extension block is parsed into several byte/string/object
+# representations by tarfile.  Keep both one parse and the archive's total
+# metadata below bounds that are generous for paths, links and git comments.
+MAX_TAR_METADATA_BLOCK = 256 << 10
+MAX_TAR_METADATA_TOTAL = 4 << 20
 # The ZIP preflight and tar decoders accept a dictionary through 64 MiB (xz
 # -9 / 7-Zip ultra).  liblzma's memlimit includes decoder bookkeeping as well
 # as the dictionary, so give the streaming tar decoder 8 MiB of overhead.
@@ -1185,7 +1190,28 @@ class _TarReader(tarfile.TarFile):
         super()._dbg(level, msg)
 
 
-class _PipTarInfo(tarfile.TarInfo):
+class _BoundedTarInfo(tarfile.TarInfo):
+    """TarInfo whose extension metadata is bounded before tarfile reads it."""
+
+    def _check_metadata(self, tarfile_):
+        size = self.size
+        total = tarfile_.__dict__.get("_lazaret_metadata_bytes", 0) + max(size, 0)
+        if size < 0 or size > MAX_TAR_METADATA_BLOCK or total > MAX_TAR_METADATA_TOTAL:
+            detail = (f"tar metadata is {size:,} bytes in one block and {total:,} bytes so far "
+                      f"(limits {MAX_TAR_METADATA_BLOCK:,} and {MAX_TAR_METADATA_TOTAL:,})")
+            raise ArchiveLimit("corrupt", detail)
+        tarfile_.__dict__["_lazaret_metadata_bytes"] = total
+
+    def _proc_pax(self, tarfile_):
+        self._check_metadata(tarfile_)
+        return super()._proc_pax(tarfile_)
+
+    def _proc_gnulong(self, tarfile_):
+        self._check_metadata(tarfile_)
+        return super()._proc_gnulong(tarfile_)
+
+
+class _PipTarInfo(_BoundedTarInfo):
     """An sdist's member as pip reads it. pip unpacks with Python's tarfile,
     which extracts a member of a type no tool writes (`9`, `A`…) as a regular
     file, while the scan's loop took only regular files: a setup.py of such a
@@ -2020,7 +2046,8 @@ def _iter_tar(data, container, artifact, budget, anomalies):
         codec = _tar_codec(data, container, artifact)
         reader = _Inflater(data, codec, budget)
         # (npm's node-tar writes regular files only, and skips the rest)
-        kinds = {"crate": {"tarinfo": _CargoTarInfo}, "npm": {}}.get(artifact, {"tarinfo": _PipTarInfo})
+        kinds = {"crate": {"tarinfo": _CargoTarInfo},
+                 "npm": {"tarinfo": _BoundedTarInfo}}.get(artifact, {"tarinfo": _PipTarInfo})
         # (npm's own reading beside tarfile's, to compare: BR-4)
         tee = _Tee(reader, _npmtar.NodeTar()) if artifact == "npm" else None
         tf = _TarReader.open(fileobj=tee or reader, mode="r|", ignore_zeros=True, **kinds)
