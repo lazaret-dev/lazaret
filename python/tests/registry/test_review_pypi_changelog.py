@@ -15,11 +15,13 @@ deep nesting, oversized and malformed documents, faults.
 
 import datetime
 import io
+import os
 import unittest
 import xmlrpc.client
 from unittest import mock
 
 from lazaret.registry import repo
+from tests import _support
 
 UTC = datetime.timezone.utc
 T0 = int(datetime.datetime(2026, 9, 26, 17, 0, tzinfo=UTC).timestamp())
@@ -42,6 +44,7 @@ def changelog(raw, since=100):
         return repo._pypi_changelog(since)
 
 
+@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)
 class RequestTests(unittest.TestCase):
     def test_one_post_through_the_fetch_limits(self):
         with mock.patch.object(repo, "_fetch", return_value=answer([])) as fetch:

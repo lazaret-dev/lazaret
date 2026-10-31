@@ -1,0 +1,15 @@
+syntax = "proto2";
+package legacy.settings;
+message Settings {
+  optional string greeting = 1 [default = "hello, world"];
+  optional int32 retries = 2 [default = 3];
+  optional bytes magic = 3 [default = "\001\002"];
+  optional double ratio = 4 [default = 0.5];
+  repeated int32 ids = 5 [packed = true];
+  optional Mode mode = 6 [default = MODE_FAST];
+  extensions 100 to 199;
+  enum Mode { MODE_SLOW = 0; MODE_FAST = 1; }
+  reserved 50 to 60;
+  reserved "old_field";
+}
+extend Settings { optional string note = 100; }

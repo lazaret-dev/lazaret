@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 # Fails unless the Python and npm package versions and the native engine's
-# (rust/Cargo.toml's [workspace.package] version, and the two workspace
-# entries in rust/Cargo.lock) agree, and match the release tag when there is
-# one. The engine ships inside the platform wheels and reports its version
-# (`lazaret --version`), so it is released in lockstep too.
+# (rust/Cargo.toml's [workspace.package] version, and rust/Cargo.lock's
+# entries for the workspace's lazaret-* crates) agree, and match the release
+# tag when there is one. The engine ships inside the platform wheels and
+# reports its version (`lazaret --version`), so it is released in lockstep too.
 #
 #   scripts/check-versions.sh             the working tree; fails if any
 #                                         version file has uncommitted changes
@@ -20,7 +20,8 @@
 # The Python version's single source is __version__ in
 # python/src/lazaret/__init__.py (the build backend reads it from there).
 # After changing the Rust version, `cargo update --workspace --offline` in
-# rust/ rewrites the two Cargo.lock entries.
+# rust/ rewrites their Cargo.lock entries (pratique, taken from its own
+# repository, keeps its own version).
 # POSIX sh; works with Git for Windows' sh. CRLF files are fine.
 set -eu
 cd "$(dirname "$0")/.."
@@ -88,7 +89,7 @@ if has_file "$RUST_FILE"; then
   locked=$(read_file "$LOCK_FILE" | tr -d '\r' | awk '
     /^\[\[package\]\]/ { name = "" }
     /^name = "/ { name = $3; gsub(/"/, "", name) }
-    /^version = "/ && (name == "lazaret-engine" || name == "lazaret-ffi") { v = $3; gsub(/"/, "", v); print name "=" v }')
+    /^version = "/ && name ~ /^lazaret-/ { v = $3; gsub(/"/, "", v); print name "=" v }')
 fi
 
 echo "python: ${py:-?}  npm: ${js:-?}  rust: ${rust:-?}  ($where)"
@@ -98,7 +99,7 @@ echo "python: ${py:-?}  npm: ${js:-?}  rust: ${rust:-?}  ($where)"
 [ "$py" = "$js" ] || fail "version mismatch: python $py, npm $js, rust $rust ($where)"
 if [ "$rust" != - ]; then
   [ "$rust" = "$py" ] || fail "version mismatch: python $py, npm $js, rust $rust ($where)"
-  for crate in lazaret-engine lazaret-ffi; do
+  for crate in lazaret-engine lazaret-ffi $(echo "$locked" | sed -n 's/=.*//p'); do
     have=$(echo "$locked" | sed -n "s/^$crate=//p" | head -n 1)
     [ "$have" = "$rust" ] || fail "$LOCK_FILE has $crate ${have:-missing}, not $rust ($where). Run
 cargo update --workspace --offline in rust/ and commit $LOCK_FILE with the version bump."

@@ -60,6 +60,21 @@ test("any .gyp / .gypi name, any case", () => {
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
+test("detectLang reads a long run of line breaks, or a long class line, in linear time", () => {
+  // CodeQL's "polynomial regular expression" (alert 2): ^\s* in the Python test crossed line breaks, so each of a
+  // run of them rescanned the rest (100,000: 9 s; a megabyte: hours), and `class \w+.*:` backtracked on a long line
+  const many = (c) => c.repeat(100_000);
+  const t = performance.now();
+  for (const s of [many("\n") + "x", many("\r") + "x", many(String.fromCharCode(0x2028)) + "x",
+    "class " + many("a"), many("\n") + "class " + many("a")]) {
+    assert.equal(detectLang("noext", s), "js");
+  }
+  assert.ok(performance.now() - t < 2000, `${Math.round(performance.now() - t)} ms`);
+  for (const s of ["\n\n  import os\n", "class A(B):\n    pass\n", "\r\nfrom a import b\n", " \t def f():\n"]) {
+    assert.equal(detectLang("noext", s), "py", JSON.stringify(s));
+  }
+});
+
 test("a .pyw name is Python for the library API too (detectLang)", () => {
   const content = "import os\nos.system(user_cmd);\n";                  // a trailing ';' reads as JavaScript
   assert.equal(detectLang("tool.pyw", content), "py");

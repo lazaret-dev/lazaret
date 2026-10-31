@@ -28,7 +28,7 @@ NPM = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const n = await import(pathToFileURL(process.argv[1]).href);
-const { cases, onePackage } = JSON.parse(readFileSync(0, "utf8"));
+const { cases, onePackage } = JSON.parse(readFileSync(0).toString("utf8"));
 process.stdout.write(JSON.stringify(cases.map((files) => n.crossFileIssues(files, new Set(), { onePackage })
   .map((i) => [i.file, i.line, i.sev, i.msg, i.snipStart, i.snippet]))));
 """

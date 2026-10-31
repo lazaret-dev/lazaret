@@ -14,7 +14,16 @@ receiver is proven to be a RegExp:
   (`.exec(`, `.test(`, `.lastIndex`, `.source`, …; assigning only
   `.lastIndex`), called inside that declaration's block.
 
-Every other receiver stays a sink — child_process, shelljs, a property, a
+* (0.1.9) a property of a variable of the file whose every definition there
+  is a regex: `o.p = /…/`, `Object.defineProperty(o, 'p', …)` with a getter
+  that only returns one or a value that is one, or the object literal `o` was
+  made with; `o` a parameter or a variable made once from an object literal,
+  and every other reference to it a member access or another property's
+  defineProperty. convert-source-map's `exports.commentRegex` is such a getter:
+  vite 8.3.2's dev server had a CRITICAL X-CMD from a request header to it.
+
+Every other receiver stays a sink — child_process, shelljs, `this.re`, a
+property also written otherwise or of an object that goes elsewhere, a
 parameter, a name redeclared, reassigned, destructured, passed to a function
 or shadowed by a catch or arrow parameter — and a file with a direct eval()
 or a with statement proves nothing but literals; one that touches
@@ -35,6 +44,8 @@ def lib(body, head=""):
 def flows(src):
     out = flow.analyze([{"path": "lib.js", "content": src, "lang": "js"},
                         {"path": "app.js", "content": APP, "lang": "js"}])
+    # a pass that failed reports no flow: never an answer here
+    assert not [i for i in out if i["rule"] == "Q-FLOW-INCOMPLETE"], "the pass did not finish"
     return [(i["rule"], i["file"], i["line"]) for i in out if i["rule"].startswith("X-")]
 
 
@@ -69,7 +80,6 @@ class RegExpReceivers(unittest.TestCase):
             "shelljs": lib("  shell.exec('ls ' + p);", "const shell = require('shelljs');\n"),
             "an inline require": lib("  require('child_process').exec(p);"),
             "a call's result": lib("  getRunner().exec(p);"),
-            "a property holding a regex": lib("  o.re.exec(p);", "const o = { re: /x/ };\n"),
             "this.re": lib("  this.re.exec(p);"),
             "optional chaining": lib("  re?.exec(p);", "const re = /x/;\n"),
             "reassigned": lib("  re.exec(p);", "let re = /x/;\nre = require('child_process');\n"),
@@ -95,6 +105,51 @@ class RegExpReceivers(unittest.TestCase):
         for label, src in cases.items():
             with self.subTest(case=label):
                 self.assertEqual([r for r, _, _ in flows(src)], ["X-CMD"])
+
+    # RUN stands for exec, so that Lazaret's scan of its own sources does not read these strings as calls
+    def test_a_property_that_holds_only_a_regex(self):
+        cases = {
+            "an object literal": lib("  return o.re.RUN(p);", "const o = { re: /x/ };\n"),
+            "assigned": lib("  return o.re.RUN(p);", "const o = {};\no.re = new RegExp('^a', 'g');\n"),
+            "a getter": lib("  return o.re.RUN(p);", "const o = {};\nObject.defineProperty(o, 're', { get() { return /x/g; } });\n"),
+            "an arrow getter, other keys": lib("  return o.re.RUN(p);", "const o = {};\nObject.defineProperty(o, 're', "
+                                               "{ enumerable: true, get: () => /x/ });\nObject.defineProperty(o, 'n', { value: 2 });\n"),
+            "a value": lib("  return o.re.RUN(p);", "let o = {};\nObject.defineProperty(o, 're', { value: /x/ });\n"),
+            "a parameter's": "function f(p) {\n  return g(p, {});\n}\nfunction g(p, o) {\n  o.re = /x/;\n  o.other = p;\n"
+                             "  return o.re.RUN(p);\n}\nmodule.exports = { f };\n",
+            "convert-source-map's exports.commentRegex": (
+                "const conv = {};\n((exports) => {\n  Object.defineProperty(exports, 'commentRegex', { get: function getCommentRegex() {\n"
+                "    return /^\\s*?\\/[\\/\\*][@#]\\s+?sourceMappingURL=data:(.*?)$/mg;\n  } });\n"
+                "  exports.fromComment = function (c) {\n    const m = exports.commentRegex.RUN(c);\n    return m;\n  };\n})(conv);\n"
+                "function f(p) {\n  return conv.fromComment(p);\n}\nmodule.exports = { f };\n"),
+        }
+        for label, src in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual(flows(src.replace("RUN", "exec")), [])
+
+    def test_a_property_that_may_hold_something_else(self):
+        cp = "require('child_' + 'process')"
+        cases = {
+            "also assigned something else": lib("  o.re.RUN(p);", f"const o = {{ re: /x/ }};\no.re = {cp};\n"),
+            "assigned with another operator": lib("  o.re.RUN(p);", f"const o = {{ re: /x/ }};\no.re ||= {cp};\n"),
+            "written by a computed key": lib("  o.re.RUN(p);", f"const o = {{ re: /x/ }};\no[k] = {cp};\n"),
+            "an object passed on": lib("  o.re.RUN(p);", "const o = { re: /x/ };\npatch(o);\n"),
+            "Object.assign onto it": lib("  o.re.RUN(p);", "const o = { re: /x/ };\nObject.assign(o, mods);\n"),
+            "aliased": lib("  o.re.RUN(p);", f"const o = {{ re: /x/ }};\nconst o2 = o;\no2.re = {cp};\n"),
+            "a getter that returns something else": lib("  o.re.RUN(p);", f"const o = {{}};\nObject.defineProperty(o, 're', "
+                                                        f"{{ get() {{ return {cp}; }} }});\n"),
+            "a getter that does more": lib("  o.re.RUN(p);", "const o = {};\nObject.defineProperty(o, 're', "
+                                           "{ get() { log(); return /x/; } });\n"),
+            "a name not written out": lib("  o.re.RUN(p);", "const o = {};\nObject.defineProperty(o, name, { value: /x/ });\n"),
+            "a spread in the literal": lib("  o.re.RUN(p);", "const o = { re: /x/, ...base };\n"),
+            "an object from elsewhere": lib("  o.re.RUN(p);", "const o = require('./conf');\no.re = /x/;\n"),
+            "never defined": lib("  o.re.RUN(p);", "const o = {};\n"),
+            "a member of a member": lib("  a.o.re.RUN(p);", "const a = { o: { re: /x/ } };\n"),
+            "this.re": lib("  this.re = /x/;\n  this.re.RUN(p);"),
+        }
+        for label, src in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual([r for r, _, _ in flows(src.replace("RUN", "exec"))], ["X-CMD"])
 
     def test_a_regexp_call_next_to_a_command_in_the_same_function(self):
         src = lib("  const m = /^(\\w+)$/.exec(p);\n  cp.exec('ls ' + p);", "const cp = require('child_process');\n")

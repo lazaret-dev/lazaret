@@ -95,25 +95,213 @@ fn a_small_program() {
 }
 
 #[test]
-fn every_nesting_ends_where_jsparse_ends_it() {
-    for n in NESTINGS {
-        let deepest = nested(n, n.8);
-        assert!(parse(&cp(&deepest), n.1, n.2).is_ok(), "{} at {}", n.0, n.8);
-        assert_eq!(error(&nested(n, n.8 + 1), n.1, n.2), (1, n.9.to_string()), "{} at {}", n.0, n.8 + 1);
+fn compacting_in_place_is_compacting_by_copy() {
+    // what parsing left behind (a speculative arrow's nodes, a cover grammar's, the expressions in types) is dropped
+    // either way, and the nodes left get the same ids, lists and lines
+    let cases = [
+        ("(a, b) => a + b; (c, d); ({ x = 1 } = y); f(<T>(z) => z);", true, false),
+        ("const o = { a: 1, ...b, [c]: d }; async (x) => { await x }; l: for (const [k, v] of m) { if (k) continue l; }", false, true),
+        ("let t: Array<(a: number) => string> = [];\nfunction g<T extends { k: (x: T) => void }>(p?: T): p is T { return !!p }\nclass C { @dec m() {} }", true, false),
+        ("x = a ? (b) : c => d;\n<div a={(e) => e}>{[1, 2].map((n) => <i>{n}</i>)}</div>", false, true),
+    ];
+    let mut dropped = 0;
+    for (src, ts, jsx) in cases {
+        let parser::Outcome::Tree(t) = parser::parse(&cp(src), ts, jsx) else { panic!("{src:?} did not parse") };
+        let by_copy = t.compact_by_copy(t.root, t.strings.clone(), t.line_ends.clone(), t.line_blocks.clone());
+        let left = t.nodes.len();
+        let in_place = t.compact();
+        dropped += left - in_place.nodes.len();
+        assert_eq!(in_place.root, by_copy.root);
+        assert_eq!(in_place.nodes, by_copy.nodes, "{src:?}");
+        assert_eq!(in_place.lists, by_copy.lists, "{src:?}");
+        let (mut a, mut b) = (String::new(), String::new());
+        out::write_tree(&in_place, in_place.root, true, &mut a);
+        out::write_tree(&by_copy, by_copy.root, true, &mut b);
+        assert_eq!(a, b);
     }
+    assert!(dropped > 0, "nothing was left behind");
+}
+
+#[test]
+fn a_line_is_the_line_ends_before_it() {
+    // `\r\n` ends one line (at its `\r`), as do `\n`, `\r`, U+2028 and U+2029; the lines past a block of 4096 code
+    // points are found in their block's ends
+    let mut src = String::new();
+    for k in 0..900 {
+        src.push_str(["a;\n", "b;\r\n", "c;\r", "d;\u{2028}", "e;\u{2029}", "\n\n", "/* x\n y */ f;\n"][k % 7]);
+        if k % 50 == 0 {
+            src.push_str(&"g".repeat(5000));
+            src.push_str(";\n");
+        }
+    }
+    let text = cp(&src);
+    let tree = parse(&text, false, true).unwrap();
+    let mut ends = Vec::new();
+    for (i, &c) in text.iter().enumerate() {
+        if c == 0x0D || c == 0x2028 || c == 0x2029 || (c == 0x0A && (i == 0 || text[i - 1] != 0x0D)) {
+            ends.push(i as u32);
+        }
+    }
+    assert_eq!(tree.line_ends, ends);
+    for pos in 0..=text.len() as u32 {
+        assert_eq!(tree.line_at(pos), ends.partition_point(|&x| x < pos) as u32 + 1, "at {pos}");
+    }
+    for id in 0..tree.nodes.len() as u32 {
+        assert_eq!(tree.line(id), tree.line_at(tree.node(id).start));
+    }
+    assert!(tree.line(tree.nodes.len() as u32 - 1) > 1000);
+}
+
+#[test]
+fn annex_b_html_comments_are_comments_in_javascript() {
+    // (F-12) `<!--` opens a line comment anywhere a token may begin; `-->` opens one at a line's start (the input's,
+    // or after only blanks and comments since a line terminator), as V8 reads a script (Node's CommonJS). Before
+    // F-12 the parser read `<!--` as `<` `!` `--`, and a file that opened with one did not parse.
+    let ok = |src: &str| {
+        for jsx in [false, true] {
+            assert!(parse(&cp(src), false, jsx).is_ok(), "{src:?} (jsx={jsx})");
+        }
+    };
+    let err = |src: &str| {
+        assert!(parse(&cp(src), false, false).is_err(), "{src:?} parsed");
+    };
+    ok("<!-- banner\nmodule.exports = 1;\n");           // a leading open comment
+    ok("x = 1;\n--> banner\ny = 2;\n");                 // `-->` after a line terminator
+    ok("--> banner\nx = 1;\n");                          // `-->` at the input's start
+    ok("   --> banner\nx = 1;\n");                       // blanks before it, still the input's first line
+    ok("/* a\nb */ --> banner\nx = 1;\n");              // a block comment with a line terminator opens the line
+    ok("#!/usr/bin/env node\n<!-- banner\nx = 1;\n");   // after a hashbang (its line ends first)
+    ok("x = a <!-- b;\n");                               // `<!--` mid-line: a comment to the line's end
+    ok("x<!--y\nz = 1;\n");                              // `<!--` with no space: still a comment
+    ok("i-->0;\n");                                      // `i-- > 0`: a postfix `--`, not a close comment
+    ok("<!-- only a comment\n");                         // nothing but the comment
+    // `-->` that does not begin a line stays `--` `>` (V8 refuses `x = 1; --> y`)
+    err("x = 1; --> y\n");
+    // the exact bytes only: a real less-than is untouched
+    assert!(json("a < !b;", false, false).contains("BinaryExpression"));
+    assert!(json("a-->b;", false, false).contains("UpdateExpression"));
+    // what the comment hides is no part of the tree
+    assert!(!json("z = 5 <!--y, f()\n", false, false).contains("CallExpression"));
+}
+
+#[test]
+fn typescript_reads_html_like_open_comments_as_tsc_does() {
+    // tsc (6.0.3) has no HTML-like comments: `<!--` is `<` `!` `--`, so `z = 5 <!--y, f()` compiles to
+    // `z = 5 < !--y, f();`, which calls f, and a file that opens with `<!--` is a syntax error to it (tsx and Node's
+    // type stripping read a comment; the supply-chain facts read a TypeScript file's text as JavaScript first,
+    // jsflow::supply::facts). `-->` where a line begins is never code, and is a comment in either dialect.
+    for jsx in [false, true] {
+        let tree = json("z = 5 <!--y, f()\n", true, jsx);
+        assert!(tree.contains("CallExpression") && tree.contains("UpdateExpression"), "{tree}");
+        assert!(json("z = 5\n<!--y, f()\n", true, jsx).contains("CallExpression"));
+        assert!(parse(&cp("<!-- banner\nx = 1;\n"), true, jsx).is_err());
+        assert!(!parse(&cp("x = a <!-- b;\n"), true, jsx).unwrap().html_after_code);
+        assert!(!json("x = y\n--> 0, f()\n", true, jsx).contains("CallExpression"));
+        assert!(parse(&cp("--> banner\nx = 1;\n"), true, jsx).is_ok());
+    }
+    // JavaScript read as tsc reads `<!--` (parse_with, html_open false): the supply-chain facts' second reading
+    let tree = parse_with(&cp("z = 5 <!--y, f()\n--> c\n"), false, true, false).unwrap();
+    assert!(!tree.html_after_code);
+    assert!(parse_with(&cp("<!-- banner\nx = 1;\n"), false, true, false).is_err());
+}
+
+#[test]
+fn an_html_like_open_comment_after_code_is_marked() {
+    // Tree::html_after_code: the JavaScript reading took a `<!--` after the first token for a comment, where tsc
+    // (and a module, by the standard) reads code. Before the first token it is a comment in every reading that runs
+    // the file, and `-->` hides nothing that runs.
+    let marked = |src: &str| parse(&cp(src), false, true).unwrap().html_after_code;
+    assert!(marked("z = 5 <!--y, f()\n"));
+    assert!(marked("z = 5\n<!--y, f()\n"));
+    assert!(marked("x = 1;\n<!-- a note\n"));
+    assert!(marked("x = 1 <!-- at the end"));                 // (the comment before the end of the input)
+    assert!(marked("f(<a\n<!-- c\nb='1'/>);\n"));          // (in a JSX tag)
+    assert!(!marked("<!-- banner\nmodule.exports = 1;\n"));
+    assert!(!marked("#!/usr/bin/env node\n<!-- banner\nx = 1;\n"));
+    assert!(!marked("/* a */ <!-- banner\nx = 1;\n"));
+    assert!(!marked("x = 1;\n--> banner\ny = 2;\n"));
+    assert!(!marked("s = '<!--'; t = `<!-- ${u} -->`; r = /<!--/; // <!--\n"));   // in a string, a template, a regex
+    assert!(!marked("a = b < !--c;\n"));
+    // (a read ahead, an arrow's parameters here, leaves no mark of its own: the mark is state save() keeps)
+    assert!(!marked("x = (a = /<!--/, b = '<!--') => a;\n"));
+}
+
+#[test]
+fn a_call_as_a_target_and_let_as_a_name_as_v8_reads_them() {
+    // (JS-PARSE-STRICT) V8 compiles these, in scripts (and the calls in modules), and leaves an assignment or an update
+    // to a call to a ReferenceError when it runs: the parser reads them, the call as the target
+    for src in ["f() = 1;", "f() += 1;", "f() **= 2;", "f()++;", "--f();", "(f()) = 1;", "f() = g() = 1;",
+                "for (f() in x);", "for (f() of x);", "for ((f()) in x);", "for (let in x);", "let in x;",
+                "let instanceof X;", "for (let instanceof X;;);", "for (let.x in y);", "let = 1;"] {
+        assert!(parse(&cp(src), false, true).is_ok(), "{}", src);
+    }
+    assert!(json("f() = 1;", false, true).contains(
+        r#""type":"AssignmentExpression","line":1,"operator":"=","left":{"type":"CallExpression""#));
+    assert!(json("f()++;", false, true).contains(r#""type":"UpdateExpression","line":1,"operator":"++","prefix":false,"argument":{"type":"CallExpression""#));
+    assert!(json("for (let in x);", false, true).contains(r#""left":{"type":"Identifier","line":1,"name":"let"}"#));
+    // and V8 refuses these: a call in a logical assignment or in a pattern, `new`, an optional chain, a tagged
+    // template, `import()`, `for (let of x)`
+    for (src, why) in [("f() &&= 1;", "invalid assignment target"), ("f() ??= 1;", "invalid assignment target"),
+                       ("[f()] = [];", "invalid destructuring target"), ("({a: f()} = {});", "invalid destructuring target"),
+                       ("new f() = 1;", "invalid destructuring target"), ("a?.b = 1;", "invalid destructuring target"),
+                       ("f`x` = 1;", "invalid destructuring target"), ("import(x) = 1;", "invalid destructuring target"),
+                       ("[a, f()] = [1, 2];", "invalid destructuring target"), ("for (let of x);", "unexpected token 'x'")] {
+        assert_eq!(error(src, false, true), (1, why.to_string()), "{}", src);
+    }
+}
+
+/// The deepest nesting of `n` that still parses. n.8 is a depth known to parse (jsparse.py's, at the historical bound
+/// of 256; JS-NEST raised MAX_DEPTH to 384, so the real boundary is deeper), and the parser errors one past the
+/// deepest. Searched up from n.8, so the test needs no exact depth for each construct at the current bound
+/// (`every_nesting_ends_where_jsparse_ends_it` holds what it finds to the bound: RAISED_BOUND).
+fn deepest_ok(n: &Nesting) -> usize {
+    let mut d = n.8;
+    while parse(&cp(&nested(n, d + 1)), n.1, n.2).is_ok() {
+        d += 1;
+        assert!(d < 8 * MAX_DEPTH as usize, "{}: no nesting bound found by {}", n.0, d);
+    }
+    d
+}
+
+/// JS-NEST's bound: MAX_DEPTH raised by half, from jsparse.py's 256 (the depths of NESTINGS) to 384.
+const RAISED_BOUND: usize = 384;
+/// How much deeper than its jsparse.py depth scaled by RAISED_BOUND / 256 a construct reads: a construct's few levels
+/// of overhead (its head, the expression around it) are paid once, not scaled, so `arrows` reads 380, not 378.
+/// Measured at 384: 0 to 3 for each of the 51 (3 for `jsx attributes` and `tsx generic arrows`).
+const SCALED_SLACK: usize = 3;
+
+#[test]
+fn every_nesting_ends_where_jsparse_ends_it() {
+    // on a worker with room, since at the raised bound the deepest read is deeper than a test thread's stack
+    let worker = std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+        for n in NESTINGS {
+            let d = deepest_ok(n);
+            // the bound is pinned: each construct reads half as deep again as at 256, within the levels it pays
+            // once (at 256 each reads n.8; at a bound more than SCALED_SLACK past 384 the cheapest read too deep)
+            let scaled = n.8 * RAISED_BOUND / 256;
+            assert!(scaled <= d && d <= scaled + SCALED_SLACK,
+                    "{} reads to {}, not its depth at 256 ({}) scaled to {} ({}, at most {} more)",
+                    n.0, d, n.8, RAISED_BOUND, scaled, SCALED_SLACK);
+            assert!(parse(&cp(&nested(n, d)), n.1, n.2).is_ok(), "{} at {}", n.0, d);
+            assert_eq!(error(&nested(n, d + 1), n.1, n.2), (1, n.9.to_string()), "{} at {}", n.0, d + 1);
+        }
+    }).unwrap();
+    worker.join().unwrap();
 }
 
 /// The stack the deepest nesting of each construct takes fits `kib` KiB
 /// (a release build; the wasm build has 8 MiB, rust/.cargo/config.toml).
 fn deepest_on_a_stack(kib: usize) {
-    let inputs: Vec<(String, bool, bool)> = NESTINGS.iter().map(|n| (nested(n, n.8), n.1, n.2)).collect();
+    // find the deepest-readable depth and parse it all on the `kib` stack: the depth search must run there too,
+    // since parsing one past it is what the bound protects
     let worker = std::thread::Builder::new()
         .stack_size(kib * 1024)
         .spawn(move || {
-            for (src, ts, jsx) in &inputs {
-                assert!(parse(&cp(src), *ts, *jsx).is_ok());
+            for n in NESTINGS {
+                let src = nested(n, deepest_ok(n));
+                assert!(parse(&cp(&src), n.1, n.2).is_ok());
                 // and the JSON writer, which walks the tree without recursing
-                assert!(to_json(&cp(src), *ts, *jsx, true).starts_with("{\"type\":\"Program\""));
+                assert!(to_json(&cp(&src), n.1, n.2, true).starts_with("{\"type\":\"Program\""));
             }
         })
         .unwrap();
@@ -195,7 +383,7 @@ fn spans() {
     };
     for (id, n) in tree.nodes.iter().enumerate() {
         assert!(n.start <= n.end && n.end as usize <= s.len());
-        assert_eq!(n.line, line_at(n.start), "{:?}", n.kind);
+        assert_eq!(tree.line(id as u32), line_at(n.start), "{:?}", n.kind);
         tree.each_child(id as u32, |c| assert!(c > id as u32)); // document order
     }
     let find = |kind: Kind| (0..tree.nodes.len() as u32).find(|&i| tree.kind(i) == kind).unwrap();

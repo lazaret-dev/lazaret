@@ -33,6 +33,18 @@ test("tag characters smuggle; astral runs are counted in code points", () => {
   assert.match(found("const x = `" + run + "`;\n")[0][2], /run of 5 invisible/);
 });
 
+test("an emoji's presentation selector repeated carries nothing (N-23)", () => {
+  const fe0f = String.fromCodePoint(0xFE0F), fe0e = String.fromCodePoint(0xFE0E);
+  for (const text of ["// \u2622" + fe0f + fe0f + " hazmat\n", "// \u2620" + fe0f + " " + fe0f.repeat(3) + "\n",
+    "x = '\u2600" + fe0e + fe0e + "'\n", "x = '" + fe0f.repeat(4) + "'\n"]) {
+    assert.deepEqual(found(text), [], JSON.stringify(text));
+  }
+  for (const text of ["x = `" + fe0f.repeat(5) + "`;\n", "x = `" + fe0e + fe0f + "`;\n",
+    "x = `" + String.fromCodePoint(0xFE00).repeat(2) + "`;\n", "x = `" + fe0f + fe0f + vs(bytesOf("hi")) + "`;\n"]) {
+    assert.deepEqual(found(text).map((f) => f[0]), ["MAJOR"], JSON.stringify(text));
+  }
+});
+
 test("a flag emoji, a lone variation selector and plain text are left alone", () => {
   for (const [text, lang] of [
     ["const label = '" + flagEmoji() + "';\n", "js"],

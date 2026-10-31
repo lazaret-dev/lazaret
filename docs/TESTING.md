@@ -14,7 +14,9 @@ know:
   between the packages, the engine's recorded outputs, the 0-false-positive
   discipline, bounded work).
 
-Everything below is inert by policy: fixtures use `.invalid` / TEST-NET hosts and
+Everything below is inert by policy: fixtures use `.invalid` / TEST-NET hosts,
+made-up credentials are written in pieces or with one character escaped so that
+no line holds a provider's format whole (`test_fixture_credentials.py`), and
 nothing is executed (`STRUCTURE.md` §6).
 
 ---
@@ -52,7 +54,8 @@ redeem an earlier red.
 6. **The benchmark**, for a change to detection: the registry scans of the
    benchmark's releases before and after the change (`scripts/bench.py`,
    §4: every difference read), and the holdout's (`compare
-   --aggregate-only`).
+   --aggregate-only`); for a change to what Go or Rust code is read for,
+   the Go and Rust sets too (§4).
 7. **Docs** (`README.md`, this doc / `STRUCTURE.md` / `DESIGN.md` if the
    architecture moved, `CHANGELOG.md`), then commit (one logical change: the
    native engine with its recorded outputs, the Python side, and a
@@ -98,8 +101,30 @@ Notes:
   problem; CI supplies what it can. The guard's integration tests run the real
   package managers against fake registries on 127.0.0.1 and skip a tool that
   isn't on PATH (CI's runners have npm and yarn 1, not always pnpm, Bun or
-  uv); `test_guard_yarn_bun.py` also covers private registries, each tool
-  reading its token from its own settings.
+  uv); `test_guard_private_registry.py` covers private registries, each tool
+  reading its token from its own settings. Those tests are split by tool into
+  modules of a few tests each (`test_guard_npm`, `_npm_lockfile`,
+  `_npm_resolve`, `_pnpm`, `_yarn`, `_bun`, `_private_registry`, `_python`,
+  `_pip_indexes`, `_uv`, `_uv_tool`, `_uv_project`; their cases and fake
+  registries in `_guard_support.py`), 4 to 12 s each on a quiet two-core
+  Linux machine: on a Mac, starting the tools and the guard's workers takes
+  longer, and the modules they were split from ran past 45 s there
+  (MAC-TESTS).
+- **macOS.** Its disk ignores case and Unicode form (`a.js` and `A.js` are
+  one file), its `/usr/bin/openssl` is LibreSSL, its temporary folder is
+  behind a link (`/var` is `/private/var`), and Homebrew's npm is not beside
+  the node its links lead to (`_support.npm_node_tar` finds npm's node-tar
+  through the npm on PATH). A test that writes a tree must not hold two
+  names that fold as one (`_dashboard_vm.cli_result` creates each file
+  exclusively, so such a tree is an error, not a smaller folder), or checks
+  the disk first and skips where it cannot hold them
+  (`_folding_disk.tells_names_apart`: the dashboard's `case twins` folder).
+  Code that writes such names is tested on a disk that folds names as
+  macOS's does (`tests/_folding_disk.py`, on any machine), as
+  `test_sources` and `test_checkout_twins` do for a repository's checkout
+  (the scans of the CLI and the registry, end to end: what this machine's
+  disk finds is found there too, and such a commit is INCOMPLETE there).
+  No test runs `openssl`: the certificates and keys are `tests/_pki.py`'s.
 - **npm side:** build the engine first (`cd js && npm run build`, again after
   any change under `rust/`; it needs Rust and `rustup target add
   wasm32-unknown-unknown`), then `node --test test/<file>.test.js`, or batch a
@@ -127,6 +152,44 @@ Notes:
   (~1 s), `_jsparse.py` (~18 s), `_jsflow.py` (~10 s), `_pyparse.py` and
   `_pyflow.py` (~5 s) also need the WebAssembly build (`npm run build`), and
   skip without it.
+- **The network layer (NET-1).** With the native library the registry's
+  requests go through `lazaret-net` (`lazaret/scanner/nativenet.py`). A test
+  that fakes urllib's opener (`repo._OPENER`, `repo._module_opener`) asks for
+  Python's transport: `@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)`
+  on the class. `tests.scanner.test_nativenet` runs the native client against
+  an HTTPS server Python's `ssl` serves on 127.0.0.1, with a root made when
+  the module starts (`tests/_pki.py`: ECDSA on P-256, signed with SHA-256, in
+  Python, the same on every machine; macOS's `openssl` is LibreSSL, whose
+  certificates Python and pratique refused: MAC-TESTS; its
+  `PrivateRootTests` serve certificates a private CA may issue, with no
+  extended key usage or an issuer name in another case and string type,
+  which the native client takes as OpenSSL does, and its
+  `PolicyExtensionTests` chains whose intermediate, server certificate or
+  root carries a certificate-policy extension, which it refuses when the
+  extension is critical: LZ-01; `PythonTransportPolicyTests` reach urllib
+  through an SCA feed's automatic fall-back, whose context has OpenSSL
+  process the policies), and
+  `cargo test -p lazaret-net` against pratique's own TLS 1.3 and HTTP/2
+  test server. pratique's tests are its own (`cargo test --release -p
+  pratique --lib` takes about 25 s after a 3-minute build, and its
+  `go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic` and
+  `rekor_real` tests a second each); after taking a new commit of it
+  (`scripts/sync_pratique.py`), run them and the gates. The Go checksum
+  database's check (`golang.verify_lookup`) is tested on pratique's capture
+  of the real `sum.golang.org` (`tests.registry.test_golang_sumdb`); the Go
+  tests whose lookups are signed with a test key or not at all
+  (`test_golang`, `test_registry_go_crates`, the `go-resolve` fuzz target)
+  read them unchecked, `verify_lookup` patched in `setUpModule`.
+  `tests/__init__.py` turns the provenance check off for the whole suite
+  (`LAZARET_NO_PROVENANCE=1`, unless the environment sets it): a scan asks
+  the registry for a release's attestations and for the release before it,
+  and the tests scan made-up releases that must not reach the network.
+  The comparison with a release's predecessor (SC-NEW-INDICATOR) is off
+  the same way (`LAZARET_NO_PRIOR_RELEASE=1`), and
+  `tests.registry.test_prior_release` turns it on over made-up registries.
+  `tests.registry.test_provenance` turns it on over pratique's real npm
+  and PyPI attestations (sigstore 0.2.0, 2.2.0 and 4.0.0; pypi-attestations
+  0.0.30), with the registries' other documents built in their shapes.
 
 ---
 
@@ -178,12 +241,16 @@ f-strings and comments to Python 3.13's `tokenize`.
 `test_rust_parity_regex.py` still compares the regex engine with `re` on
 every rule-pack pattern and 126 hand-written probes (search, match,
 fullmatch, finditer, sub, split, with pos/endpos; run it on each Python
-3.10–3.14), and `test_wasm_parity.py`, `_signs.py`, `_crossfile.py`,
+3.10–3.14), `test_shell_words.py` compares the engine's reading of a
+command's words with Python's shlex (the hooks corpus and random
+commands), and `test_wasm_parity.py`, `_signs.py`, `_crossfile.py`,
 `_jsparse.py`, `_jsflow.py`, `_pyparse.py` and `_pyflow.py` hold the WebAssembly build the npm package
 ships to the library, call for call and byte for byte, on the same corpora.
 `scripts/make_rust_tables.py --check` fails when the pack leaves its
 canonical form, a pattern stops compiling, its rule set is not the
-registry's, or a value core still keeps differs from it; and
+registry's, a value core still keeps differs from it, or `re`'s own table
+of extra case equivalences is not the one the engine derives from
+Unicode's case mappings; and
 `scripts/check_rust_deps.py` when a crate from outside the workspace
 appears.
 
@@ -235,11 +302,12 @@ either it's a real risk (keep it, add a fixture) or the pattern is too loose
 The corpora also double as timing evidence: the sweeps finish in seconds
 (bounded, linear). If a sweep is slow, a bound is missing (§5).
 
-**What carries over: the holdout.** The malware benchmark's 516 releases were
+**What carries over: the holdout.** The malware benchmark's releases were
 read while the detectors were written, so a change measured only on them is
 measured in-sample. Score a detection change on the holdout too (`DESIGN.md`
-§7: 747 other malicious releases of the same dataset, each marked when it
-shares a code file with a benchmark sample), and look at its aggregates only —
+§7: other malicious releases of the same dataset; Sept 30's 747, each marked
+when it shares a code file with a benchmark sample, and since Oct 15 the
+draw below), and look at its aggregates only —
 the share SUSPICIOUS, by ecosystem and category, by whether a release shares
 code with the benchmark, and how much of it rests on a behaviour or a generic
 technique rather than a tool's mark or a list. Never open a holdout sample or
@@ -257,6 +325,245 @@ every release whose verdict or strong findings moved — read each one —
 and `--aggregate-only` gives the counts alone, for the holdout. The
 samples themselves are kept outside the repository (`STRUCTURE.md` §6).
 
+**The malicious sets.** `scripts/datadog.py DATASET OUT` writes the
+benchmark's and the holdout's manifests from a clone of DataDog's
+malicious-software-packages-dataset (a plain clone or a `--filter=blob:none`
+one, not a shallow one), and prints the two entries of a sets file. John
+restarted the measurements on Oct 15 at the dataset's newest commit,
+`0cf258a4`, the script's default since. The benchmark is the audit's draw
+(seed 20260928: 200 npm and 200 PyPI malicious-intent packages, 100
+compromised npm releases and every compromised PyPI release): 517 releases
+there. The holdout is a new draw of the shape of Sept 30's, whose draw was
+not kept (seed 20261015: 300 npm and 300 PyPI malicious-intent packages and
+150 compromised npm releases), among the packages that neither the benchmark
+nor the audit's benchmark holds: the detectors were written from the
+audit's, so the clone needs the audit's commit, `b302ad0b`, in its history
+(a shallow clone gets it, without the old samples, from `git fetch
+--unshallow --filter=blob:none origin`). The first runs on them are the
+baselines. `--commit b302ad0b` gives the audit's benchmark, the 516 releases
+0.1.9's figures were measured on; another commit draws new sets there, and
+the script prints the commit to give again. Each sample is read in memory
+from git and written as its registry serves the release (the September
+harness's rules: the folder with the dataset's `package_info`, never an
+upstream `sources/` tree; a sample zipped inside itself, as litellm
+1.82.8's is at `0cf258a4`, is read from the zip inside), and a stopped run
+goes on where it stopped. Each record keeps the version of the release
+rules: run again after they change, the script makes again the releases
+recorded under older ones and says how many changed (for the benchmark,
+which). Run it on a maintainer's machine, with OUT outside the repository
+(it refuses a folder inside a checkout).
+
+**Every set in one command.** `run --jobs N` scans N releases at once, each
+in a worker process of the guard's pool, and writes the records a run with
+one job writes (a scan that ran out of time beside the others is scanned
+again alone at the end, and a finished run is in the manifest's order).
+`scripts/bench.py all SETS.json` runs every set a sets file names, with
+`--jobs` (half the cores by default), and compares each with that set's
+last finished run:
+
+```
+{"results": "runs", "report": "~/Projects/lazaret/Claude outputs/bench",
+ "sets": [{"name": "benchmark", "manifest": "benchmark/manifest.jsonl"},
+          {"name": "holdout", "manifest": "holdout/manifest.jsonl", "aggregate_only": true},
+          {"name": "popular", "manifest": "popular/manifest.jsonl"},
+          {"name": "ubuntu", "manifest": "packaged/ubuntu.jsonl"},
+          {"name": "gostd", "manifest": "packaged/gostd.jsonl"},
+          {"name": "extra43", "manifest": "extra43/manifest.jsonl"}]}
+```
+
+Paths are relative to the sets file. It refuses an engine library that may
+not be the tree's (its rule set is not the pack's, or it was built before
+the engine's sources last changed: rebuild with `pip install -e ./python`,
+or give `--allow-stale-engine`, which the summary records), labels the run
+with the commit (and a digest of uncommitted changes), keeps the runs in
+`RESULTS/LABEL/`, and writes each comparison and a `summary.txt` to
+`REPORT/LABEL/`; the holdout's in counts only, and nothing it prints names
+a holdout release. `--only benchmark,holdout` runs some sets, `--baseline
+LABEL` compares with another run, and the same command, stopped, goes on
+where it stopped (a label's runs never mix two engine libraries). The sets
+of real malicious releases (the benchmark and the holdout, and the Go and
+Rust malicious set) are run on a maintainer's machine, not in an agent's
+session.
+
+**The malicious sets, step by step** (a maintainer's machine; every folder
+named here outside the repository and any synced folder):
+
+1. Clone DataDog's dataset once, without a checkout:
+   `git clone --filter=blob:none --no-checkout https://github.com/DataDog/malicious-software-packages-dataset.git ~/lazaret-datadog`
+   (a shallow clone needs `git fetch --unshallow --filter=blob:none origin`:
+   the holdout's draw reads the audit's commit, `b302ad0b`).
+2. Write the two manifests:
+   `python3 scripts/datadog.py ~/lazaret-datadog ~/lazaret-corpus`. It
+   writes `benchmark/manifest.jsonl` and `holdout/manifest.jsonl` there and
+   prints their two entries of a sets file; stopped, the same command goes
+   on.
+3. Write the sets file once, `~/lazaret-bench/sets.json` (a `~` is the home
+   folder; any other relative path is the sets file's folder's):
+
+   ```
+   {"results": "runs", "report": "~/Projects/lazaret/Claude outputs/bench",
+    "sets": [{"name": "benchmark", "manifest": "~/lazaret-corpus/benchmark/manifest.jsonl"},
+             {"name": "holdout", "manifest": "~/lazaret-corpus/holdout/manifest.jsonl", "aggregate_only": true}]}
+   ```
+
+4. With the commit to measure checked out and its engine built
+   (`pip install -e ./python`: the run refuses a library that is not the
+   tree's), from the repository's root:
+   `python3 scripts/bench.py all ~/lazaret-bench/sets.json --only benchmark,holdout`.
+   A set's first run is its baseline; each later one is compared with the
+   set's last finished run (`--baseline LABEL`: another).
+5. What a session reads back is the report folder,
+   `Claude outputs/bench/LABEL/`: `summary.txt`, `benchmark.txt` (the
+   verdicts by category and every release that moved) and `holdout.txt`
+   (counts alone). The runs (`~/lazaret-bench/runs/`), the manifests and
+   the samples stay on the machine.
+6. When a session is to write stories from the benchmark's misses:
+   `python3 scripts/bench.py misses ~/lazaret-bench/sets.json benchmark`.
+   It scans again, in memory, each malicious release of the set's last
+   finished run that is not SUSPICIOUS (`--label`: another run) and writes
+   `benchmark-misses.jsonl` to the same report folder, a line each: the
+   verdict and its reason, every finding (rule, severity, file, line,
+   message), the files (path, size, text or binary) and the manifest's
+   install hooks and dependencies, each value cut short. No file's
+   contents and no finding's snippet are written, and a set marked
+   `aggregate_only` (the holdout) is refused: its releases are looked at
+   only in aggregate.
+
+**Where the sets run, and when** (John, Oct 15: the Mac is the gate, "although
+don't make it be a blocker"). `bench.py all` over the sets file, the popular
+set beside the benchmark and the holdout, runs on the maintainer's Mac after
+each delivery is applied: minutes there, where an agent's sandbox of two
+cores takes some 40 minutes for the popular set alone and times out on its
+largest releases. A session does not wait for it: it delivers once its own
+checks pass (the tests, the self-scan, and the files the change reads,
+before and after it: a JavaScript change's on the installed npm packages'
+JavaScript files, say), says in the changelog what the run owes, and reads
+the run's report folder afterwards; anything that moved is a follow-up. The
+popular set is fetched there once (`popular.py fetch --cache
+~/lazaret-corpus/popular --manifest ~/lazaret-corpus/popular/manifest.jsonl`)
+and named in the sets file with the other two.
+
+**The popular releases: the release gate's benign set.** The benchmark's 429
+popular packages are mostly small libraries, and they did not hold the nine
+popular releases 0.1.8 made SUSPICIOUS (vite, vitest, monaco-editor,
+coverage, numba, future, sympy, ipython, kubernetes: B-1).
+`scripts/popular/releases.jsonl` pins 1,703 more: the latest releases, on
+Oct 3, 2026, of 1,205 popular npm and PyPI packages the benchmark does not
+hold, and on Oct 6, 2026, of the 500 most-downloaded crates (498: two are
+under licences the set does not take, MPL-2.0 and CDLA-Permissive-2.0), each
+the one file the guard scans (npm's tarball; for PyPI the file pip installs
+on Linux x86-64; a crate's `.crate`), by version and sha256.
+
+```
+python3 scripts/popular/popular.py fetch --cache DIR --manifest DIR/manifest.jsonl
+python3 scripts/bench.py run DIR/manifest.jsonl RUN.jsonl      # looped under a 45 s timeout
+python3 scripts/bench.py compare BEFORE.jsonl RUN.jsonl
+```
+
+`fetch` downloads them once (about 710 MB; a file already in DIR is hashed
+again, other bytes than the pinned ones are refused; `--only crates` takes
+one ecosystem's; `--jobs N`, default 8, fetches N at once, over Lazaret's
+native client where its engine library is installed). Run the set before
+and after a detection change and before a release, as the benchmark: no
+release may be SUSPICIOUS, and every verdict or strong finding that moves
+is read. 0.1.8 makes the nine SUSPICIOUS on it, and 0.1.9 none of its 1,703
+releases: on rule set 2.70.0 (Oct 14, `bench.py all`), 43 WARN and 1
+INCOMPLETE (sharp's 16 MB libvips library, counted as unscanned code). When
+the crates joined it (rule set 2.33.0) the npm and PyPI releases gave 32
+WARN and the crates 16 (13 for the prebuilt libraries and objects they
+ship, the windows and winapi import libraries, ring's and aws-lc-sys's
+assembly and wit-bindgen's WebAssembly; 3 for test data, SC-HEXSTR,
+SC-OPAQUE-BLOB and SC-NESTED-ARCHIVE); N-4's SC-B64 change (rule set
+2.39.0: data that decodes to WebAssembly or an image) took five npm and
+PyPI releases to OK (@vitest/mocker, es-module-lexer, loader-utils, tsx,
+nltk). At each release, refresh it (`pin` takes `--jobs` too; crates.io's
+API and Open VSX keep their pace whatever N is):
+`popular.py pin --top 800,400,500 --exclude FILE --cache DIR` takes the
+latest release of the first 800 npm, 400 PyPI and 500 crates names of
+`python/src/lazaret/registry/popular_names.json` (the most downloaded),
+less the benchmark's benign names, which FILE lists, and pins those three
+ecosystems anew (crates.io's API is asked once a second, so the crates take
+about ten minutes; a crate under a licence Apache-2.0 can't take in is left
+out, since this set's findings are read); a new release of a popular
+package is what this set exists to catch. A fourth count pins extensions
+from Open VSX, and an ecosystem given no count, or 0, keeps its pins.
+`popular.py pin npm:vite@8.3.2 crates:syn …` adds or moves single
+releases, and `popular.py check` validates the file.
+
+**The extensions (E-1's fourth part).** `popular.py pin --top 0,0,0,400
+--cache DIR` takes the first 400 names of the extensions' list (`vscode`
+in `popular_names.json`: both registries' rankings, in turn) and pins, for
+each one Open VSX serves, its newest release that is not a pre-release and
+has a file for Linux x86-64 (the `linux-x64` file, else the universal one,
+as the editor chooses), checked against the SHA-256 Open VSX publishes
+beside it and only under the licences the crates are taken under; a name
+only the Marketplace serves is left out (its files have no published
+digest to pin by). Open VSX is asked twice a second, and its file URLs
+redirect to its content host (the script follows a redirect only to https
+on a registry's own host). `fetch --only openvsx --manifest DIR/vsix.jsonl`
+and `bench.py run` scan them as `lazaret FILE.vsix` does: no extension may
+be SUSPICIOUS, and every WARN is read. The sandbox the 0.1.9 work ran in
+cannot reach Open VSX, so the set is pinned and run where it can be.
+
+**The Go and Rust sets (N-2).** No Go registry publishes downloads, and Go's
+module proxy can't be reached from everywhere the gate runs, so the Go and
+Rust code the gate holds quiet, beside the popular crates, is what a
+distribution packages and what Go ships. `scripts/popular/packaged.py`
+packs both, each module or crate as its registry serves it (a module zip,
+a `.crate`), for `bench.py`:
+
+```
+python3 scripts/popular/packaged.py ubuntu --debs DEBS --cache DIR --manifest DIR/ubuntu.jsonl --left-out DIR/left.jsonl
+python3 scripts/popular/packaged.py gostd --cache DIR --manifest DIR/gostd.jsonl
+python3 scripts/bench.py run DIR/ubuntu.jsonl RUN.jsonl        # looped under a 45 s timeout, as above
+```
+
+`ubuntu` takes every `golang-*-dev` and `librust-*-dev` package of Ubuntu
+24.04's universe (noble's index, pinned by sha256: the release pocket never
+changes; about 575 MB of `.deb`s, fetched once into DEBS and checked
+against the index; `--jobs N`, default 8, fetches and unpacks N at once,
+over Lazaret's native client where its engine library is installed, and
+`--mirror URL` fetches from an Ubuntu mirror, trusted for nothing since the
+index's sha256 is checked), keeping a package only when its DEP-5 copyright file
+names licences Apache-2.0 can take in: of 4,746 packages, 4,040, with 1,953
+Go modules and 2,151 crates. `gostd` packs Go's `std`, `cmd` and the
+modules they vendor (`go env GOROOT`). The gate is the popular set's: none
+SUSPICIOUS, every WARN read. On 0.1.9 (rule set 2.37.0, Go 1.24.7) none is
+SUSPICIOUS; Ubuntu's Go modules give 27 WARN and 3 INCOMPLETE (Debian packs
+aws-sdk-go-v2 and azure-sdk-for-go each as one tree, past the archive's
+20,000 files and the reader's 300 million characters, and go-git-fixtures'
+65 MB `data.go` runs past the deadline), its crates 16 WARN, Go's own 3 of
+18 (the race detector's and BoringCrypto's `.syso` objects, and SC-B64 on
+`stringer`'s name tables of mixed case). Before rule set 2.35.0, SC-B64 was
+behind 24 of the 39 Go WARNs and 11 of the 30 crates', on runs that are not
+base64 (backlog G-5: `stringer`'s tables, decimal and hex literals,
+repeated test strings); what it reports on these sets now is base64 that is
+data (keys, certificates, test messages) and `stringer` tables of mixed
+case.
+
+**The Go and Rust malicious set** is run offline by John: real samples
+can't be fetched from the sandbox (crates.io deletes them; OSV and Go's
+proxy are out of its reach), and none is written in it. A sample is a
+manifest line with `"kind": "gomod"` (a module zip, `path@version/` inside,
+`"container": "zip"`) or `"kind": "crate"` (a `.crate`, `name-version/`
+inside, `"container": "tgz"`) and a category other than `"benign"`; the
+gate is each one SUSPICIOUS for its documented reason. Until then, the
+reader tests' single-technique samples (`goread/tests.rs`,
+`rsread/tests.rs`) and the guard tests' are the coverage set.
+
+**VS Code extensions (E-1).** `bench.py` takes a `.vsix` as `"kind": "vsix"`
+(`extension/` inside, `"container": "zip"`), scanned as `lazaret FILE.vsix`
+scans it. The extensions' benign set (the most-installed Open VSX
+extensions, pinned by sha256: `popular.py pin --top 0,0,0,N`, above) is
+E-1's part 4, and their malicious set
+(GlassWorm's and the other campaigns' samples) is run offline by John, as
+the Go and Rust one is: neither registry can be reached from the sandbox.
+Until then, `tests/registry/test_vsix.py`'s single-technique fragments are
+the coverage set, and the popular set's npm releases wrapped as extensions
+(their `package.json` given a publisher and an engine) check that the
+editor's rules add no false positive to npm's: on 0.1.9, 782 OK, 19 WARN,
+none SUSPICIOUS, none above its npm verdict.
+
 ---
 
 ## 5. Bounded-work checks
@@ -266,9 +573,11 @@ Anything that reads attacker-controlled text gets a test that feeds it a
 minified rows, pathological brackets) and asserts it finishes fast and returns
 the right answer. See `test_review_received_code.py::test_bounded_work` and
 `::test_new_sinks_stay_bounded` for the shape. The engine's patterns run on
-its port of sre, which backtracks as `re` does: a pattern that backtracks
-without end spends the call's work budget and leaves the file SC-TRUNCATED,
-so bound the pattern (or, from phase 4, run it on linre). The npm package's
+linre, in time linear in the text whatever it holds (P-16): a pattern linre
+would not run fails `test_linre` (the pack's) or the recorded-output runs
+(one the engine builds as it scans, through `linre.refused`), so write it
+another way (`docs/RUST_ENGINE.md` §14 has the ways it was done). What a
+detector reads around a match still needs its own bound. The npm package's
 remaining JavaScript regexes are the tighter constraint — V8 overflows its
 backtrack stack where CPython only slows — and the bounded tests catch it.
 
@@ -289,10 +598,10 @@ Then the release gates themselves: `sh scripts/check-versions.sh HEAD` (the
 Python, npm and native engine versions agree), and CI's own `versions` check
 runs inside the test stage before any publish job (`docs/RELEASING.md`). The
 platform wheels are built, checked (`scripts/check_native_library.py`) and
-installed on their five platforms by `wheels.yml`, on any pull request that
+installed on their eight platforms by `wheels.yml`, on any pull request that
 changes what goes into them; locally, `python3 scripts/check_native_library.py
 rust/target/release/liblazaret_native.so manylinux_2_39_x86_64 --load` (the
-tag of the glibc you built on) checks a development build the same way.
+tag of the glibc you built on; `musllinux_1_2_x86_64` for a musl build) checks a development build the same way.
 
 ---
 

@@ -241,23 +241,10 @@ class BaselineTrustUnit(TempDirs):
             if old is not None:
                 os.environ[reports.BASELINE_KEY_ENV] = old
 
-    def test_signature_is_order_and_separator_independent(self):
-        a = [_issue(1, "app/views/x.py"), _issue(2, "app/b.py")]
-        b = [_issue(2, "app\\b.py"), _issue(1, "app\\views\\x.py"), _issue(1, "app/views/x.py")]
-        fa = [reports.fingerprint(i) for i in a]
-        fb = [reports.fingerprint(i) for i in b]
-        self.assertEqual(reports.sign_fingerprints(fa, b"k"), reports.sign_fingerprints(fb, b"k"))
-        self.assertNotEqual(reports.sign_fingerprints(fa, b"k"), reports.sign_fingerprints(fa, b"k2"))
-
     def test_core_fingerprint_is_the_shared_one(self):
         self.assertEqual(lazaret.fingerprint(_issue(3)), reports.fingerprint(_issue(3)))
 
-    def test_verify_signature_rejects_bad_shapes(self):
-        for doc in ([], {"issues": []}, {reports.SIGNATURE_FIELD: "x"},
-                    {reports.SIGNATURE_FIELD: {"alg": "MD5", "value": "00"}}):
-            ok, why = reports.verify_signature(doc, b"k")
-            self.assertFalse(ok)
-            self.assertTrue(why)
+    # (the signature's order, separators and shapes: the engine's, test_baseline_engine)
 
 
 # ---------------------------------------------------------------------------

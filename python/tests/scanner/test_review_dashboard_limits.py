@@ -1,106 +1,84 @@
-"""The dashboard's limits match the CLI's (FIX-SPEC items 7 and 9).
+"""The dashboard's size limit, and its render cap.
 
-Before: the page stopped recording issues after 500 per file (a SCAN-BUDGET
-notice, and everything after it unreported, security findings included) and
-had no size limit, so a 25 MB upload froze the tab while the CLI reports
-SC-TRUNCATED for anything over 2,000,000 bytes. Now: no per-file budget;
-at most 200 findings per (file, rule) for INFO/MINOR rules and code smells,
-then one Q-CAPPED; security findings never capped; snippet lines clipped to
-240 characters around the match; the 2 MB limit with SC-TRUNCATED."""
+The page scans on the tab's thread, so it keeps the 2,000,000-byte limit the CLIs had before their default became
+16,000,000 bytes (core.SOURCE_SIZE_CAP): a file over it is not read but gets the CLI's SC-TRUNCATED finding, which
+fails the gate, and the CLI with that limit reports the same (the limit counts bytes: a paste's in UTF-8). The page
+reads no more of an upload over the limit than the collection looks at (its first bytes: what it is, a program
+under a source file's name). Its issue list renders 500 cards at a time (G19: 10k+ cards froze the tab).
+Inert content.
+"""
 
-import time
 import unittest
+from unittest import mock
 
 from lazaret.scanner import core
 from tests.scanner import _dashboard_vm as dash
 
+PAGE_LIMIT = 2_000_000
 
-def rules(issues):
-    counts = {}
-    for i in issues:
-        counts[i["rule"]] = counts.get(i["rule"], 0) + 1
-    return counts
+
+def cli_result(files):
+    with mock.patch.object(core, "SOURCE_SIZE_CAP", PAGE_LIMIT):
+        return dash.cli_result(files)
+
+
+def same(test, page, cli):
+    test.assertNotIn("error", page, page.get("error"))
+    test.assertEqual(dash.comparable(page, dash.PAGE_ONLY), dash.comparable(cli, dash.CLI_ONLY))
 
 
 @dash.requires_node
 class SizeLimitTests(unittest.TestCase):
-    def test_over_the_limit_is_one_sc_truncated_like_the_cli(self):
-        (issue,) = dash.scan("big.js", "x" * 2_000_001, lang="js")
-        cli = core.truncated_issue("big.js", "2,000,001 bytes exceeds the 2,000,000-byte file limit")
-        for key in ("rule", "name", "type", "sev", "msg", "why", "fix", "ref", "file", "line", "snippet"):
-            self.assertEqual(issue[key], cli[key], key)
+    def test_the_limit_is_the_clis_with_the_pages_size(self):
+        files = [("big.js", "x" * (PAGE_LIMIT + 1)), ("ok.js", "x" * PAGE_LIMIT), ("wide.py", "é" * 1_000_001)]
+        page = dash.scan(files)
+        same(self, page, cli_result(files))
+        self.assertEqual(sorted((i["file"], i["rule"]) for i in page["issues"]),
+                         [("big.js", "SC-TRUNCATED"), ("ok.js", "Q-LONGLINE"), ("wide.py", "SC-TRUNCATED")])
+        (wide,) = [i for i in page["issues"] if i["file"] == "wide.py"]
+        self.assertEqual(wide["msg"], "File not fully scanned: 2,000,002 bytes exceeds the 2,000,000-byte file limit.")
+        self.assertFalse(page["pass"])
 
-    def test_the_limit_counts_utf8_bytes(self):
-        at_limit = dash.scan("ok.js", "x" * 2_000_000, lang="js")         # exactly 2,000,000: scanned
-        self.assertEqual([i["rule"] for i in at_limit], ["Q-LONGLINE"])
-        (issue,) = dash.scan("wide.py", "é" * 1_000_001, lang="py")      # 2,000,002 bytes
-        self.assertEqual(issue["rule"], "SC-TRUNCATED")
-        self.assertIn("2,000,002 bytes", issue["msg"])
+    def test_a_paste_counts_its_utf8_bytes(self):
+        page = dash.scan(paste="é" * 1_000_001, lang="py")
+        same(self, page, cli_result([("pasted-code.py", "é" * 1_000_001)]))
+        self.assertEqual([i["rule"] for i in page["issues"]], ["SC-TRUNCATED"])
 
-    def test_an_oversize_upload_is_not_read_and_fails_the_gate(self):
-        accepted, result = dash.run([
-            {"op": "upload", "files": [{"name": "huge.js", "content": "eval(x)\n", "size": 25_000_000},
-                                       {"name": "small.js", "content": "eval(x)\n"}]},
-            {"op": "runScan", "files": [{"name": "huge.js", "content": "", "size": 25_000_000},
-                                        {"name": "small.js", "content": "eval(x)\n"}]},
-        ])
-        self.assertEqual([(f["name"], f["contentLength"], f["size"]) for f in accepted],
-                         [("huge.js", 0, 25_000_000), ("small.js", 8, 8)])
-        self.assertEqual(rules(result["issues"]).get("SC-TRUNCATED"), 1)
-        self.assertFalse(result["pass"])
-        self.assertEqual(result["metrics"]["ncloc"], 1)                  # only small.js measured
+    def test_an_oversize_upload_is_read_only_as_far_as_its_head(self):
+        """Uploads of which the page can read only the first 4,096 bytes (the harness fails a read of more): the
+        result is the CLI's for the whole files."""
+        size = PAGE_LIMIT + 100
+        head = b"\x7fELF\x02\x01\x01" + bytes(4089)
+        text = b"x = 1\n" * (size // 6 + 1)
+        files = [("prog.py", head + bytes(size - len(head))), ("big.py", text[:size])]
+        page = dash.scan([(rel, data[:4096], len(data)) for rel, data in files])
+        same(self, page, cli_result(files))
+        self.assertEqual(sorted((i["file"], i["rule"]) for i in page["issues"]),
+                         [("big.py", "SC-TRUNCATED"), ("prog.py", "SC-BINARY"), ("prog.py", "SC-TRUNCATED")])
+        # reading one whole fails here: it is not scanned, and the page says so
+        (shown,) = dash.run([{"op": "upload", "files": [dash.upload("small.py", b"x = 1\n", size=100)]}])
+        self.assertIn("could not be read", shown)
+        self.assertIn("small.py", shown)
 
-
-@dash.requires_node
-class CapTests(unittest.TestCase):
-    def test_no_per_file_budget_for_security_findings(self):
-        issues = dash.scan("many.js", "eval(x);\n" * 600, lang="js")
-        counts = rules(issues)
-        self.assertEqual(counts.get("S-EVAL-JS"), 600)
-        self.assertNotIn("SCAN-BUDGET", counts)
-        self.assertNotIn("Q-CAPPED", counts)
-
-    def test_quality_findings_are_capped_with_a_note(self):
-        issues = dash.scan("vars.js", "".join(f"var a{n} = 1;\n" for n in range(250)), lang="js")
-        counts = rules(issues)
-        self.assertEqual(counts["Q-VAR"], 200)
-        (capped,) = [i for i in issues if i["rule"] == "Q-CAPPED"]
-        self.assertEqual(capped["msg"], "50 more Q-VAR findings omitted")
-        self.assertEqual((capped["sev"], capped["line"]), ("INFO", 201))
-
-    def test_minor_security_rules_are_never_capped(self):
-        issues = dash.scan("urls.py", 'u = "http://example.invalid/x"\n' * 250, lang="py")
-        self.assertEqual(rules(issues).get("S-HTTP"), 250)                # MINOR, but S-*
-        self.assertNotIn("Q-CAPPED", rules(issues))
-
-    def test_issue_dense_file_is_fast(self):
-        # the reviewer's tab-freeze input, cut to 2,000 lines to stay under the 2 MB limit
-        line = "var a" + "=1;if(x){y()}else{z()};" * 40 + "\n"
-        started = time.monotonic()
-        issues = dash.scan("dense.js", line * 2000, lang="js")
-        self.assertLess(time.monotonic() - started, 30)
-        counts = rules(issues)
-        self.assertEqual(counts["Q-LONGLINE"], 200)
-        self.assertIn("Q-CAPPED", counts)
+    def test_a_config_file_over_its_limit(self):
+        files = [("settings.json", '{"a": "' + "x" * PAGE_LIMIT + '"}\n')]
+        page = dash.scan(files)
+        same(self, page, cli_result(files))
+        self.assertEqual([i["rule"] for i in page["issues"]], ["Q-SKIPPED-CONFIG"])
 
 
 @dash.requires_node
-class SnippetTests(unittest.TestCase):
-    def test_lines_are_clipped_and_windowed_around_the_match(self):
-        long_line = "a = 1; " * 70 + "eval(payload); " + "b = 2; " * 70
-        src = "x = 1\n" + ("y" * 500) + "\n" + long_line + "\nz = 2\n"
-        (issue,) = [i for i in dash.scan("w.js", src, lang="js") if i["rule"] == "S-EVAL-JS"]
-        for text in issue["snippet"]:
-            self.assertLessEqual(len(text), 240)
-        flagged = issue["snippet"][issue["line"] - issue["snipStart"]]
-        self.assertTrue(flagged.startswith("…") and flagged.endswith("…"), flagged)
-        self.assertIn("eval(payload)", flagged)
-        self.assertEqual(flagged.index("eval(payload)"), 61)                # 60 chars of lead-in after "…"
-        self.assertTrue(issue["snippet"][0 if issue["snipStart"] == 2 else 1].endswith("…"))
-
-    def test_short_lines_are_untouched(self):
-        (issue,) = [i for i in dash.scan("s.js", "eval(x)\n", lang="js") if i["rule"] == "S-EVAL-JS"]
-        self.assertEqual(issue["snippet"][0], "eval(x)")
+class RenderCapTests(unittest.TestCase):
+    def test_the_issue_list_renders_500_cards_at_a_time(self):
+        got = dash.run([dash.scan_request(paste="eval(x)\n" * 600, lang="py"),
+                        {"op": "html", "id": "countNote"}, {"op": "html", "id": "issueList"},
+                        {"op": "html", "id": "gateBadge"}])
+        page, note, cards, gate = got
+        self.assertEqual(len(page["issues"]), 600)                            # security findings: never capped
+        self.assertEqual(note["text"], "600 of 600 issues shown — showing 1–500 (page 1/2; rendering capped at 500 "
+                                       "to keep the tab responsive)")
+        self.assertEqual(cards["html"].count('<div class="issue"'), 500)
+        self.assertEqual(gate["text"], "Quality Gate: Failed")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0 AND Python-2.0.1
-//
-// In part (capital_sigma) a Rust translation of CPython's
-// Objects/unicodeobject.c (handle_capital_sigma), changed as rust/NOTICE
-// summarizes, and distributed under CPython's license (rust/LICENSE-PYTHON)
-// as well as Lazaret's. CPython's notice:
-//
-//   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
-
 //! Character data as Python 3.10 (Unicode 13.0) reads it.
 //!
 //! Every lookup takes a code point as a `u32`, surrogates included: text is a
@@ -201,7 +192,7 @@ pub fn lower(s: &[u32]) -> Vec<u32> {
         if c < 128 {
             out.push(sre_lower(c));
         } else if c == 0x3A3 {
-            out.push(capital_sigma(s, i));
+            out.push(if final_sigma(s, i) { 0x3C2 } else { 0x3C3 });
         } else if let Some(full) = lookup_list(t::FULL_LOWER, c) {
             out.extend_from_slice(full);
         } else {
@@ -226,39 +217,70 @@ pub fn upper(s: &[u32]) -> Vec<u32> {
     out
 }
 
-/// CPython's handle_capital_sigma.
-fn capital_sigma(s: &[u32], i: usize) -> u32 {
-    let mut j = i as isize - 1;
-    let mut c = 0u32;
-    while j >= 0 {
-        c = s[j as usize];
-        if props(c) & CASE_IGNORABLE == 0 {
-            break;
+/// Python's str.casefold() (full case folding; no context: `Σ` folds to `σ`
+/// wherever it is): FULL_FOLD where the fold is not the character's
+/// str.lower() alone, its lowercase otherwise. Names that file systems which
+/// ignore case compare as one (macOS's, Windows'), read on this table's
+/// Unicode 13.0 on every Python (BR-2).
+pub fn casefold(s: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(s.len());
+    for &c in s {
+        if c < 128 {
+            out.push(sre_lower(c));
+        } else if let Some(full) = lookup_list(t::FULL_FOLD, c).or_else(|| lookup_list(t::FULL_LOWER, c)) {
+            out.extend_from_slice(full);
+        } else {
+            out.push(sre_lower(c));
         }
-        j -= 1;
     }
-    let mut final_sigma = j >= 0 && props(c) & CASED != 0;
-    if final_sigma && i + 1 < s.len() {
-        let mut k = i + 1;
-        while k < s.len() {
-            c = s[k];
-            if props(c) & CASE_IGNORABLE == 0 {
-                break;
-            }
-            k += 1;
-        }
-        final_sigma = k == s.len() || props(c) & CASED == 0;
-    }
-    if final_sigma {
-        0x3C2
-    } else {
-        0x3C3
-    }
+    out
+}
+
+/// Whether the capital sigma at `i` is final, so that it lowers to `ς`
+/// rather than `σ`: Unicode's Final_Sigma condition (The Unicode Standard,
+/// section 3.13, "Default Case Algorithms") as Python's str.lower() reads
+/// it. Before the sigma, past the case-ignorable characters, comes a cased
+/// one; after it, past the case-ignorable characters, comes none. A
+/// character both cased and case-ignorable is passed over as case-ignorable
+/// (the table's CASED bit is "cased and not case-ignorable").
+fn final_sigma(s: &[u32], i: usize) -> bool {
+    let decides = |&&c: &&u32| props(c) & CASE_IGNORABLE == 0;
+    let cased = |c: Option<&u32>| c.is_some_and(|&c| props(c) & CASED != 0);
+    cased(s[..i].iter().rev().find(decides)) && !cased(s[i + 1..].iter().find(decides))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_sigma_as_python_reads_it() {
+        // (text, str.lower() on Python 3.10): the case-ignorable characters
+        // (' . U+00AD, U+0345) are passed over on both sides; U+0345 is
+        // cased too, and still passed over
+        let cases: &[(&str, &str)] = &[
+            ("A\u{3a3}", "a\u{3c2}"),
+            ("\u{3a3}", "\u{3c3}"),
+            ("A\u{3a3}B", "a\u{3c3}b"),
+            ("A'\u{3a3}'", "a'\u{3c2}'"),
+            ("A'\u{3a3}'B", "a'\u{3c3}'b"),
+            ("A.\u{3a3}", "a.\u{3c2}"),
+            ("A \u{3a3}", "a \u{3c3}"),
+            ("1\u{3a3}", "1\u{3c3}"),
+            ("1\u{345}\u{3a3}", "1\u{345}\u{3c3}"),
+            ("A\u{345}\u{3a3}", "a\u{345}\u{3c2}"),
+            ("A\u{3a3}\u{345}", "a\u{3c2}\u{345}"),
+            ("A\u{3a3}\u{345}B", "a\u{3c3}\u{345}b"),
+            ("\u{3a3}\u{3a3}", "\u{3c3}\u{3c2}"),
+            ("\u{391}\u{3a3}\u{ad}", "\u{3b1}\u{3c2}\u{ad}"),
+            ("\u{391}\u{3a3}\u{ad}\u{391}", "\u{3b1}\u{3c3}\u{ad}\u{3b1}"),
+        ];
+        for &(text, want) in cases {
+            let cps: Vec<u32> = text.chars().map(|c| c as u32).collect();
+            let got: String = lower(&cps).into_iter().map(|c| char::from_u32(c).unwrap()).collect();
+            assert_eq!(got, want, "{text:?}");
+        }
+    }
 
     #[test]
     fn basics() {
@@ -272,5 +294,34 @@ mod tests {
         assert_eq!(lower(&[0x130]), vec![0x69, 0x307]);
         assert_eq!(lower(&[0x41, 0x3A3]), vec![0x61, 0x3C2]);
         assert_eq!(lower(&[0x3A3]), vec![0x3C3]);
+    }
+
+    #[test]
+    fn casefold_as_python_reads_it() {
+        // (text, str.casefold() on Python 3.10): the full folds (ß, ẞ and the
+        // ligatures to two or three letters, İ to i and a dot above), the
+        // folds that are not the lowercase (ς, µ, ſ, Cherokee's small letters
+        // to the capitals), Σ to σ wherever it is, and what Unicode 13.0 does
+        // not assign (Glagolitic's caudate chri, U+2C2F and U+2C5F, a pair
+        // from 14.0) left as it is
+        let cases: &[(&str, &str)] = &[
+            ("Stra\u{df}e", "strasse"),
+            ("\u{1e9e}", "ss"),
+            ("\u{fb03}", "ffi"),
+            ("\u{130}", "i\u{307}"),
+            ("\u{3c2}\u{3a3}A\u{3a3}", "\u{3c3}\u{3c3}a\u{3c3}"),
+            ("\u{b5}\u{17f}", "\u{3bc}s"),
+            ("\u{ab70}\u{13a0}", "\u{13a0}\u{13a0}"),
+            ("\u{1f80}", "\u{1f00}\u{3b9}"),
+            ("x\u{2c2f}.js", "x\u{2c2f}.js"),
+            ("x\u{2c5f}.js", "x\u{2c5f}.js"),
+        ];
+        for &(text, want) in cases {
+            let cps: Vec<u32> = text.chars().map(|c| c as u32).collect();
+            let want: Vec<u32> = want.chars().map(|c| c as u32).collect();
+            assert_eq!(casefold(&cps), want, "{text:?}");
+        }
+        // a lone surrogate (a name read with surrogateescape) is itself
+        assert_eq!(casefold(&[0xDC80, 0x41]), vec![0xDC80, 0x61]);
     }
 }

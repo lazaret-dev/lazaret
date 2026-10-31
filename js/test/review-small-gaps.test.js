@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run, scanFile } from "../src/index.js";
 import { jsxReading } from "../src/lib/lexer.js";
-import { EXTS } from "../src/lib/fs.js";
 
 /** The name SC-HEXSTR says a line's escapes hide, else null (core.hex_hidden_name, as its message shows it). */
 const hexHiddenName = (line) => {
@@ -20,9 +19,11 @@ const hexHiddenName = (line) => {
   return found ? found.msg.slice("Escape sequences hide a name: ".length + 1, -2) : null;
 };
 
-// an MPEG transport stream: a sync byte (0x47) every 188 bytes
-const VIDEO = Buffer.concat(Array.from({ length: 40 }, (_, k) =>
-  Buffer.from([0x47, ...Array.from({ length: 187 }, (_, n) => (k * 7 + n) % 256)])));
+// an MPEG transport stream: a sync byte (0x47) every 188 bytes, its program association table first (ffmpeg's: a
+// stream without one is no video, FP-OPAQUE-MEDIA's review of Oct 27)
+const PAT = Buffer.concat([Buffer.from("474000100000b00d0001c100000001f0002ab104b2", "hex"), Buffer.alloc(167, 0xff)]);
+const VIDEO = Buffer.concat([PAT, ...Array.from({ length: 40 }, (_, k) =>
+  Buffer.from([0x47, ...Array.from({ length: 187 }, (_, n) => (k * 7 + n) % 256)]))]);
 const FILES = {
   "src/a.mts": "const el = <HTMLInputElement>document.body;\n// eval(z)\neval(atob(p));\n",
   "src/b.cts": "const cp = require('child_process');\ncp.exec(process.argv[2]);\n",
@@ -71,8 +72,7 @@ test("project: .mts/.cts sources, videos, .jsc, inline os import, hidden names",
 });
 
 test("the tables", () => {
-  assert.equal(EXTS[".mts"], "js");
-  assert.equal(EXTS[".cts"], "js");
+  // (EXTS is the engine's: collect.rs, held by test_collect_engine)
   assert.equal(jsxReading("x.MTS") || jsxReading("x.cts"), false);
 });
 

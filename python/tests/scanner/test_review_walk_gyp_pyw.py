@@ -22,7 +22,6 @@ import unittest
 
 from lazaret.scanner import core
 from tests import _support
-from tests.scanner import _dashboard_vm as dash
 
 BINDING = "{\n  'includes': ['build/common.gypi'],\n  'targets': [{'target_name': 'addon', 'sources': ['addon.cc']}]\n}\n"
 COMMON = ("{\n  'target_defaults': {\n    'actions': [{\n      'action_name': 'marker',\n"
@@ -81,20 +80,6 @@ class WalkTests(unittest.TestCase):
             self.assertEqual(p.returncode, 1, p.stdout + p.stderr)       # was 0: "0 files", PASSED
             with open(os.path.join(out, "lazaret-report.json"), encoding="utf-8") as f:
                 self.assertEqual(json.load(f)["metrics"]["files"], 1)
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    def test_pyw_upload_is_python(self):
-        # (a trailing ';' is valid Python; the page's content heuristic calls it JavaScript)
-        tool = "import os\nos.system(user_cmd);\n"
-        page, detected = dash.run([
-            {"op": "uploadScan", "files": [{"name": "tool.pyw", "b64": base64.b64encode(tool.encode()).decode("ascii")}]},
-            {"op": "eval", "expr": "detectLang('pasted.pyw', 'x = 1;')"}])
-        key = lambda i: json.dumps(i, sort_keys=True, ensure_ascii=False)
-        self.assertEqual(sorted(map(key, page[0])), sorted(map(key, core.scan_file("tool.pyw", tool, "py"))))
-        self.assertEqual([i["rule"] for i in page[0]], ["S-OSCMD-PY"])
-        self.assertEqual(detected, "py")
 
 
 if __name__ == "__main__":

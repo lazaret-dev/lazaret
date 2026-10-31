@@ -1,14 +1,14 @@
 // Framework models for intra-file taint (0.1.7): Flask, Django, FastAPI and
 // Express — route handler parameters as sources, the frameworks' sources,
 // sinks and sanitizers, containers and allowlist guards. Twin of
-// python/tests/scanner/test_taint_frameworks.py; the engines are held to each
-// other on every case of that module by tests/architecture/test_js_parity_taint.py.
+// python/tests/scanner/test_taint_frameworks.py. Since Q-1 (0.1.9) the pass is
+// the native engine's in both packages; its helpers are held by the engine's
+// own tests (rust/crates/lazaret-engine/src/taint_tests.rs, pyflow/frameworks.rs).
 // Nothing here runs.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { taintScan } from "../src/scanner/scan.js";
-import { safeType, signatureParams, topSplit, dropIndexes, containerWrite, allowGuard } from "../src/scanner/taint.js";
 
 const FLASK = "from flask import Flask, request, send_file, send_from_directory, abort\napp = Flask(__name__)\n";
 const FASTAPI = "from fastapi import FastAPI, Depends, Request, WebSocket, BackgroundTasks\n"
@@ -70,22 +70,6 @@ test("containers and allowlist guards", () => {
     + "    res.sendFile(f);\n  }\n  if (!allowed.has(f)) return res.sendStatus(404);\n  res.sendFile(f);\n});\n"), new Set());
   assert.deepEqual(found("py", FLASK + "@app.route('/p/<plugin>')\ndef plugin(plugin):\n    if plugin in PLUGINS:\n"
     + "        return open('/srv/plugins/' + plugin).read()\n    abort(404)\n"), new Set());
-});
-
-test("helpers", () => {
-  assert.equal(safeType("Optional[Annotated[list[uuid.UUID], Query()]]"), true);
-  assert.equal(safeType("int | None"), true);
-  assert.equal(safeType("Union[int, str]"), false);
-  assert.equal(safeType("dict[str, int]"), false);
-  assert.deepEqual(signatureParams("def f(self, a: dict[str, int] = {'x': 1}, *args, b=f(1, 2), **kw):"),
-    [["self", "", ""], ["a", "dict[str, int]", "{'x': 1}"], ["args", "", ""], ["b", "", "f(1, 2)"], ["kw", "", ""]]);
-  assert.deepEqual(topSplit("a, (b, c), 'd,e', f", ","), ["a", " (b, c)", " 'd,e'", " f"]);
-  assert.equal(dropIndexes("exec(o['x'] + xs[i])"), `exec(o${" ".repeat(5)} + xs${" ".repeat(3)})`);
-  assert.deepEqual(allowGuard("if (ALLOWED.includes(f)) {", "js"), ["f", "ALLOWED", false]);
-  assert.deepEqual(allowGuard("if name not in PLUGINS:", "py"), ["name", "PLUGINS", true]);
-  assert.deepEqual(containerWrite("  arr.push(q);", "js"), ["arr", "q"]);
-  assert.deepEqual(containerWrite("d['k'] = q", "py"), ["d", "q"]);
-  assert.equal(containerWrite("if x[0] = q", "py"), null);
 });
 
 test("bounded work on hostile files", () => {

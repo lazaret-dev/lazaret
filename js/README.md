@@ -3,33 +3,32 @@
 Quarantine for your dependencies: security & quality scanner for Python and
 JavaScript projects.
 
-Its rules run in Lazaret's native engine, written in Rust and compiled to
-WebAssembly (`native/lazaret.wasm`, in the package: nothing to compile at
-install, no native addon, no dependency): every pattern rule, the
-obfuscation, entropy and secret detection, the supply-chain tests and the
-cross-file received-code follower — the same engine the Python package's
-platform wheels carry, held to the Python package's `lazaret.scanner` case by
-case. The intra-file taint and SQL-sink analyzers, the cross-file taint pass
-and the reports are JavaScript, ported from the Python package. For a project
-scan, `npx lazaret` and `python -m lazaret` are tested
+Its scanning runs in Lazaret's native engine, written in Rust and compiled
+to WebAssembly (`native/lazaret.wasm`, in the package: nothing to compile at
+install, no native addon, no dependency), the same engine the Python
+package's platform wheels carry: every pattern rule, the obfuscation, entropy
+and secret detection, the supply-chain tests, the intra-file taint, SQL-sink
+and function passes (since 0.1.9), and the cross-file taint passes, for
+JavaScript and for Python files alike (`X-*` findings: a request value passed
+into a function, in the same or another file, whose parameter reaches a sink
+— directly or through the local variables that hold it — or a helper's
+returned request value reaching one; a proven RegExp's `exec()` is not a
+command sink; calls bind through `require()`/`import` to the function the
+file names, and a call it can't resolve reaches every project function of
+that name). The checks of config and data files (credentials, auto-run
+settings, CI workflows) are the engine's too, and so are the reports' forms:
+for a project scan, `npx lazaret` and `python -m lazaret` are tested
 (`python/tests/architecture/test_js_parity.py`) to report the same issues
 (rule, file, line, severity, message), metrics, ratings, gate result and exit
-code. Both run the JavaScript half of the cross-file flow engine (`X-*`
-findings: a request value passed into a function, in the same or another
-file, whose parameter reaches a sink — directly or through the local
-variables that hold it — or a helper's returned request value reaching one; a
-proven RegExp's `exec()` is not a command sink; calls bind through
-`require()`/`import` to the function the file names, and a call it can't
-resolve reaches every project function of that name). The Python engine
-additionally follows flows through Python files and accepts taint configs;
-registry auditing (`lazaret-registry`) is Python-only. When the project has
-Python files, the gate's cross-file condition says so: `No cross-file taint
-flows (JavaScript only: 3 Python files not analyzed)`. Through 0.1.7 this
-package ran JavaScript ports of those rules and tests; the findings are the
-same.
+code, and write the same reports, byte for byte
+(`python/tests/architecture/test_report_engine.py`). Custom taint configs, registry auditing (`lazaret-registry`), the
+install guard, SCA and the MCP server come with the Python package (`pip
+install lazaret`). Through 0.1.7 this package ran JavaScript ports of the
+rules and tests; the findings are the same.
 
 ```
 npx lazaret check ./my-project
+npx lazaret hook                 # the files staged for commit (below)
 ```
 
 ## What it does
@@ -43,7 +42,8 @@ Scans a project directory and writes the **lazaret report format**:
   counters, `perFile`, and the full `issues` list (rule, message, why, fix,
   CWE reference, file/line, ±2-line snippet, each line clipped to 240
   characters).
-- `lazaret-report.html` — the JSON report wrapped in a marker-carrying page.
+- `lazaret-report.html` — the gate, the ratings, the findings by file and
+  every finding with its snippet, in a page carrying the marker.
 - with `--sarif PATH`, a SARIF 2.1.0 report for GitHub code scanning.
 
 Report paths are checked before the scan starts: a directory, symlink, FIFO
@@ -56,7 +56,8 @@ resolving to one file. Writes are atomic
 
 - **Injection**: `eval`/`exec`, shell command execution (`exec`/`execSync` as
   a free call or on a receiver like `cp.exec` — not on `this.`/`self.`/
-  `super.`, and not method definitions), SQL injection —
+  `super.`, not method definitions, and not on a regex: RegExp's own
+  `exec`), SQL injection —
   including the flow-sensitive SQL-sink analyzer that catches SQL built into a
   variable and then passed to `execute(q)` (G12).
 - **Taint flows**: request/argv input reaching command/XSS/SQL sinks without
@@ -77,7 +78,10 @@ resolving to one file. Writes are atomic
   an argv list, `<!pymod_do_main(module)`: CRITICAL when one fetches or
   evaluates code, INFO inventory when it runs a file of the package; at most
   100 listed per file, SC-TRUNCATED past 100,000 values); an unparseable
-  root manifest (`SC-MANIFEST-UNPARSEABLE`); decode-then-execute
+  root manifest (`SC-MANIFEST-UNPARSEABLE`); a dependency npm would fetch
+  over plain http or from a raw IP address (`SC-DEP-URL`, MAJOR, since 0.1.9;
+  a package's root manifest, and a project's devDependencies too);
+  decode-then-execute
   (`SC-EVAL-DECODE`, also across lines, through an inline import such as
   `__import__("base64").b64decode`, and, in dependencies, across statements
   within 10,000 characters of the decode);
@@ -89,7 +93,8 @@ resolving to one file. Writes are atomic
   `SC-PIPE-SHELL`); and a run of invisible characters carrying hidden bytes
   — variation selectors or tag characters, the GlassWorm carrier
   (`SC-HIDDEN-UNICODE`, CRITICAL when the file also runs code from a string,
-  else MAJOR; a flag emoji is left alone). Since 0.1.8: code that renames its
+  else MAJOR; a flag emoji, or an emoji's presentation selector written up
+  to four times, is left alone). Since 0.1.8: code that renames its
   package and runs `npm publish`, the registry floods' `auto.js`
   (`SC-SELF-PUBLISH`, CRITICAL); code after a run of 150 or more blanks on a
   line, where editors and review don't show it (`SC-OFFSCREEN-CODE`, CRITICAL
@@ -100,7 +105,9 @@ resolving to one file. Writes are atomic
   its own with `rundll32`/`regsvr32`, or sets a program to start at login or
   boot (a systemd unit, a launchd agent, a crontab, a Windows Run key or
   scheduled task, the Startup folder, an XDG autostart entry: the
-  CanisterWorm releases of @emilgroup's packages).
+  CanisterWorm releases of @emilgroup's packages), or writes a command that
+  downloads or runs code to a shell's startup file (`~/.bashrc`,
+  `~/.zshrc`, `~/.profile` …; not a PATH line or a completion).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control
   characters are `S-BIDI` (Trojan Source); a name spelled with look-alike
@@ -118,17 +125,34 @@ resolving to one file. Writes are atomic
   their name (`bin/cli`, a hook's `./setup`; shell scripts are not read), every
   `package.json`, `binding.gyp` and other `.gyp`/`.gypi` file, and `.pth` files (only the `SC-PTH-EXEC`
   check runs on them; they are not counted in the metrics; a directory with
-  only a `.pth` file is a valid target). Every other regular file is classified by
+  only a `.pth` file is a valid target).
+- Since 0.1.9, a project's own `.go` and `.rs` sources, with comments and
+  strings read as Go and Rust read them: hardcoded credentials (`S-SECRET`),
+  token formats (`S-TOKEN`), Trojan Source characters (`S-BIDI`), TODO markers
+  and the obfuscation and encoding checks every text gets. Their lines count
+  in the metrics but not in the duplication. With `--deps`, a Go `vendor/` and a
+  `cargo vendor` tree are read with the engine's Go and Rust readers (since 0.1.9:
+  init code, build scripts, procedural macros); another dependency tree's Go and
+  Rust files are not.
+- GitHub Actions workflows and GitLab CI files: the shapes the worms planted,
+  and since 0.1.9 the hardening checks (`SC-WORKFLOW-*`: an action not pinned
+  to a commit, `pull_request_target` checking out the pull request's code, a
+  cache in a release workflow, write permissions, an OIDC token in a job that
+  installs, `curl … | sh`; `SC-GITLAB-*`: includes and images not pinned, `curl
+  … | sh`, a merge request's text run as code, a publishing token in a job
+  that installs), security hotspots; only a CRITICAL one fails the gate. Every other regular file is classified by
   its magic bytes (`SC-BINARY`), and a source file whose bytes are a program
   (an ELF or Windows executable named `.js` or `.py`) is `SC-BINARY`
   CRITICAL; one whose bytes don't decode to text is `SC-TRUNCATED`.
   Sources and manifests over 16,000,000 bytes
   (`--max-source-bytes`, env `LAZARET_MAX_SOURCE_BYTES`) are `SC-TRUNCATED`,
-  never silently skipped; so is a file whose rules exceed
-  a 30-second time backstop (checked inside each rule's match loop).
+  never silently skipped; so is a source, config or data file whose reading
+  spends the engine's work budget (a backstop: the rules are linear-time,
+  and the budget is work, not time, so every machine reads the same).
 - Encodings are sniffed (UTF-8/UTF-16 byte-order marks, BOM-less UTF-16, PEP
   263 coding cookies in `.py` files): anything but plain UTF-8 is decoded
-  explicitly and reported as `Q-ENCODING`.
+  explicitly, as Python decodes it (every text codec Python has), and
+  reported as `Q-ENCODING`.
 - `.git` is never scanned. Dependency trees — `node_modules`,
   `bower_components`, `site-packages`, and `vendor`/`venv`/`.venv`/`env` when
   they look like one (`pyvenv.cfg`; `modules.txt`, `autoload.php`, a
@@ -198,6 +222,7 @@ resolving to one file. Writes are atomic
 ```
 lazaret check <directory> [options]
 lazaret <directory> [options]          # the same, like the Python CLI
+lazaret hook [FILE …] [--staged] [-q] [--show-secrets]  # the commit-time gate (below)
 
   --out-dir DIR         directory for the default reports (default: the scan
                         root); must already exist and be writable
@@ -211,7 +236,12 @@ lazaret <directory> [options]          # the same, like the Python CLI
   --deps                also scan dependency trees (alias: --include-deps)
   --exclude NAME        extra directory name to skip (repeatable)
   --baseline PATH       previous JSON report; findings not in it are marked new
+                        (signed: the SC-* and X-* findings it holds accepted)
   --no-redact-secrets   keep credential lines in reports (default: redacted)
+  --show-secrets        show each finding's flagged line unredacted on the
+                        terminal (only when the output is a terminal); the
+                        reports and the baseline stay redacted
+  --verify-secrets      ask each secret's provider whether it is live (below)
   --excerpt-width N     characters of the flagged line shown per finding
   --max-source-bytes N  largest source file or manifest read (16,000,000; env
                         LAZARET_MAX_SOURCE_BYTES)
@@ -219,6 +249,21 @@ lazaret <directory> [options]          # the same, like the Python CLI
   --ci                  exit 1 when the quality gate fails
   --version, -h/--help
 ```
+
+`--verify-secrets` (off by default) asks, after the scan, each secret
+finding's provider whether the credential is live: a GitHub, Slack, Stripe or
+npm token, an OpenAI or Anthropic API key, an OpenAI, Anthropic or Claude
+Enterprise admin key, or an AWS key pair (a key id and a secret key in the same
+file), each sent to its own provider alone in a call
+that only authenticates, over HTTPS with TLS 1.2 at least and no redirect
+followed (`HTTPS_PROXY` through an `http://` proxy's tunnel, `NO_PROXY`
+honoured). A note on stderr says which providers will be asked, and where each
+credential goes, before the first call. A live credential is a BLOCKER; a
+rejected or unknown one is kept as it was, and says why. The JSON report gains
+`verification` and each such finding `verified` (in SARIF, a result's
+properties), as the Python package's do: the provider table and the logic are
+the engine's, the same for both packages. `run()` returns a promise of the
+exit code when the flag is given.
 
 A scan with much to read (a megabyte of source or more besides its largest
 file) spreads the files over worker threads, one per core up to 8, each with
@@ -229,6 +274,26 @@ Options are parsed like the Python CLI's: `--opt=value` and unique prefixes
 work, `--` ends the options, and an unknown option is a usage error. The
 Python-only options (`--taint-config`, `--strict-taint-config`,
 `--trust-repo-config`) are refused with a pointer to `pip install lazaret`.
+
+**The commit-time gate: `lazaret hook [FILE …] [--staged] [-q]`.** It checks
+the files being committed, as they are staged (read from git's index, so a
+partly staged file is checked as it will be committed), with the project
+scan's rules and `--deps`' (a file committed in `node_modules`, a virtualenv
+or a vendor folder is read as a dependency's), and fails (exit 1) on `--ci`'s
+security and supply-chain conditions: no BLOCKER finding, no CRITICAL
+vulnerability, no supply-chain indicator, no cross-file taint flow;
+duplication and maintainability are not a commit's business. With no file
+named it checks the files staged for commit; pre-commit passes the files
+being committed. It prints what fails the gate, and the vulnerabilities of
+MAJOR and above, the same lines as the Python package's `lazaret hook`
+(`python/tests/architecture/test_js_parity_hook.py`). The only program it
+runs is git, to list the index and print its blobs (`cat-file`, so no filter
+runs), and only the git `PATH` names by an absolute path, never one in the
+repository's folder. A file that can't be read, or whose name is another's
+on this system (names that differ only in case on macOS and Windows), is
+SC-TRUNCATED, which fails the gate. In a git hook or husky's
+`.husky/pre-commit`: `npx lazaret hook`. `run()` returns a promise of its
+exit code: the blobs are streamed to disk.
 
 Exit codes: `0` ok (also a failed gate without `--ci`) · `1` gate failed
 with `--ci`, or a hostile-depth manifest (`SC-MANIFEST-DEPTH`: `package.json`
@@ -247,7 +312,11 @@ fingerprints, the same as the Python engine's) and a baseline is used only if
 its signature verifies. Without a key, a baseline inside the scanned tree is
 untrusted — the repository under review could have planted it — so keep it
 outside (e.g. in `$RUNNER_TEMP`). An untrusted baseline counts every finding
-as new.
+as new. A signed baseline that verifies accepts the supply-chain and
+cross-file findings it holds (they take no suppression marker): they stay in
+the reports, marked `accepted`, and the gate does not count them. Baselines
+are the engine's (fingerprints, signature, trust and acceptance), as in the
+Python package.
 
 **Terminal output.** File names, messages and excerpts come from the scanned
 tree; C0 control characters (except tab and newline), DEL, C1 controls
@@ -271,11 +340,9 @@ engine first: `npm run build` (it needs Rust and `rustup target add
 wasm32-unknown-unknown`, and writes `native/lazaret.wasm` from the
 repository's `rust/`), then `npm test` (built-in `node --test` runner).
 
-Licensed under Apache-2.0, with two parts that are not Lazaret's own (see
-`NOTICE`): the native engine's regular expression engine and shell tokenizer
-are translations of CPython's (`native/NOTICE` lists them), under CPython's
-license (`LICENSE-PYTHON`), and the Unicode 13.0 and codec tables are
-Unicode data, under the Unicode License v3 (`LICENSE-UNICODE`). The
-package's license is `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
+Licensed under Apache-2.0, except for the Unicode 13.0 and codec tables,
+which are Unicode data, under the Unicode License v3 (`LICENSE-UNICODE`; see
+`NOTICE`). The native engine is Lazaret's own work (`native/NOTICE`). The
+package's license is `Apache-2.0 AND Unicode-3.0`.
 
 Website: https://lazaret.dev · Source: https://github.com/lazaret-dev/lazaret

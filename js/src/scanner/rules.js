@@ -9,6 +9,7 @@
 import { pyRe } from "../lib/pycompat.js";
 
 export const SEV_ORDER = {BLOCKER:0, CRITICAL:1, MAJOR:2, MINOR:3, INFO:4};
+
 export const TYPES = {VULN:"Vulnerability", HOTSPOT:"Security Hotspot", BUG:"Bug", SMELL:"Code Smell"};
 
 // DELETE and UPDATE without WHERE: the statement heads, found in one linear pass (sql.js)

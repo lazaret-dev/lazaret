@@ -1,6 +1,7 @@
 """Fake registries for the lazaret guard tests: an npm registry and a PyPI
-simple index served on 127.0.0.1, with packages built in memory. Nothing here
-is a test.
+simple index served on 127.0.0.1, with packages built in memory; the cases the
+tool modules share (RegistryCase, IndexCase: a registry for the class, no test
+of their own) and yarn's helpers. Nothing here is a test.
 
 Every "hostile" payload is inert text (hosts are .invalid or 192.0.2.x), and
 the tests never let a package manager run package code: npm and pnpm run with
@@ -8,16 +9,19 @@ scripts off, and a blocked package is never installed at all."""
 
 import base64
 import datetime
+import functools
 import hashlib
 import http.server
 import io
 import json
 import os
+import shutil
 import socketserver
 import subprocess
 import sys
 import tempfile
 import threading
+import unittest
 import urllib.parse
 import zipfile
 
@@ -310,10 +314,15 @@ def base_env(tmp):
     env.update({
         "PYTHONPATH": _support.SRC + os.pathsep + _support.PY_ROOT,
         "LAZARET_GUARD_CACHE": os.path.join(tmp, "guard-cache.json"),
+        # (the guard's own folders for a tool's plan: the test's, which is private to the run, rather than ~/.cache's)
+        "LAZARET_GUARD_SCRATCH": os.path.join(tmp, "guard-scratch"),
         "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
         "npm_config_userconfig": os.path.join(tmp, "npmrc-user"),
         "npm_config_globalconfig": os.path.join(tmp, "npmrc-global"),
         "npm_config_cache": os.path.join(tmp, "npm-cache"), "npm_config_store_dir": os.path.join(tmp, "pnpm-store"),
+        # (pnpm's packuments, kept by registry host and port: in ~/.cache, a registry of another run on the port this
+        # one got answered for this one, with another tarball's digest: N-22)
+        "npm_config_cache_dir": os.path.join(tmp, "pnpm-cache"),
         "npm_config_ignore_scripts": "true", "npm_config_audit": "false", "npm_config_fund": "false",
         "npm_config_update_notifier": "false", "npm_config_noproxy": "127.0.0.1,localhost",
         "npm_config_fetch_retries": "0", "npm_config_loglevel": "error",
@@ -346,3 +355,109 @@ def read(path):
             return f.read()
     except OSError:
         return None
+
+
+# ---------------------------------------------------------------- The tool modules' cases
+class RegistryCase(unittest.TestCase):
+    """A fake npm registry for the class, and the guard run against it (no test of its own)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.registry = NpmRegistry()
+        cls.tmp = tempfile.mkdtemp(prefix="lazaret-guard-npm-")
+        cls.env = base_env(cls.tmp)
+        cls.env["npm_config_registry"] = cls.registry.url
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.registry.close()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def guard(self, cwd, *args):
+        return run_guard(["--jobs", "1", *args], cwd, self.env)
+
+    def installed(self, d, name):
+        text = read(os.path.join(d, "node_modules", name, "package.json"))
+        return json.loads(text)["version"] if text else None
+
+
+class IndexCase(unittest.TestCase):
+    """A fake PyPI for the class, and the guard run against it (no test of its own)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.index = PypiIndex()
+        cls.tmp = tempfile.mkdtemp(prefix="lazaret-guard-py-")
+        cls.env = base_env(cls.tmp)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.index.close()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def guard(self, cwd, env, *args):
+        return run_guard(["--jobs", "1", *args], cwd, env)
+
+
+class PipCase(IndexCase):
+    """IndexCase with a venv of its own, its pip first on PATH (`pip_env`); skipped without one."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.venv = os.path.join(cls.tmp, "venv")
+        proc = subprocess.run([sys.executable, "-m", "venv", cls.venv], capture_output=True)
+        bindir = os.path.join(cls.venv, "Scripts" if os.name == "nt" else "bin")
+        pip = os.path.join(bindir, "pip.exe" if os.name == "nt" else "pip")
+        if proc.returncode != 0 or not os.path.exists(pip):
+            super().tearDownClass()
+            raise unittest.SkipTest("no venv with pip here (ensurepip missing)")
+        cls.pip_env = dict(cls.env, PATH=bindir + os.pathsep + cls.env.get("PATH", ""), VIRTUAL_ENV=cls.venv,
+                           LAZARET_GUARD_PYPI_URL=cls.index.url)
+
+
+def venv_has(venv, module):
+    for root, dirs, _files in os.walk(venv):
+        if os.path.basename(root) == "site-packages":
+            return module in dirs
+    return False
+
+
+# ---------------------------------------------------------------- yarn
+@functools.lru_cache(maxsize=None)
+def yarn_major():
+    exe = shutil.which("yarn")
+    if exe is None:
+        return None
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            out = subprocess.run([exe, "--version"], cwd=d, capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=60).stdout
+        return int(out.strip().split(".")[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+BERRY = os.environ.get("LAZARET_TEST_YARN_BERRY")
+BERRY = BERRY if BERRY and os.path.isfile(BERRY) and os.name != "nt" and shutil.which("node") else None
+
+
+def berry_env(tmp, env):
+    """env with yarn 2+ (LAZARET_TEST_YARN_BERRY, its standalone yarn.js)
+    first on PATH as `yarn`: its cache in the project, node_modules, no
+    telemetry, and not CI's immutable or hardened mode."""
+    bindir = tempfile.mkdtemp(prefix="berry-bin-", dir=tmp)
+    with open(os.path.join(bindir, "yarn"), "w", encoding="utf-8") as f:
+        f.write(f'#!/bin/sh\nexec "{shutil.which("node")}" "{BERRY}" "$@"\n')
+    os.chmod(os.path.join(bindir, "yarn"), 0o755)
+    return dict(env, PATH=bindir + os.pathsep + env.get("PATH", ""), YARN_ENABLE_TELEMETRY="0",
+                YARN_ENABLE_GLOBAL_CACHE="false", YARN_NODE_LINKER="node-modules",
+                YARN_ENABLE_IMMUTABLE_INSTALLS="false", YARN_ENABLE_HARDENED_MODE="0",
+                YARN_GLOBAL_FOLDER=os.path.join(tmp, "berry-global"))
+
+
+def yarn_classic_project(tmp, registry, npmrc=""):
+    d = project(tmp)
+    with open(os.path.join(d, ".npmrc"), "w", encoding="utf-8") as f:
+        f.write(f"registry={registry.url}\n" + npmrc)
+    return d

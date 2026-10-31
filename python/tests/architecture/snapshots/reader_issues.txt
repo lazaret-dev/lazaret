@@ -1,0 +1,5 @@
+# reader_issues: 400 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+bf7704366da3ed5f
+ec2dd392b9385a60
+31fab5b6bc179e91
+297df5f76ebc4c43

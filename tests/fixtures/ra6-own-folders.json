@@ -1,0 +1,2774 @@
+{
+  "paths": [
+    {
+      "path": "~/.abs/hooks/claude-code",
+      "found": false
+    },
+    {
+      "path": "~/.cursor/skills/muggle",
+      "found": false
+    },
+    {
+      "path": "~/.tool/overrides/config.json",
+      "found": false
+    },
+    {
+      "path": "~/.tool/versions/1.2.3",
+      "found": false
+    },
+    {
+      "path": "~/.neurolink/proxy-packages",
+      "found": false
+    },
+    {
+      "path": "~/.neurolink/bin",
+      "found": false
+    },
+    {
+      "path": "~/.neurolink/logs",
+      "found": false
+    },
+    {
+      "path": "~/Library/LaunchAgents/tool.plist",
+      "found": false
+    },
+    {
+      "path": "~/.config/tool/state",
+      "found": false
+    },
+    {
+      "path": "~/.cache/tool",
+      "found": false
+    },
+    {
+      "path": "~/.cache/tool/*",
+      "found": false
+    },
+    {
+      "path": "~/Library/Caches/tool/$unknown",
+      "found": false
+    },
+    {
+      "path": "/Users/example/.tool/state",
+      "found": false
+    },
+    {
+      "path": "/home/example/.tool/state",
+      "found": false
+    },
+    {
+      "path": "C:\\Users\\example\\.tool\\state",
+      "found": false
+    },
+    {
+      "path": "~/.tool/staging/../state",
+      "found": false
+    },
+    {
+      "path": "~/Documents-old/tool/state",
+      "found": false
+    },
+    {
+      "path": "~/.ssh-old/tool/state",
+      "found": false
+    },
+    {
+      "path": "~",
+      "found": true
+    },
+    {
+      "path": "~/",
+      "found": true
+    },
+    {
+      "path": "~/*",
+      "found": true
+    },
+    {
+      "path": "~/.neurolink",
+      "found": true
+    },
+    {
+      "path": "~/Library",
+      "found": true
+    },
+    {
+      "path": "~/.config",
+      "found": true
+    },
+    {
+      "path": "~/.abs",
+      "found": true
+    },
+    {
+      "path": "~/Documents",
+      "found": true
+    },
+    {
+      "path": "~/.cache",
+      "found": true
+    },
+    {
+      "path": "~/Library/Caches",
+      "found": true
+    },
+    {
+      "path": "/",
+      "found": true
+    },
+    {
+      "path": "C:/",
+      "found": true
+    },
+    {
+      "path": "/home/example",
+      "found": true
+    },
+    {
+      "path": "/Users/example",
+      "found": true
+    },
+    {
+      "path": "~/.tool/*",
+      "found": true
+    },
+    {
+      "path": "~/.tool/?",
+      "found": true
+    },
+    {
+      "path": "~/.tool/[a]",
+      "found": true
+    },
+    {
+      "path": "~/.tool/{a,b}",
+      "found": true
+    },
+    {
+      "path": "~/.tool/$name",
+      "found": true
+    },
+    {
+      "path": "~/.tool/\u0002",
+      "found": true
+    },
+    {
+      "path": "~/.tool/�",
+      "found": true
+    },
+    {
+      "path": "~/.tool/$name/../state",
+      "found": true
+    },
+    {
+      "path": "~/.tool/../../state/file",
+      "found": true
+    },
+    {
+      "path": "~/.tool/../Documents/report",
+      "found": true
+    },
+    {
+      "path": "~/.cache/tool/../../.ssh/key",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Google",
+      "found": true
+    },
+    {
+      "path": "~/Library/CloudStorage",
+      "found": true
+    },
+    {
+      "path": "~/.tool/repos/app/.git",
+      "found": true
+    },
+    {
+      "path": "~/.tool/Photos.photoslibrary/database",
+      "found": true
+    },
+    {
+      "path": "~/.cache/*/item",
+      "found": true
+    },
+    {
+      "path": "~/Documents/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Desktop/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Downloads/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Pictures/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Music/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Movies/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Videos/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/OneDrive/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/OneDrive - Work/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Dropbox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Dropbox (Personal)/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Mobile Documents/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/CloudStorage/OneDrive-Work/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/CloudStorage/Dropbox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Google/Chrome/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Google/Chrome Canary/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Chromium/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Firefox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Safari/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/Microsoft Edge/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Application Support/BraveSoftware/Brave-Browser/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/google-chrome/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/google-chrome-beta/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/google-chrome-unstable/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/chromium/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/firefox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/microsoft-edge/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/microsoft-edge-beta/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/microsoft-edge-dev/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/BraveSoftware/Brave-Browser/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.mozilla/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Safari/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Containers/com.apple.Safari/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Mail/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Messages/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Photos/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.ssh/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.aws/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.gnupg/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.kube/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.docker/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.azure/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.config/gcloud/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/Library/Keychains/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.npmrc/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.pypirc/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.netrc/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/.git-credentials/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Local/Google/Chrome/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Local/Microsoft/Edge/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Local/BraveSoftware/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Roaming/Mozilla/Firefox/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/AppData/Roaming/Apple Computer/Safari/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/dOcUmEnTs/nested/item",
+      "found": true
+    },
+    {
+      "path": "~/lIbRaRy/aPpLiCaTiOn SuPpOrT/gOoGlE/cHrOmE/Default",
+      "found": true
+    },
+    {
+      "path": "C:/Users/example/.SSH/key",
+      "found": true
+    },
+    {
+      "path": "/home/example/.AWS/credentials",
+      "found": true
+    },
+    {
+      "path": "~/.bitcoin/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.bitcoin/testnet3/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.ethereum/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.electrum/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.litecoin/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.dogecoin/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.dashcore/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.zcash/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.monero/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.config/solana/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.config/Exodus/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.config/atomic/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.config/Ledger Live/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.local/share/Bitcoin/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.local/share/Electrum/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/Library/Application Support/Bitcoin/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/Library/Application Support/Electrum/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/Library/Application Support/Ethereum/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/Library/Application Support/Exodus/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/Library/Application Support/atomic/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/Library/Application Support/Ledger Live/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/AppData/Roaming/Bitcoin/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/AppData/Roaming/Electrum/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/AppData/Roaming/Ethereum/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/AppData/Roaming/Exodus/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/AppData/Roaming/atomic/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/AppData/Roaming/Ledger Live/made-up-data/item",
+      "found": true,
+      "category": "wallets"
+    },
+    {
+      "path": "~/.config/discord/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/discord/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/discord/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/discordcanary/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/discordcanary/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/discordcanary/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/discordptb/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/discordptb/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/discordptb/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/Telegram Desktop/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/Telegram Desktop/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/Telegram Desktop/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/Slack/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/Slack/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/Slack/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/Signal/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/Signal/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/Signal/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/WhatsApp/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/WhatsApp/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/WhatsApp/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/Element/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/Element/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/Element/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/Riot/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Application Support/Riot/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Roaming/Riot/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.local/share/TelegramDesktop/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Containers/ru.keepcoder.Telegram/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Containers/net.whatsapp.WhatsApp/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/AppData/Local/Packages/5319275A.WhatsAppDesktop_cv1g1gvanyjgm/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.var/app/org.telegram.desktop/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.var/app/org.signal.Signal/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.var/app/com.discordapp.Discord/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.var/app/im.riot.Riot/made-up-data/item",
+      "found": true,
+      "category": "messengers"
+    },
+    {
+      "path": "~/.config/1Password/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.local/share/1Password/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/Library/Application Support/1Password/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Roaming/1Password/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Local/1Password/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.config/Bitwarden/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.local/share/Bitwarden/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/Library/Application Support/Bitwarden/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Roaming/Bitwarden/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Local/Bitwarden/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.config/KeePass/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.local/share/KeePass/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/Library/Application Support/KeePass/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Roaming/KeePass/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Local/KeePass/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.config/KeePassXC/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.local/share/KeePassXC/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/Library/Application Support/KeePassXC/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Roaming/KeePassXC/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Local/KeePassXC/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.config/keepassxc/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.local/share/keepassxc/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/Library/Application Support/keepassxc/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Roaming/keepassxc/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/AppData/Local/keepassxc/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.password-store/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.gnupg/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/Library/Group Containers/2BUA8C4S2C.com.agilebits/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/Library/Containers/com.agilebits.onepassword7/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.var/app/com.bitwarden.desktop/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.var/app/org.keepassxc.KeePassXC/made-up-data/item",
+      "found": true,
+      "category": "password-managers"
+    },
+    {
+      "path": "~/.local/share/keyrings/made-up-data/item",
+      "found": true,
+      "category": "keyrings"
+    },
+    {
+      "path": "~/.pki/made-up-data/item",
+      "found": true,
+      "category": "keyrings"
+    },
+    {
+      "path": "~/AppData/Roaming/Microsoft/Crypto/made-up-data/item",
+      "found": true,
+      "category": "keyrings"
+    },
+    {
+      "path": "~/AppData/Roaming/Microsoft/Protect/made-up-data/item",
+      "found": true,
+      "category": "keyrings"
+    },
+    {
+      "path": "~/AppData/Local/Microsoft/Vault/made-up-data/item",
+      "found": true,
+      "category": "keyrings"
+    },
+    {
+      "path": "~/AppData/Local/Microsoft/Credentials/made-up-data/item",
+      "found": true,
+      "category": "keyrings"
+    },
+    {
+      "path": "~/AppData/Roaming/Microsoft/Credentials/made-up-data/item",
+      "found": true,
+      "category": "keyrings"
+    },
+    {
+      "path": "~/.thunderbird/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/.icedove/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/.local/share/evolution/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/.config/evolution/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/Library/Thunderbird/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/Library/Containers/com.microsoft.Outlook/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/Library/Group Containers/UBF8T346G9.Office/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/AppData/Roaming/Thunderbird/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/AppData/Local/Microsoft/Outlook/made-up-data/item",
+      "found": true,
+      "category": "mail"
+    },
+    {
+      "path": "~/.config/opera/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/opera-beta/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/opera-developer/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/vivaldi/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/vivaldi-snapshot/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/yandex-browser/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/microsoft-edge/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/google-chrome/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/chromium/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/BraveSoftware/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/librewolf/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/com.operasoftware.Opera/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/com.operasoftware.OperaGX/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/Vivaldi/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/Arc/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/Yandex/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/Chromium/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/LibreWolf/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/Firefox/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/Microsoft Edge/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/Library/Application Support/BraveSoftware/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Roaming/Opera Software/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Roaming/Vivaldi/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Roaming/Mozilla/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Roaming/LibreWolf/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Local/Vivaldi/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Local/Yandex/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Local/Chromium/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Local/Google/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Local/Microsoft/Edge/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Local/BraveSoftware/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/AppData/Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.librewolf/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.var/app/org.mozilla.firefox/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.var/app/org.chromium.Chromium/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.var/app/com.google.Chrome/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.var/app/com.brave.Browser/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/snap/firefox/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/snap/chromium/made-up-data/item",
+      "found": true,
+      "category": "browsers"
+    },
+    {
+      "path": "~/.config/gh/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.cargo/credentials/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.cargo/credentials.toml/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.gem/credentials/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.terraform.d/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.vault-token/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.oci/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/doctl/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/hub/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/helm/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/rclone/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/sops/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.ansible/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.boto/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.s3cfg/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.gitconfig/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/git/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/npm/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/pypoetry/auth.toml/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/containers/auth.json/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/op/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.config/age/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.pulumi/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.npm/_auth/made-up-data/item",
+      "found": true,
+      "category": "credentials"
+    },
+    {
+      "path": "~/.local/share",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/.local/share/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/.local/state",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/.local/state/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/.config",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/.config/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/AppData/Roaming",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/AppData/Roaming/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/AppData/Local",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/AppData/Local/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/AppData/LocalLow",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/AppData/LocalLow/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/Library/Application Support",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/Library/Application Support/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/Library/Containers",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/Library/Containers/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/Library/Group Containers",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/Library/Group Containers/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/Library/Preferences",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/Library/Preferences/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/.var/app",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/.var/app/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/snap",
+      "found": true,
+      "category": "container"
+    },
+    {
+      "path": "~/snap/made-up-tool/state",
+      "found": false,
+      "category": "container-child"
+    },
+    {
+      "path": "~/.tool/vault.kdbx",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "~/.tool/wallet.dat",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "%APPDATA%/Signal/state",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "%LOCALAPPDATA%/Vivaldi/Profile",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "~/Projects/demo/.git/config",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "~/src/demo/.git",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "~/code/demo/.git",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "~/workspace/demo/.git",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "~/go/src/demo/.git",
+      "found": true,
+      "category": "special"
+    },
+    {
+      "path": "~/git/demo/.git",
+      "found": true,
+      "category": "special"
+    }
+  ],
+  "sources": [
+    {
+      "name": "agent-hook-cleanup",
+      "lang": "js",
+      "text": "const fs=require('fs'); const {join}=require('path'); const {homedir}=require('os');\nasync function uninstall(){await fs.rm(join(homedir(),'.abs','hooks','claude-code'),{recursive:true,force:true});}\nuninstall();",
+      "found": false
+    },
+    {
+      "name": "owned-skill-and-version-cleanup",
+      "lang": "js",
+      "text": "const {rmSync}=require('fs'); const {join}=require('path'); const {homedir}=require('os');\nconst overridePath=join(homedir(),'.tool','overrides','example.json');\nconst skillPath=join(homedir(),'.cursor','skills','muggle');\nconst targetSkillDirectoryPath=join(homedir(),'.tool','skills','example');\nconst staleVersionDir=join(homedir(),'.tool','versions','1.2.3');\nrmSync(overridePath);rmSync(skillPath,{recursive:true});rmSync(targetSkillDirectoryPath,{recursive:true});rmSync(staleVersionDir,{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "launch-agent-cleanup",
+      "lang": "js",
+      "text": "const {unlinkSync}=require('fs'); const {join}=require('path'); const {homedir,hostname}=require('os');\nconst PLIST_DIR=join(homedir(),'Library','LaunchAgents');\nconst PLIST_PATH=join(PLIST_DIR,'example.tool.plist');\nfetch('http://localhost:4000/internal/update-control',{method:'POST',body:hostname()});\n// local cleanup follows the unrelated request\nunlinkSync(PLIST_PATH);\n",
+      "found": false
+    },
+    {
+      "name": "deletion-line-after-local-fetch",
+      "lang": "js",
+      "text": "const {unlinkSync}=require('fs'); const {join}=require('path'); const {homedir,hostname}=require('os');\nconst PLIST_DIR=join(homedir(),'.ssh');\nconst PLIST_PATH=join(PLIST_DIR,'example-key');\nfetch('http://localhost:4000/internal/update-control',{method:'POST',body:hostname()});\n// local cleanup follows the unrelated request\nunlinkSync(PLIST_PATH);\n",
+      "found": true,
+      "line": 6
+    },
+    {
+      "name": "deletion-line-before-local-fetch",
+      "lang": "js",
+      "text": "const fs=require('fs');\nfs.unlinkSync('/home/example/.ssh/example-key');\nfetch('http://localhost:4000/update',{method:'POST',body:require('os').hostname()});",
+      "found": true,
+      "line": 2
+    },
+    {
+      "name": "python-deletion-line",
+      "lang": "py",
+      "text": "import os, requests\nrequests.post('http://localhost:4000/update',data=os.uname().nodename)\nos.remove('/home/example/.ssh/example-key')",
+      "found": true,
+      "line": 3
+    },
+    {
+      "name": "unknown-child-js",
+      "lang": "js",
+      "text": "const fs=require('fs');fs.rmSync(require('os').homedir()+'/.tool/'+unknown,{recursive:true});",
+      "found": true,
+      "line": 1
+    },
+    {
+      "name": "unknown-child-py",
+      "lang": "py",
+      "text": "import os,shutil\nshutil.rmtree(os.path.join(os.path.expanduser('~'),'.tool',unknown))",
+      "found": true,
+      "line": 2
+    },
+    {
+      "name": "js-for-fs.readdirSync(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=fs.readdirSync(D);for(const name of names) fs.rmSync(path.join(D,name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-map-fs.readdirSync(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=fs.readdirSync(D);await Promise.all(names.filter(n=>n.length>0).map(n=>fs.rm(path.join(D,n),{recursive:true})));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-foreach-fs.readdirSync(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=fs.readdirSync(D);names.forEach(n=>fs.rmSync(path.join(D,n,\"state\"),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-index-fs.readdirSync(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=fs.readdirSync(D);fs.rmSync(path.join(D,names[i]),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-destructure-fs.readdirSync(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst [name]=fs.readdirSync(D);fs.rmSync(path.join(D,name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-for-await-fs.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=await fs.readdir(D);for(const name of names) fs.rmSync(path.join(D,name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-map-await-fs.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=await fs.readdir(D);await Promise.all(names.filter(n=>n.length>0).map(n=>fs.rm(path.join(D,n),{recursive:true})));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-foreach-await-fs.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=await fs.readdir(D);names.forEach(n=>fs.rmSync(path.join(D,n,\"state\"),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-index-await-fs.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=await fs.readdir(D);fs.rmSync(path.join(D,names[i]),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-destructure-await-fs.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst [name]=await fs.readdir(D);fs.rmSync(path.join(D,name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-for-await-fs.promises.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=await fs.promises.readdir(D);for(const name of names) fs.rmSync(path.join(D,name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-map-await-fs.promises.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=await fs.promises.readdir(D);await Promise.all(names.filter(n=>n.length>0).map(n=>fs.rm(path.join(D,n),{recursive:true})));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-foreach-await-fs.promises.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=await fs.promises.readdir(D);names.forEach(n=>fs.rmSync(path.join(D,n,\"state\"),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-index-await-fs.promises.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst names=await fs.promises.readdir(D);fs.rmSync(path.join(D,names[i]),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-destructure-await-fs.promises.readdir(D)",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst [name]=await fs.promises.readdir(D);fs.rmSync(path.join(D,name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-dirent-fs.readdirSync",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=fs.readdirSync(D,{withFileTypes:true});for(const d of ds) fs.rmSync(path.join(D,d.name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-parent-fs.readdirSync",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=fs.readdirSync(D,{withFileTypes:true});ds.forEach(d=>fs.rmSync(path.join(d.parentPath ?? d.path,d.name),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-pattern-fs.readdirSync",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=fs.readdirSync(D,{withFileTypes:true});ds.map(({name})=>fs.rmSync(path.join(D,name),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-dirent-fs.readdir",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=await fs.readdir(D,{withFileTypes:true});for(const d of ds) fs.rmSync(path.join(D,d.name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-parent-fs.readdir",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=await fs.readdir(D,{withFileTypes:true});ds.forEach(d=>fs.rmSync(path.join(d.parentPath ?? d.path,d.name),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-pattern-fs.readdir",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=await fs.readdir(D,{withFileTypes:true});ds.map(({name})=>fs.rmSync(path.join(D,name),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-dirent-fs.promises.readdir",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=await fs.promises.readdir(D,{withFileTypes:true});for(const d of ds) fs.rmSync(path.join(D,d.name),{recursive:true});",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-parent-fs.promises.readdir",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=await fs.promises.readdir(D,{withFileTypes:true});ds.forEach(d=>fs.rmSync(path.join(d.parentPath ?? d.path,d.name),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-pattern-fs.promises.readdir",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ds=await fs.promises.readdir(D,{withFileTypes:true});ds.map(({name})=>fs.rmSync(path.join(D,name),{recursive:true}));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-then",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nfs.promises.readdir(D).then(names=>names.forEach(name=>fs.rmSync(path.join(D,name),{recursive:true})));",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-prompter",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nexport async function fetchAndCacheSkills(token,{force=false}={}){await pruneUnlistedSkills(index.skills);}\nasync function pruneUnlistedSkills(entries){const listed=new Set(entries.map(e=>e.name));let dirents;\ntry {dirents=await fs.readdir(D,{withFileTypes:true});}catch{return;}\nawait Promise.all(dirents.filter(d=>d.isDirectory()&&!listed.has(d.name)).map(d=>fs.rm(path.join(D,d.name),{recursive:true,force:true})));}",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-for-os.listdir",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(D,n))\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-comprehension-os.listdir",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\n[shutil.rmtree(os.path.join(D,n)) for n in os.listdir(D)]\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-filter-os.listdir",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in filter(lambda n: True,os.listdir(D)):\n shutil.rmtree(os.path.join(D,n))\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-for-os.scandir",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in os.scandir(D):\n shutil.rmtree(os.path.join(D,n.name))\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-comprehension-os.scandir",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\n[shutil.rmtree(os.path.join(D,n.name)) for n in os.scandir(D)]\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-filter-os.scandir",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in filter(lambda n: True,os.scandir(D)):\n shutil.rmtree(os.path.join(D,n.name))\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-for-pathlib.Path",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in pathlib.Path(D).iterdir():\n shutil.rmtree(os.path.join(D,n.name))\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-comprehension-pathlib.Path",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\n[shutil.rmtree(os.path.join(D,n.name)) for n in pathlib.Path(D).iterdir()]\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-filter-pathlib.Path",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in filter(lambda n: True,pathlib.Path(D).iterdir()):\n shutil.rmtree(os.path.join(D,n.name))\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-scandir-path",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor d in os.scandir(D):\n shutil.rmtree(d.path)\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "py-iterdir-path",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor d in pathlib.Path(D).iterdir():\n d.unlink()\n",
+      "found": false,
+      "category": "listed"
+    },
+    {
+      "name": "js-listed-home",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst B=\"~\";\nconst ns=fs.readdirSync(B);for(const n of ns) fs.rmSync(path.join(B,n),{recursive:true});",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-listed-top",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst B=\"~/.tool\";\nconst ns=fs.readdirSync(B);for(const n of ns) fs.rmSync(path.join(B,n),{recursive:true});",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-listed-container",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst B=\"~/.local/share\";\nconst ns=fs.readdirSync(B);for(const n of ns) fs.rmSync(path.join(B,n),{recursive:true});",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-listed-protected",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst B=\"~/.config/Signal\";\nconst ns=fs.readdirSync(B);for(const n of ns) fs.rmSync(path.join(B,n),{recursive:true});",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-listed-repository",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst B=\"~/Projects/demo/.git\";\nconst ns=fs.readdirSync(B);for(const n of ns) fs.rmSync(path.join(B,n),{recursive:true});",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-listed-root",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst B=\"/\";\nconst ns=fs.readdirSync(B);for(const n of ns) fs.rmSync(path.join(B,n),{recursive:true});",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-negative-mismatch",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ns=fs.readdirSync(D);ns.map(n=>fs.rmSync(path.join(os.homedir(),\".other\",\"state\",n),{recursive:true}));",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-negative-network",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ns=fs.readdirSync(D);index.skills.map(n=>fs.rmSync(path.join(D,n.name),{recursive:true}));",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-negative-extra",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nfs.readdirSync(D).map(n=>fs.rmSync(path.join(D,n,other),{recursive:true}));",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-negative-param",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nfunction clean(n){fs.rmSync(path.join(D,n),{recursive:true})}",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-negative-mutated",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ns=fs.readdirSync(D);ns[0]=process.env.NAME;ns.map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-negative-dirent-write",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nconst ns=fs.readdirSync(D,{withFileTypes:true});ns.map(d=>{d.name=process.env.NAME;fs.rmSync(path.join(D,d.name),{recursive:true})});",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-negative-recursive",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nfs.readdirSync(D,{recursive:true}).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-negative-glob",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const os=require('os');const D=path.join(os.homedir(),'.prompter','cache','skills');\nglob.sync(D+\"/*\").map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-listed-home",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nB='~'\nfor n in os.listdir(B):\n shutil.rmtree(os.path.join(B,n))\n",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-listed-top",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nB='~/.tool'\nfor n in os.listdir(B):\n shutil.rmtree(os.path.join(B,n))\n",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-listed-container",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nB='~/.local/share'\nfor n in os.listdir(B):\n shutil.rmtree(os.path.join(B,n))\n",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-listed-protected",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nB='~/.config/Signal'\nfor n in os.listdir(B):\n shutil.rmtree(os.path.join(B,n))\n",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-listed-repository",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nB='~/Projects/demo/.git'\nfor n in os.listdir(B):\n shutil.rmtree(os.path.join(B,n))\n",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-listed-root",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nB='/'\nfor n in os.listdir(B):\n shutil.rmtree(os.path.join(B,n))\n",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-negative-mismatch",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(os.path.expanduser(\"~\"),\".other\",\"state\",n))",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-negative-extra",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(D,n,other))",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-negative-network",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in index[\"skills\"]:\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-negative-param",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\ndef clean(n):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-negative-mutated",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nns=os.listdir(D)\nns[0]=os.environ[\"NAME\"]\nfor n in ns:\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-negative-overwrite",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nfor n in os.listdir(D):\n n=os.environ[\"NAME\"]\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "py-negative-glob",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.prompter','cache','skills')\nimport glob\nfor n in glob.glob(D+\"/*\"):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "listed"
+    },
+    {
+      "name": "js-dirent-loop-pattern",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const D=require('os').homedir()+'/.tool/state';\nfor(const {name} of fs.readdirSync(D,{withFileTypes:true}))fs.rmSync(path.join(D,name),{recursive:true});",
+      "found": false,
+      "category": "review"
+    },
+    {
+      "name": "py-direct-protected-~-os.scandir(D)",
+      "lang": "py",
+      "text": "import os,pathlib,shutil\nD='~'\nfor d in os.scandir(D):\n shutil.rmtree(d.path)\n",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-direct-protected-~-pathlib.Path(D).iterdir()",
+      "lang": "py",
+      "text": "import os,pathlib,shutil\nD='~'\nfor d in pathlib.Path(D).iterdir():\n shutil.rmtree(d)\n",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-direct-protected-~/.local/share-os.scandir(D)",
+      "lang": "py",
+      "text": "import os,pathlib,shutil\nD='~/.local/share'\nfor d in os.scandir(D):\n shutil.rmtree(d.path)\n",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-direct-protected-~/.local/share-pathlib.Path(D).iterdir()",
+      "lang": "py",
+      "text": "import os,pathlib,shutil\nD='~/.local/share'\nfor d in pathlib.Path(D).iterdir():\n shutil.rmtree(d)\n",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-direct-protected-~/.config/Signal-os.scandir(D)",
+      "lang": "py",
+      "text": "import os,pathlib,shutil\nD='~/.config/Signal'\nfor d in os.scandir(D):\n shutil.rmtree(d.path)\n",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-direct-protected-~/.config/Signal-pathlib.Path(D).iterdir()",
+      "lang": "py",
+      "text": "import os,pathlib,shutil\nD='~/.config/Signal'\nfor d in pathlib.Path(D).iterdir():\n shutil.rmtree(d)\n",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-direct-protected-/-os.scandir(D)",
+      "lang": "py",
+      "text": "import os,pathlib,shutil\nD='/'\nfor d in os.scandir(D):\n shutil.rmtree(d.path)\n",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-direct-protected-/-pathlib.Path(D).iterdir()",
+      "lang": "py",
+      "text": "import os,pathlib,shutil\nD='/'\nfor d in pathlib.Path(D).iterdir():\n shutil.rmtree(d)\n",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-api-replaced",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const D=require('os').homedir()+'/.tool/state';\nfs.readdirSync=()=>[process.env.NAME];fs.readdirSync(D).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-filter-mutation",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const D=require('os').homedir()+'/.tool/state';\nconst ns=fs.readdirSync(D,{withFileTypes:true});ns.filter(d=>{d.name=process.env.NAME;return true}).map(d=>fs.rmSync(path.join(D,d.name),{recursive:true}));",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-escaped-dirent",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const D=require('os').homedir()+'/.tool/state';\nconst ns=fs.readdirSync(D,{withFileTypes:true});ns.filter(d=>{mutate(d);return true}).map(d=>fs.rmSync(path.join(D,d.name),{recursive:true}));",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-review-comprehension-scope",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.tool','state')\n[n for n in os.listdir(D)]\nshutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-review-before-loop",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.tool','state')\nshutil.rmtree(os.path.join(D,n))\nfor n in os.listdir(D):\n pass",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-review-shadowed-filter",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.tool','state')\ndef filter(a,b):\n return external\nfor n in filter(None,os.listdir(D)):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-review-api-replaced",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.tool','state')\nos.listdir=lambda d: external\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-review-aliased-mutation",
+      "lang": "py",
+      "text": "import os,shutil,pathlib\nD=os.path.join(os.path.expanduser('~'),'.tool','state')\nns=os.listdir(D)\nalias=ns\nalias[0]=external\nfor n in ns:\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-array-escape",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const D=require('os').homedir()+'/.tool/state';\nconst ns=fs.readdirSync(D);mutate(ns);ns.map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-further-traversal",
+      "lang": "js",
+      "text": "const fs=require('fs');const path=require('path');const D=require('os').homedir()+'/.tool/state';\nfs.readdirSync(D).map(n=>fs.rmSync(path.join(D,n,\"..\",\"..\",\"..\",\"Documents\"),{recursive:true}));",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-local-symlink",
+      "lang": "js",
+      "found": true,
+      "category": "review",
+      "text": "const fs=require('fs'),path=require('path'),os=require('os');const D=path.join(os.homedir(),'.tool','state');fs.symlinkSync(path.join(os.homedir(),'Documents'),path.join(D,'alias'),'dir');fs.readdirSync(D).map(n=>fs.rmSync(path.join(D,n,'notes'),{recursive:true}));"
+    },
+    {
+      "name": "py-review-local-symlink",
+      "lang": "py",
+      "found": true,
+      "category": "review",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nos.symlink(os.path.expanduser('~/Documents'),os.path.join(D,'alias'))\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(D,n,'notes'))\n"
+    },
+    {
+      "name": "js-promises-import",
+      "lang": "js",
+      "found": false,
+      "category": "listed",
+      "text": "import {readdir,rm} from 'node:fs/promises';import path from 'node:path';import os from 'node:os';const D=path.join(os.homedir(),'.tool','state');const names=await readdir(D);for(const n of names)await rm(path.join(D,n),{recursive:true});"
+    },
+    {
+      "name": "js-promises-import-protected",
+      "lang": "js",
+      "found": true,
+      "category": "listed",
+      "text": "import {readdir,rm} from 'node:fs/promises';import path from 'node:path';import os from 'node:os';const D=path.join(os.homedir(),'Documents','notes');const names=await readdir(D);for(const n of names)await rm(path.join(D,n),{recursive:true});"
+    },
+    {
+      "name": "js-review-third-argument",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';\nfs.readdirSync(D,{withFileTypes:true}).filter((d,i,a)=>{mutate(a[i]);return true}).map(d=>fs.rmSync(path.join(D,d.name),{recursive:true}));",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-third-argument-map",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';\nfs.readdirSync(D).map((n,i,a)=>{mutate(a);fs.rmSync(path.join(D,n),{recursive:true});});",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "py-review-closure-mutation",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nns=os.listdir(D)\ndef change():\n ns[0]=external\nfor n in filter(lambda n: change(),ns):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-cyclic",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=path.join(require('os').homedir(),'.tool',name);const names=fs.readdirSync(D);const name=names[i];fs.rmSync(D,{recursive:true});",
+      "found": true,
+      "category": "review"
+    },
+    {
+      "name": "js-review-direct-glob",
+      "lang": "js",
+      "found": true,
+      "category": "review",
+      "text": "const fs=require('fs'),glob=require('glob');const D=require('os').homedir()+'/.tool/state';glob.sync(D+'/*').map(p=>fs.rmSync(p,{recursive:true}));"
+    },
+    {
+      "name": "py-review-direct-glob",
+      "lang": "py",
+      "found": true,
+      "category": "review",
+      "text": "import os,glob,shutil\nD=os.path.expanduser('~/.tool/state')\nfor p in glob.glob(D+'/*'):\n shutil.rmtree(p)\n"
+    },
+    {
+      "name": "v2-js-conditional-api",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';const read=process.env.X?fs.readdirSync:()=>['../../Documents'];for(const n of read(D))fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-js-reassigned-api",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';let read=fs.readdirSync;read=()=>['../../Documents'];for(const n of read(D))fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-js-filter-third-arg",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';fs.readdirSync(D).filter((n,i,a)=>{a.splice(i+1,1,'../../Documents');return true}).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true
+    },
+    {
+      "name": "v2-py-reassigned-api",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nread=os.listdir\nread=lambda d:['../../Documents']\nfor n in read(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-keyword-escape",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nnames=os.listdir(D)\ndef mutate(*,values):\n values[0]='../../Documents'\nmutate(values=names)\nfor n in names:\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-global-closure-reassign",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nnames=os.listdir(D)\ndef mutate():\n global names\n names=['../../Documents']\nmutate()\nfor n in names:\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-keyword-api-override",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\ndef change(*,obj):\n obj.__dict__['listdir']=lambda d:['../../Documents']\nchange(obj=os)\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-js-native-alias-chain",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';const read=fs.readdirSync;const list=read;for(const n of list(D))fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-js-alias-before-replacement",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';let read=fs.readdirSync;const list=read;read=()=>['../../Documents'];for(const n of list(D))fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-js-module-reassigned-before-alias",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';let mod=fs;mod={readdirSync:()=>['../../Documents']};const read=mod.readdirSync;for(const n of read(D))fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-js-module-escape",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';const alias=fs;require('./opaque').change(alias);for(const n of fs.readdirSync(D))fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-js-native-callee-shadowed",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';function clean(fs){for(const n of fs.readdirSync(D))require('fs').rmSync(path.join(D,n),{recursive:true});}clean({readdirSync:()=>['../../Documents']});",
+      "found": true
+    },
+    {
+      "name": "v2-js-filter-rest",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';fs.readdirSync(D).filter((...args)=>{args[2].splice(1,1,'../../Documents');return true}).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true
+    },
+    {
+      "name": "v2-js-filter-arguments",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';fs.readdirSync(D).filter(function(n){arguments[2].splice(1,1,'../../Documents');return true}).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true
+    },
+    {
+      "name": "v2-js-filter-closure",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';const names=fs.readdirSync(D);names.filter(n=>{names.splice(1,1,'../../Documents');return true}).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true
+    },
+    {
+      "name": "v2-js-filter-helper",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';const names=fs.readdirSync(D);function mutate(a){a.splice(1,1,'../../Documents')}names.filter(n=>{mutate(names);return true}).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": true
+    },
+    {
+      "name": "v2-js-filter-readonly",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';fs.readdirSync(D).filter((n,i)=>n.length>0&&i>=0).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));",
+      "found": false
+    },
+    {
+      "name": "v2-py-native-alias-chain",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nread=os.listdir\nlisting=read\nfor n in listing(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": false
+    },
+    {
+      "name": "v2-py-alias-before-replacement",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nread=os.listdir\nlisting=read\nread=lambda d:['../../Documents']\nfor n in listing(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-native-import-alias",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nfrom os import listdir as listing\nfor n in listing(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": false
+    },
+    {
+      "name": "v2-py-escape-positional",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nnames=os.listdir(D)\ndef mutate(values):\n values[0]='../../Documents'\nmutate(names)\nfor n in names:\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-escape-star",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nnames=os.listdir(D)\ndef mutate(values):\n values[0]='../../Documents'\nmutate(*[names])\nfor n in names:\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-escape-kwargs",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nnames=os.listdir(D)\ndef mutate(values):\n values[0]='../../Documents'\nmutate(**{'values':names})\nfor n in names:\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-nonlocal-write",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\ndef clean():\n names=os.listdir(D)\n def mutate():\n  nonlocal names\n  names=['../../Documents']\n mutate()\n for n in names:\n  shutil.rmtree(os.path.join(D,n))\nclean()",
+      "found": true
+    },
+    {
+      "name": "v2-py-module-alias-kwargs",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nalias=os\ndef change(**kw):\n kw['obj'].__dict__['listdir']=lambda d:['../../Documents']\nchange(**{'obj':alias})\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-module-alias-positional",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nalias=os\ndef change(obj):\n obj.__dict__['listdir']=lambda d:['../../Documents']\nchange(alias)\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v2-py-list-shadow-is-local",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nnames=os.listdir(D)\ndef unrelated():\n names=[]\n names.append('x')\nfor n in names:\n shutil.rmtree(os.path.join(D,n))",
+      "found": false
+    },
+    {
+      "name": "v2-py-module-shadow-is-local",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\ndef unrelated(os):\n os=object()\nfor n in os.listdir(D):\n shutil.rmtree(os.path.join(D,n))",
+      "found": false
+    },
+    {
+      "name": "v2-py-filter-lambda-mutation",
+      "lang": "py",
+      "text": "import os,shutil\nD=os.path.expanduser('~/.tool/state')\nnames=os.listdir(D)\nfor n in filter(lambda n: names.__setitem__(0,'../../Documents') or True,names):\n shutil.rmtree(os.path.join(D,n))",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|global-in-function",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\ndef f():\n    global D\n    D = os.path.expanduser('~/Documents')\nf()\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|globals-subscript",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nglobals()['D'] = os.path.expanduser('~/Documents')\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|vars-subscript",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nvars()['D'] = os.path.expanduser('~/Documents')\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|sys-modules-attr",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nsys.modules[__name__].D = os.path.expanduser('~/Documents')\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|augassign",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nD += '/../../Documents'\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|annassign",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nD: str = os.path.expanduser('~/Documents')\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|walrus",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nif (D := os.path.expanduser('~/Documents')):\n    pass\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|tuple-assign",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nD, X = os.path.expanduser('~/Documents'), 1\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|with-as",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nimport contextlib\nwith contextlib.nullcontext(os.path.expanduser('~/Documents')) as D:\n    pass\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|import-as",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nimport docs_path as D\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|param-shadow",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\ndef clean(D):\n    for n in os.listdir(D):\n        shutil.rmtree(os.path.join(D, n))\nclean(os.path.expanduser('~/Documents'))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|param-shadow-default",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\ndef clean(D=os.path.expanduser('~/Documents')):\n    for n in os.listdir(D):\n        shutil.rmtree(os.path.join(D, n))\nclean()\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|comprehension-shadow",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\n[shutil.rmtree(os.path.join(D, n)) for D in [os.path.expanduser('~/Documents')] for n in os.listdir(D)]\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|lambda-shadow",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nlist(map(lambda D: [shutil.rmtree(os.path.join(D, n)) for n in os.listdir(D)], [os.path.expanduser('~/Documents')]))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|nested-def-shadow",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\ndef outer():\n    D = os.path.expanduser('~/Documents')\n    def inner():\n        for n in os.listdir(D):\n            shutil.rmtree(os.path.join(D, n))\n    inner()\nouter()\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|class-attr-shadow",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nclass K:\n    D = os.path.expanduser('~/Documents')\n    for n in os.listdir(D):\n        shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|except-as",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\ntry:\n    raise ValueError()\nexcept ValueError as D:\n    pass\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|del-and-redefine-in-func",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\ndef f():\n    global D\n    del D\n    D = os.path.expanduser('~/Documents')\nf()\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|nonlocal-D",
+      "lang": "py",
+      "text": "import os, shutil\ndef outer():\n    D = os.path.expanduser('~/.mytool/cache')\n    def g():\n        nonlocal D\n        D = os.path.expanduser('~/Documents')\n    g()\n    for n in os.listdir(D):\n        shutil.rmtree(os.path.join(D, n))\nouter()\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|setattr-module",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nsetattr(sys.modules[__name__], 'D', os.path.expanduser('~/Documents'))\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|exec-assign",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nexec(\"D = os.path.expanduser('~/Documents')\")\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|global-in-function-join-only",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nnames = os.listdir(D)\ndef f():\n    global D\n    D = os.path.expanduser('~/Documents')\nf()\nfor n in names:\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|star-import-shadow",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nfrom evil import *\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-py|path-div-global",
+      "lang": "py",
+      "text": "import os, shutil, sys\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\ndef f():\n    global D\n    D = os.path.expanduser('~/Documents')\nf()\nfor n in os.listdir(D):\n    shutil.rmtree(Path(D) / n)\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-js|block-shadow",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\n{const D=path.join(os.homedir(),'Documents');for (const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true,force:true});}\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-js|global-this",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nvar D=path.join(os.homedir(),'.mytool','cache');\nglobalThis.D=path.join(os.homedir(),'Documents');\nfor (const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true,force:true});\n",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-join-absolute-part",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');fs.rmSync(path.join('/home/example','/Documents'),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-resolve-control",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');fs.rmSync(path.resolve('/home/example','/Documents'),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-py-ntpath-drive-reset",
+      "lang": "py",
+      "text": "import ntpath,shutil\nshutil.rmtree(ntpath.join('C:/Users/example/.tool/state','C:/Users/example/Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-ntpath-other-drive-reset",
+      "lang": "py",
+      "text": "import ntpath,shutil\nshutil.rmtree(ntpath.join('C:/Users/example/.tool/state','D:/Users/example/Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-posix-absolute-control",
+      "lang": "py",
+      "text": "import os,shutil\nshutil.rmtree(os.path.join('/home/example','/Documents'))",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-join-5",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').join(\"/home/example\",\"/Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-join-6",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').join(\"/home/example/.tool/state\",\"~\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-join-7",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').join(\"/home/example/.tool/state\",\"../../Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-join-8",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').join(\"/home/example/.tool/state\",\"../state\",\"cache\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-posix.join-9",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').posix.join(\"/home/example\",\"/Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-posix.join-10",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').posix.join(\"/home/example/.tool/state\",\"~\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-posix.join-11",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').posix.join(\"/home/example/.tool/state\",\"../../Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-posix.join-12",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').posix.join(\"/home/example/.tool/state\",\"../state\",\"cache\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-win32.join-13",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').win32.join(\"/home/example\",\"/Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-win32.join-14",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').win32.join(\"/home/example/.tool/state\",\"~\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-win32.join-15",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').win32.join(\"/home/example/.tool/state\",\"../../Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-win32.join-16",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').win32.join(\"/home/example/.tool/state\",\"../state\",\"cache\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-py-ntpath-17",
+      "lang": "py",
+      "text": "import ntpath,shutil\nshutil.rmtree(ntpath.join('C:/Users/example/.tool/state','D:/Users/example/Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-ntpath-18",
+      "lang": "py",
+      "text": "import ntpath,shutil\nshutil.rmtree(ntpath.join('C:/Users/example/.tool/state','\\\\Users\\\\example\\\\Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-os.path-19",
+      "lang": "py",
+      "text": "import os.path,shutil\nshutil.rmtree(os.path.join('C:/Users/example/.tool/state','D:/Users/example/Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-os.path-20",
+      "lang": "py",
+      "text": "import os.path,shutil\nshutil.rmtree(os.path.join('C:/Users/example/.tool/state','\\\\Users\\\\example\\\\Documents'))",
+      "found": true
+    },
+    {
+      "name": "v3-directory-path-attribute-write",
+      "lang": "py",
+      "text": "import os, shutil\nfrom pathlib import Path\nD = Path('/home/example/.mytool/cache')\nD._str = '/home/example/Documents'\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D,n))\n",
+      "found": true
+    },
+    {
+      "name": "v3-directory-path-opaque-escape",
+      "lang": "py",
+      "text": "import os, shutil\nfrom pathlib import Path\nD = Path('/home/example/.mytool/cache')\nmutate(D)\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D,n))\n",
+      "found": true
+    },
+    {
+      "name": "independent-js-Function",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nFunction(\"require\",\"require('fs').readdirSync=()=>['../../Documents']\")(require);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-new-Function",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nnew Function(\"require\",\"require('fs').readdirSync=()=>['../../Documents']\")(require);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-Function-alias",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nconst F=Function; F(\"require\",\"require('fs').readdirSync=()=>['../../Documents']\")(require);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-function-constructor",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\n(function(){}).constructor(\"require\",\"require('fs').readdirSync=()=>['../../Documents']\")(require);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-constructor-alias",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nconst F=(()=>{}).constructor; F(\"require\",\"require('fs').readdirSync=()=>['../../Documents']\")(require);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-computed-constructor",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nconst key=\"con\"+\"structor\"; const F=(()=>{})[key]; F(\"require\",\"require('fs').readdirSync=()=>['../../Documents']\")(require);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-opaque-require",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nconst patch=require(\"./mutate\");patch(require);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-new-consumer-fs",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nnew Mutator(fs);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-new-consumer-path",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nnew Mutator(path);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-path-escape",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nmutate(path);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-os-escape",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nconst D=path.join(os.homedir(),'.mytool','cache');\nmutate(os);\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-os-homedir-replace",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\nos.homedir=()=>'/home/example/Documents';\nconst D=path.join(os.homedir(),'.mytool','cache');\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-js-path-normalize-replace",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path');\npath.normalize=()=>'/home/example/Documents';\nconst D=path.normalize('/home/example/.mytool/cache');\nfor(const n of fs.readdirSync(D)) fs.rmSync(path.join(D,n),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "independent-py-exec-alias-listdir",
+      "lang": "py",
+      "text": "import os, shutil\nD=os.path.join(os.path.expanduser('~'),'.mytool','cache')\nrun=exec\nrun(\"os.listdir=lambda _: ['../../Documents']\")\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D,n))\n",
+      "found": true
+    },
+    {
+      "name": "independent-py-eval-alias-listdir",
+      "lang": "py",
+      "text": "import os, shutil\nD=os.path.join(os.path.expanduser('~'),'.mytool','cache')\nrun=eval\nrun(\"setattr(os,'listdir',lambda _: ['../../Documents'])\")\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D,n))\n",
+      "found": true
+    },
+    {
+      "name": "independent-py-filter-string-predicate",
+      "lang": "py",
+      "text": "import os, shutil, sys, glob\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nfor n in filter(lambda x: x.startswith('a'), os.listdir(D)):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": false
+    },
+    {
+      "name": "independent-py-filter-opaque",
+      "lang": "py",
+      "text": "import os, shutil, sys, glob\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nfor n in filter(lambda x: mutate(x), os.listdir(D)):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "independent-py-filter-namespace",
+      "lang": "py",
+      "text": "import os, shutil, sys, glob\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nfor n in filter(lambda x: setattr(os, 'listdir', replacement) or True, os.listdir(D)):\n    shutil.rmtree(os.path.join(D, n))\n",
+      "found": true
+    },
+    {
+      "name": "v4-root-js|userinfo||join-slash|rmSync",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path'),cp=require('child_process');\nfs.rmSync((path.join(os.userInfo().homedir, \"/\")), {recursive: true, force: true});\n",
+      "found": true
+    },
+    {
+      "name": "v4-root-js|env-XDG_CONFIG_HOME||join-slash|rmSync",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path'),cp=require('child_process');\nfs.rmSync((path.join(process.env.XDG_CONFIG_HOME, \"/\")), {recursive: true, force: true});\n",
+      "found": true
+    },
+    {
+      "name": "v4-root-js|env-XDG_DATA_HOME||join-slash|rmSync",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path'),cp=require('child_process');\nfs.rmSync((path.join(process.env.XDG_DATA_HOME, \"/\")), {recursive: true, force: true});\n",
+      "found": true
+    },
+    {
+      "name": "v4-userinfo-own-cache",
+      "lang": "js",
+      "text": "const os=require('os'),fs=require('fs'),path=require('path');fs.rmSync(path.join(os.userInfo().homedir,'.tool/cache'),{recursive:true});",
+      "found": false
+    }
+  ]
+}

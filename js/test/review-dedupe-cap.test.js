@@ -4,7 +4,8 @@
 // `try{}catch(e){}` x 130,000. Shared semantics (twin of core.cap_issues):
 // findings identical on (rule, file, line, msg) are reported once (every
 // rule, security rules too, before the cap); every non-security rule
-// (not S-, T-, SC-, X-, SQL-) is capped at 200 per file with one Q-CAPPED.
+// (not S-, T-, SC-, X-, SQL-) is capped at 200 per file with one Q-CAPPED. The cap is the engine's
+// (findings.rs), for every file this package scans.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,7 +13,6 @@ import { mkdtempSync, writeFileSync, readFileSync, statSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scanFile, run } from "../src/index.js";
-import { dedupeIssues } from "../src/scanner/scan.js";
 
 const count = (issues, rule) => issues.filter((i) => i.rule === rule).length;
 const cappedMsgs = (issues) => issues.filter((i) => i.rule === "Q-CAPPED").map((i) => i.msg).sort();
@@ -67,15 +67,4 @@ test("findings with different messages on one line are kept", () => {
     [1, "SQL query built with .format()/f-string into execute()."],
     [2, "SQL query built with %-interpolation into execute()."],
   ]);
-});
-
-test("dedupeIssues keys on (rule, file, line, msg) and keeps the first", () => {
-  const issue = (o = {}) => ({ rule: "T-CMD", file: "a.py", line: 3, msg: "m1", snippet: ["x"], ...o });
-  const first = issue({ snippet: ["first"] });
-  const kept = dedupeIssues([first, issue({ snippet: ["second"] }), issue({ msg: "m2" }), issue({ line: 4 }),
-    issue({ file: "b.py" }), issue({ rule: "T-CODE" }), issue({ msg: "m2" })]);
-  assert.equal(kept[0], first);
-  assert.deepEqual(kept.map((i) => [i.rule, i.file, i.line, i.msg]), [
-    ["T-CMD", "a.py", 3, "m1"], ["T-CMD", "a.py", 3, "m2"], ["T-CMD", "a.py", 4, "m1"],
-    ["T-CMD", "b.py", 3, "m1"], ["T-CODE", "a.py", 3, "m1"]]);
 });

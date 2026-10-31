@@ -6,25 +6,29 @@
 //! becomes the set of text characters it accepts (charset.rs), each anchor
 //! the position test it compiles to, each lookaround either a test of the
 //! one character before or after the position (`(?<![\w$.])`, `(?=\()`) or
-//! a sub-pattern of bounded width tried at the position.
+//! a sub-pattern tried at the position (a lookahead wider than `MAX_LOOK`,
+//! of unbounded width included, with its walks memoized: looks.rs).
+//!
+//! A backreference to a group of one character of a few, none of them
+//! cased (`(["'])…\1`: a quote matched again) is run as one branch per
+//! character (`expand_backrefs`): exact, with the group numbers kept.
 //!
 //! Refused, with the reason, because a linear-time matcher cannot run them
 //! or cannot run them as sre does:
-//! - backreferences and conditionals (they need what a group matched);
-//! - a lookahead of unbounded width (trying it costs up to the rest of the
-//!   text at every position);
+//! - other backreferences, and conditionals (they need what a group matched);
 //! - a repeat whose body can match the empty string, other than `?` (sre
 //!   stops such a loop by rules of its own: zero-width iteration checks);
 //! - a capturing group inside a positive lookaround;
 //! - atomic groups, possessive repeats, `\N{…}`, the TEMPLATE flag;
-//! - a program too large (counted repeats are expanded) or a lookaround
+//! - a program too large (counted repeats are expanded) or a lookbehind
 //!   wider than `MAX_LOOK`.
 
 use super::charset::{self, CharSet, Fold};
 use super::syntax::{self, At, Error, Node, RepKind, MAXREPEAT};
 use std::collections::HashMap;
 
-/// A lookaround wider than this is refused.
+/// A lookbehind wider than this is refused; a lookahead that may read
+/// further is walked with a memo (looks.rs).
 pub const MAX_LOOK: u64 = 1000;
 /// Lookarounds nested deeper than this are refused.
 const MAX_LOOK_NEST: usize = 8;
@@ -264,11 +268,9 @@ impl Lower {
                     if lo != hi {
                         return Err(Error::Syntax("look-behind requires fixed-width pattern".into()));
                     }
-                } else if hi >= MAXREPEAT {
-                    return refuse("a lookahead of unbounded width");
-                }
-                if hi > MAX_LOOK {
-                    return refuse("a lookaround wider than 1000 characters");
+                    if hi > MAX_LOOK {
+                        return refuse("a lookbehind wider than 1000 characters");
+                    }
                 }
                 if !*negate && has_group(body) {
                     return refuse("a capturing group inside a positive lookaround");
@@ -329,8 +331,225 @@ fn strip_groups(h: Hir) -> Hir {
 /// Lower a parsed pattern.
 pub fn lower(p: &syntax::Parsed) -> Result<Lowered, Error> {
     let mut l = Lower { sets: Vec::new(), set_ids: HashMap::new(), looks: Vec::new(), look_nest: 0 };
-    let hir = l.lower(&p.node, p.flags)?;
+    let node = expand_backrefs(&p.node, p.flags);
+    let hir = l.lower(&node, p.flags)?;
     Ok(Lowered { hir, sets: l.sets, looks: l.looks })
+}
+
+// ------------------------------------------- backreferences to a character
+
+/// Characters a backreferenced group may have to be run as branches.
+const MAX_BACKREF_CHARS: usize = 8;
+
+fn children(n: &Node) -> Vec<&Node> {
+    match n {
+        Node::Group(_, _, _, b) | Node::Atomic(b) | Node::Look { body: b, .. } | Node::Repeat { body: b, .. } => vec![b],
+        Node::Seq(v) | Node::Alt(v) => v.iter().collect(),
+        Node::Cond { yes, no, .. } => {
+            let mut v: Vec<&Node> = vec![yes];
+            if let Some(n) = no {
+                v.push(n);
+            }
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The paths (child indices from `n`) of the nodes `want` picks.
+fn paths_to(n: &Node, want: &dyn Fn(&Node) -> bool, path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+    if want(n) {
+        out.push(path.clone());
+    }
+    for (k, c) in children(n).into_iter().enumerate() {
+        path.push(k);
+        paths_to(c, want, path, out);
+        path.pop();
+    }
+}
+
+fn node_at<'a>(n: &'a Node, path: &[usize]) -> &'a Node {
+    path.iter().fold(n, |n, &k| children(n)[k])
+}
+
+fn node_at_mut<'a>(n: &'a mut Node, path: &[usize]) -> &'a mut Node {
+    let mut n = n;
+    for &k in path {
+        n = match n {
+            Node::Group(_, _, _, b) | Node::Atomic(b) | Node::Look { body: b, .. } | Node::Repeat { body: b, .. } => b,
+            Node::Seq(v) | Node::Alt(v) => &mut v[k],
+            Node::Cond { yes, no, .. } => {
+                if k == 0 {
+                    yes
+                } else {
+                    no.as_mut().expect("a path through a conditional's no")
+                }
+            }
+            _ => unreachable!("a path below a leaf"),
+        };
+    }
+    n
+}
+
+/// The flags in force at the end of `path` (its groups' own over the
+/// pattern's), and at the node itself when it is a group.
+fn flags_along(n: &Node, path: &[usize], flags: u32, inside_last: bool) -> u32 {
+    let mut f = flags;
+    let mut n = n;
+    for (i, &k) in path.iter().enumerate() {
+        if let Node::Group(_, add, del, _) = n {
+            f = combine(f, *add, *del);
+        }
+        n = children(n)[k];
+        let _ = i;
+    }
+    if inside_last {
+        if let Node::Group(_, add, del, _) = n {
+            f = combine(f, *add, *del);
+        }
+    }
+    f
+}
+
+/// The characters of a group's body when it is one character item of a
+/// few, none of them cased under the flags of the group and of each of its
+/// backreferences: each matches itself alone.
+fn backref_chars(body: &Node, group_flags: u32, ref_flags: &[u32]) -> Option<Vec<u32>> {
+    let set = match body {
+        Node::Lit(c) => charset::literal_set(*c, false, fold_of(group_flags)),
+        Node::Class(items, false) => charset::class_set(items, false, fold_of(group_flags), group_flags & syntax::FLAG_UNICODE == 0),
+        Node::Seq(v) if v.len() == 1 => return backref_chars(&v[0], group_flags, ref_flags),
+        Node::Group(None, add, del, b) => return backref_chars(b, combine(group_flags, *add, *del), ref_flags),
+        _ => return None,
+    };
+    let chars = set.chars_upto(MAX_BACKREF_CHARS)?;
+    for &c in &chars {
+        for &f in std::iter::once(&group_flags).chain(ref_flags) {
+            if charset::literal_set(c, false, fold_of(f)).single() != Some(c) {
+                return None;
+            }
+        }
+    }
+    Some(chars)
+}
+
+/// Every backreference to group `g` read as `c`, and the group's body made
+/// `c` (its capture kept).
+fn put_char(n: &mut Node, g: usize, c: u32) {
+    match n {
+        Node::Backref(r) if *r == g => *n = Node::Lit(c),
+        Node::Group(Some(k), _, _, b) if *k == g => **b = Node::Lit(c),
+        Node::Group(_, _, _, b) | Node::Atomic(b) | Node::Look { body: b, .. } | Node::Repeat { body: b, .. } => put_char(b, g, c),
+        Node::Seq(v) | Node::Alt(v) => v.iter_mut().for_each(|x| put_char(x, g, c)),
+        Node::Cond { yes, no, .. } => {
+            put_char(yes, g, c);
+            if let Some(n) = no {
+                put_char(n, g, c);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One group's backreferences run as branches, when they can be: the
+/// group is one character of a few, uncased (`backref_chars`), it sits at
+/// the head of an item of the innermost sequence holding it and its
+/// backreferences (through groups only: so it always matches when that
+/// item does), and every backreference is in a later item. Items i..=j of
+/// that sequence become one alternative per character c, the group made c
+/// and each backreference c. At a given position the alternatives begin
+/// with different characters, so at most one goes on: they take sre's
+/// path, with the same spans and groups.
+fn expand_one(root: &mut Node, g: usize, flags: u32) -> bool {
+    let mut gpaths = Vec::new();
+    paths_to(root, &|n| matches!(n, Node::Group(Some(k), ..) if *k == g), &mut Vec::new(), &mut gpaths);
+    let mut rpaths = Vec::new();
+    paths_to(root, &|n| matches!(n, Node::Backref(k) if *k == g), &mut Vec::new(), &mut rpaths);
+    let gpath = match gpaths.as_slice() {
+        [p] => p.clone(),
+        _ => return false,
+    };
+    if rpaths.is_empty() {
+        return false;
+    }
+    // the innermost node holding the group and every backreference
+    let mut lca = 0usize;
+    while lca < gpath.len() && rpaths.iter().all(|r| r.len() > lca && r[lca] == gpath[lca]) {
+        lca += 1;
+    }
+    let seq_path = &gpath[..lca];
+    let len = match node_at(root, seq_path) {
+        Node::Seq(v) => v.len(),
+        _ => return false,
+    };
+    let i = gpath[lca];
+    let j = match rpaths.iter().map(|r| r[lca]).max() {
+        Some(j) => j,
+        None => return false,
+    };
+    if rpaths.iter().any(|r| r[lca] <= i) || j >= len {
+        return false;
+    }
+    // from item i down to the group: groups (and one-item sequences) only,
+    // each the head of the one above
+    let mut n = node_at(root, &gpath[..=lca]);
+    for &k in &gpath[lca + 1..] {
+        match n {
+            Node::Group(..) if k == 0 => {}
+            Node::Seq(_) if k == 0 => {}
+            _ => return false,
+        }
+        n = children(n)[k];
+    }
+    let body = match n {
+        Node::Group(Some(_), _, _, b) => b,
+        _ => return false,
+    };
+    let group_flags = flags_along(root, &gpath, flags, true);
+    let ref_flags: Vec<u32> = rpaths.iter().map(|r| flags_along(root, r, flags, false)).collect();
+    let chars = match backref_chars(body, group_flags, &ref_flags) {
+        Some(c) => c,
+        None => return false,
+    };
+    let seq = match node_at_mut(root, seq_path) {
+        Node::Seq(v) => v,
+        _ => return false,
+    };
+    let items: Vec<Node> = seq.drain(i..=j).collect();
+    let branches = chars
+        .iter()
+        .map(|&c| {
+            let mut copy = Node::Seq(items.clone());
+            put_char(&mut copy, g, c);
+            copy
+        })
+        .collect();
+    seq.insert(i, Node::Alt(branches));
+    true
+}
+
+/// The pattern with each backreference linre can run (see `expand_one`)
+/// read as branches; any other is left for `lower` to refuse.
+fn expand_backrefs(node: &Node, flags: u32) -> Node {
+    let mut refs = Vec::new();
+    paths_to(node, &|n| matches!(n, Node::Backref(_)), &mut Vec::new(), &mut refs);
+    if refs.is_empty() {
+        return node.clone();
+    }
+    let mut groups: Vec<usize> = refs
+        .iter()
+        .filter_map(|p| match node_at(node, p) {
+            Node::Backref(g) => Some(*g),
+            _ => None,
+        })
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    let mut out = node.clone();
+    for g in groups {
+        expand_one(&mut out, g, flags);
+    }
+    out
 }
 
 /// (min, max) width of a lowered sub-pattern, in characters (None: unbounded).

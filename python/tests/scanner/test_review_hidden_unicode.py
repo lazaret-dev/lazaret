@@ -6,7 +6,7 @@ tag characters (U+E0000-E007F) smuggle instructions past a reviewer and an AI
 alike. A run of two or more such invisible characters in code is
 SC-HIDDEN-UNICODE: CRITICAL when the file also runs code from a string (the
 GlassWorm shape), else MAJOR. A flag emoji (U+1F3F4 + tag letters + U+E007F)
-and a lone emoji variation selector (U+FE0F) are left alone.
+and a lone emoji variation selector (U+FE0F), or one repeated up to four times (N-23), are left alone.
 
 The invisible characters are built at run time so this file stays ASCII. The
 npm engine's twin: js/test/review-hidden-unicode.test.js.
@@ -65,6 +65,19 @@ class HiddenUnicodeTests(unittest.TestCase):
         ]:
             with self.subTest(text=text):
                 self.assertEqual(found(text, lang), [])
+
+    def test_an_emojis_presentation_selector_repeated_carries_nothing(self):
+        # N-23: U+2622 and U+FE0F twice in aes 0.9.3's hazmat.rs, U+2620 U+FE0F, a space and U+FE0F three times in
+        # aws-lc-rs: one character repeated is no data (GlassWorm's encoding is a run of many different selectors)
+        for text in ("// \u2622\ufe0f\ufe0f hazmat\n", "// \u2620\ufe0f \ufe0f\ufe0f\ufe0f\n",
+                     "x = '\u2600\ufe0e\ufe0e'\n", "x = '" + "\ufe0f" * 4 + "'\n"):
+            with self.subTest(text=text):
+                self.assertEqual(found(text), [])
+        # more than four times, two different ones, or another selector repeated: still a carrier
+        for text in ("x = `" + "\ufe0f" * 5 + "`;\n", "x = `\ufe0e\ufe0f`;\n", "x = `\ufe00\ufe00`;\n",
+                     "x = `\ufe0f\ufe0f" + vs(b"hi") + "`;\n"):
+            with self.subTest(text=text):
+                self.assertEqual([f[0] for f in found(text)], ["MAJOR"])
 
     def test_reported_in_code_points_not_utf16(self):
         # the astral tag/VS-supplement chars are counted as one each (not two)
