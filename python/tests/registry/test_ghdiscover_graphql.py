@@ -1491,6 +1491,24 @@ class UrllibPostTests(unittest.TestCase):
                 self.assertEqual(str(caught.exception), "w: no answer within 0.2 s")
                 self.assertLess(took, 0.2 + ALLOWANCE, f"{took:.3f} s")
 
+    def test_a_read_cut_to_the_time_left_timing_out_is_the_deadline(self):
+        # (Windows CI, stack8: the socket read's timeout, cut to the time left by
+        # netaddr.open_socket when the connection was made, fired just before the
+        # deadline's watchdog; guard._Deadline's rule — a timeout of a call cut to
+        # the time left is the deadline's — must make the deadline's message win)
+        import urllib.error
+        for raised in (TimeoutError("timed out"), urllib.error.URLError(TimeoutError("timed out"))):
+            with self.subTest(raised=type(raised).__name__):
+                def opener(guard, raised=raised):
+                    class Cut:
+                        def open(self, req, timeout=None):
+                            raise raised
+                    return Cut()
+                with mock.patch.object(sources, "_post_opener", opener):
+                    with self.assertRaises(SourceError) as caught:
+                        self.post(self.scripts.url + "/fast", seconds=5.0)
+                self.assertEqual(str(caught.exception), "w: no answer within 5 s")
+
     def test_the_byte_budget(self):
         unsaid = Recorder(body=b"x" * (300 * 1024), length=NO_LENGTH)
         self.addCleanup(unsaid.close)
