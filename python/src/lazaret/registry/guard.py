@@ -720,6 +720,8 @@ class Fetcher:
             host, loc = (parts.hostname or "").lower(), parts.netloc.rpartition("@")[2].lower()
         except ValueError as exc:
             raise repo.FetchError(f"unparseable URL {pmsettings.shown(url)!r}") from exc
+        if redirect and (parts.username is not None or parts.password is not None):
+            raise repo.FetchError("a redirect URL must not contain credentials")
         plain_ok = parts.scheme == "http" and (_is_loopback(host) or loc in self.http_hosts or host in self.http_hosts)
         if parts.scheme != "https" and not plain_ok:
             raise repo.FetchError(f"only https is fetched (or http on this machine): {pmsettings.shown(url)}")
@@ -766,6 +768,7 @@ class Fetcher:
                     fp.close()                              # (the redirect's response: nothing more is read of it)
                     raise
                 except repo.FetchError as exc:
+                    fp.close()
                     raise urllib.error.URLError(f"redirect blocked: {exc}")
                 new = super().redirect_request(req, fp, code, msg, headers, newurl)
                 header = fetcher.auth.header(newurl, from_url=req.full_url) if new is not None else None

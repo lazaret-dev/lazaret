@@ -95,6 +95,16 @@ class Server:
                     self.close_connection = True
                 elif p == "/redirect":
                     self.send(int(query.get("code", ["302"])[0]), b"moved", [("Location", query["to"][0])])
+                elif p.startswith("/userinfo/"):
+                    _empty, _route, code, shape = p.split("/")
+                    authority = f"127.0.0.1:{outer.port}"
+                    locations = {
+                        "absolute": f"http://redirect-user:redirect-secret@{authority}/echo",
+                        "relative": f"//redirect-user:redirect-secret@{authority}/echo",
+                        "username": f"http://redirect-user@{authority}/echo",
+                        "encoded": f"http://redirect%2Duser:redirect%2Dsecret@{authority}/echo",
+                    }
+                    self.send(int(code), b"moved", [("Location", locations[shape])])
                 elif p == "/loop":
                     self.send(302, b"moved", [("Location", "/loop")])
                 elif p == "/noloc":
@@ -986,6 +996,22 @@ class RedirectTests(unittest.TestCase):
             self.f.get(self.redirect("http://evil.example/ok"))
         with self.assertRaisesRegex(repo.FetchError, "redirect blocked"):
             self.f.get(self.redirect("file:///etc/passwd"))
+
+    def test_redirect_introduced_userinfo_is_refused_before_the_target_request(self):
+        for keepalive in (False, True):
+            f = fetcher(self.server, self, keepalive=keepalive)
+            for code in (301, 302, 303, 307, 308):
+                for shape in ("absolute", "relative", "username", "encoded"):
+                    path = f"/userinfo/{code}/{shape}"
+                    self.server.log.clear()
+                    with self.subTest(keepalive=keepalive, code=code, shape=shape), \
+                            self.assertRaises(repo.FetchError) as caught:
+                        f.get(self.server.url + path)
+                    message = str(caught.exception)
+                    self.assertIn("redirect blocked: a redirect URL must not contain credentials", message)
+                    self.assertNotIn("redirect-user", message)
+                    self.assertNotIn("redirect-secret", message)
+                    self.assertEqual([seen for seen, _headers in self.server.log], [path])
 
     def test_the_number_of_hops_is_capped(self):
         self.f.allow(self.other.url)
