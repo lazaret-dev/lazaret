@@ -599,7 +599,7 @@ class _RegistryOpener(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_RegistryOpener, _net.HTTPSHandler())   # (TLS 1.2 at least: nativenet.TLS_FLOOR)
+_OPENER = _net.build_opener(_RegistryOpener, _net.HTTPSHandler())   # (TLS 1.2 at least: nativenet.TLS_FLOOR)
 
 
 def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=None,
@@ -703,7 +703,7 @@ class _ModuleRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def _module_opener(check):
-    return urllib.request.build_opener(_ModuleRedirects(check), _net.HTTPSHandler())
+    return _net.build_opener(_ModuleRedirects(check), _net.HTTPSHandler())
 
 
 def module_transport(url, max_bytes=MAX_DOWNLOAD_BYTES, accept=None, timeout=DOWNLOAD_TIMEOUT,

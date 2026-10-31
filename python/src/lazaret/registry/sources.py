@@ -292,7 +292,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
             if 200 <= reply.status < 300:
                 return reply.body
             raise _refused(reply.status, reply.headers, url, what, has_token, kind)
-    opener = urllib.request.build_opener(_Hop(hosts, auth_host, auth_path), _net.HTTPSHandler())
+    opener = _net.build_opener(_Hop(hosts, auth_host, auth_path), _net.HTTPSHandler())
     req = urllib.request.Request(url, headers=headers)
     try:
         with opener.open(req, timeout=_repo.DOWNLOAD_TIMEOUT) as r:
@@ -374,7 +374,7 @@ def _post_opener(guard):
     watched within a request's deadline (F-07); its HTTPS one is nativenet's, TLS_FLOOR and all (the TLS floor's
     check reads this list: tests/scanner/test_tls_floor.py)."""
     handlers = [_NoRedirect(), guard._HTTPHandler(), guard._HTTPSHandler()]
-    return urllib.request.build_opener(*handlers)
+    return _net.build_opener(*handlers)
 
 
 def _post_urllib(url, headers, data, max_bytes, what, has_token, kind, reply_headers, deadline, timeout, guard):

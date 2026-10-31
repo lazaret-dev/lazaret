@@ -184,7 +184,7 @@ class _HTTPSHandler(nativenet.HTTPSHandler):
 
 
 _HANDLERS = [_HttpsRedirects, _HTTPSHandler()]                                    # (TLS 1.2 at least: nativenet's)
-_OPENER = urllib.request.build_opener(*_HANDLERS)
+_OPENER = nativenet.build_opener(*_HANDLERS)
 #: (tests) socket.getaddrinfo's stand-in, and (host, address) -> the address judged in its place, for the hops of a
 #: feed's download (netaddr.Hops); None: neither
 _LOOKUP = _PEER = None

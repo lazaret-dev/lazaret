@@ -978,7 +978,7 @@ class FeedDownloadTests(_ServerCase):
         """sca_feeds' opener, built again in this test's environment: urllib's ProxyHandler reads the proxy settings
         when it is made, and the module's was made with the environment the tests started in; its HTTPS handler keeps
         the context its first request made (this test's root)."""
-        opener = urllib.request.build_opener(sca_feeds._HttpsRedirects, sca_feeds._HTTPSHandler())
+        opener = nativenet.build_opener(sca_feeds._HttpsRedirects, sca_feeds._HTTPSHandler())
         patch = mock.patch.object(sca_feeds, "_OPENER", opener)
         patch.start()
         self.addCleanup(patch.stop)

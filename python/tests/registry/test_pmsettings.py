@@ -68,6 +68,19 @@ class CredentialsTests(unittest.TestCase):
         self.assertEqual(pm.split_userinfo("https://h.example/x"), ("https://h.example/x", None))
         self.assertEqual(pm.shown("https://token@h.example/x"), "https://h.example/x")
 
+    def test_printed_urls_drop_query_values_and_fragments(self):
+        url = "https://user:password@h.example:8443/pkg?X-Amz-Signature=query-canary&unknown=opaque#fragment-canary"
+        self.assertEqual(pm.shown(url), "https://h.example:8443/pkg [query redacted]")
+        self.assertEqual(pm.shown("https://h.example/pkg#fragment-canary"), "https://h.example/pkg")
+        self.assertEqual(pm.shown("https://h.example/pkg?"), "https://h.example/pkg [query redacted]")
+        self.assertIsNone(pm.shown(None))
+
+    def test_a_malformed_url_still_does_not_show_userinfo_or_a_query(self):
+        shown = pm.shown("https://user:password@[broken/pkg?token=query-canary#fragment-canary")
+        self.assertEqual(shown, "https://[broken/pkg [query redacted]")
+        for secret in ("user", "password", "query-canary", "fragment-canary"):
+            self.assertNotIn(secret, shown)
+
 
 #: one host's npm keys, and the key each request path gets: the same table is in lazaret-net's tests
 #: (`the_choice_of_a_path_is_pmsettings_choice`), which ask `granted` the same questions
