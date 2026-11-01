@@ -235,9 +235,23 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(len({f.signature for f in report["findings"]}), 3)
 
     def test_a_run_over_the_limit_is_a_slow_finding_and_the_slowest_is_kept(self):
+        # Which input is kept is a comparison of two measured times, and the clock is the runner's: a scheduling
+        # pause inside the smaller sleep made the first seed measure the slower on a shared macOS runner, the
+        # wrong input was kept and one leg of the python-unit matrix failed per run (PR #21, macos/3.10, run
+        # 41159538375; PR #20, byte-identical, macos/3.13 instead -- the leg rotates, the pause is random; the
+        # log: tests/architecture/test_fuzz_scripts.py, b'S' kept over b'SS'). So the run advances a clock the
+        # test holds, as the corpus test pins SLOW_FLOOR: what is kept is a function of the times the driver is
+        # given, which no pause can reorder, and the seeds still say 0.03 s, 0.06 s and nothing over a 0.01 s
+        # limit.
+        class clock:
+            perf_counter = monotonic = lambda self: self.now      # noqa: E731
+            now = 0.0
+        held = clock()
+
         def run(data):
-            time.sleep(0.03 * data.count(b"S"))
-        report = driver.fuzz_target(fake(run, seeds=(b"S", b"SS", b"abc")), iterations=0, time_limit=0.01, minimize=False)
+            held.now += 0.03 * data.count(b"S")
+        with mock.patch.object(driver, "time", held):
+            report = driver.fuzz_target(fake(run, seeds=(b"S", b"SS", b"abc")), iterations=0, time_limit=0.01, minimize=False)
         (finding,) = report["findings"]
         self.assertEqual((finding.kind, finding.signature, finding.data), ("slow", "slow", b"SS"))
         self.assertGreater(finding.seconds, 0.05)
@@ -248,6 +262,32 @@ class DriverTests(unittest.TestCase):
             time.sleep(0.03 * data.count(b"S"))
         report = driver.fuzz_target(fake(run, seeds=(b"xxSxx",)), iterations=0, time_limit=0.01)
         self.assertEqual(report["findings"][0].data, b"S")
+
+    def test_a_pause_in_one_run_cannot_make_the_wrong_slow_finding_win(self):
+        # What the slow-finding rule keeps is decided by the times the runs measure, not by when the runner
+        # happened to schedule them: a scheduling pause inside the first seed's 0.03 s sleep made it measure
+        # the slower on a shared macOS runner and the wrong input was kept, one python-unit macOS leg failing
+        # per CI run (PR #20 and #21, 2026-10-31, 0.1.9). The runs here advance a clock the test holds, so
+        # the rule is checked in both orders -- the larger input the slower, and a run that measures a pause
+        # -- without depending on when anything is scheduled.
+        class clock:
+            perf_counter = monotonic = lambda self: self.now      # noqa: E731
+            now = 0.0
+
+        def fuzz(times):
+            held = clock()
+
+            def run(data):
+                held.now += times[data]
+            with mock.patch.object(driver, "time", held):
+                return driver.fuzz_target(fake(run, seeds=(b"S", b"SS", b"abc")), iterations=0,
+                                          time_limit=0.01, minimize=False)
+        # 0.03 s, 0.06 s and a clean seed: the 0.06 s input is kept, the case the old assertion meant
+        (finding,) = fuzz({b"S": 0.03, b"SS": 0.06, b"abc": 0.001})["findings"]
+        self.assertEqual((finding.kind, finding.data, finding.seconds), ("slow", b"SS", 0.06))
+        # a run that measures a pause is the slowest there was: the rule keeps it, as it did on the runner
+        (finding,) = fuzz({b"S": 0.45, b"SS": 0.06, b"abc": 0.001})["findings"]
+        self.assertEqual((finding.data, finding.seconds), (b"S", 0.45))
 
     def test_the_time_limit_is_the_targets_unless_given(self):
         run = lambda data: time.sleep(0.03)             # noqa: E731
