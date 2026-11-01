@@ -324,7 +324,10 @@ class CheckCrateTests(CrateCase):
 class AgeTests(CrateCase):
     def setUp(self):
         super().setUp()
-        clock = mock.patch.object(guard, "now", return_value=cs.NOW)
+        # The fake crates.io API deliberately emits fractional seconds as
+        # .123456.  Use that same precision for the frozen clock: otherwise
+        # the process-start microsecond can turn an exact hour into 59 minutes.
+        clock = mock.patch.object(guard, "now", return_value=cs.NOW.replace(microsecond=123456))
         clock.start()
         self.addCleanup(clock.stop)
 
