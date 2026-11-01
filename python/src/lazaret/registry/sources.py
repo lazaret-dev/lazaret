@@ -292,7 +292,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
             if 200 <= reply.status < 300:
                 return reply.body
             raise _refused(reply.status, reply.headers, url, what, has_token, kind)
-    opener = urllib.request.build_opener(_Hop(hosts, auth_host, auth_path), _net.HTTPSHandler())
+    opener = _net.build_opener(_Hop(hosts, auth_host, auth_path), _net.HTTPSHandler())
     req = urllib.request.Request(url, headers=headers)
     try:
         with opener.open(req, timeout=_repo.DOWNLOAD_TIMEOUT) as r:
@@ -374,7 +374,7 @@ def _post_opener(guard):
     watched within a request's deadline (F-07); its HTTPS one is nativenet's, TLS_FLOOR and all (the TLS floor's
     check reads this list: tests/scanner/test_tls_floor.py)."""
     handlers = [_NoRedirect(), guard._HTTPHandler(), guard._HTTPSHandler()]
-    return urllib.request.build_opener(*handlers)
+    return _net.build_opener(*handlers)
 
 
 def _post_urllib(url, headers, data, max_bytes, what, has_token, kind, reply_headers, deadline, timeout, guard):
@@ -818,9 +818,16 @@ class _Writer:
         if why is not None:
             return None, why
         folder, name = "/".join(parts[:-1]), parts[-1]
+        path = os.path.join(self.trees[k], *parts)
         try:
-            out = open(os.path.join(self.trees[k], *parts), "xb")
+            out = open(path, "xb")
         except (FileExistsError, IsADirectoryError):
+            return None, self._why(k, folder, name, is_folder=False)
+        except PermissionError:
+            # (Windows: a file where its disk has a folder of that name, `A` beside `a/`, is "access denied" there,
+            # not EEXIST: it was not written at all, where a twin tree keeps it)
+            if not os.path.isdir(path):
+                raise
             return None, self._why(k, folder, name, is_folder=False)
         self.entries[k].setdefault(folder, {})[name] = ("/".join(parts), False)
         return out, None

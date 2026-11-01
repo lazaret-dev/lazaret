@@ -70,7 +70,8 @@ pub use runtime::{
 };
 
 use crate::tls::server::ServerStream;
-use crate::tls::Duplex;
+use crate::tls::server_split::{ServerReadHalf, ServerWriteHalf};
+use crate::tls::{Duplex, Linger};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -223,7 +224,7 @@ impl TlsInfo {
 }
 
 /// A socket the server can run a connection on: TCP, or a Unix socket.
-pub trait Socket: Duplex + Send + 'static {
+pub trait Socket: Duplex + Linger + Send + 'static {
     /// Sets the socket's read timeout.
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     /// Sets the socket's write timeout.
@@ -310,6 +311,56 @@ impl<S: Socket> Transport for Tls<S> {
     fn linger(&mut self) {
         let _ = self.0.close();
         runtime::linger(self.0.get_mut());
+    }
+}
+
+/// The reading side of an HTTP/2 connection, which can also, once a GOAWAY has ended the connection with an error, stop
+/// the sending side and read what the client is still sending, a little ([`runtime::linger`]).
+pub(crate) trait Inbound: Read + Send {
+    fn linger(&mut self);
+}
+
+impl<S: Socket> Inbound for S {
+    fn linger(&mut self) {
+        runtime::linger(self);
+    }
+}
+
+/// The writing half of an HTTP/2 connection: what it sends, and the end of it.
+pub(crate) trait Outbound: Write + Send {
+    /// Ends what is sent, after everything written so far (B-120): a TLS close_notify, then the sending side of the
+    /// socket is shut, so that the client reads the end (a FIN) after the last byte. The reading side stays open: the
+    /// connection is read until the client ends it, as closing with its bytes unread, or with more of them to come,
+    /// makes the system reset the connection and throw away what it has not sent yet.
+    fn finish(&mut self);
+
+    /// Tests: the sender has looked at the engine for the last time, holding the right to send, and found our side
+    /// `finished` or not; a test's writer can hold it here, as another thread changes the engine.
+    #[cfg(test)]
+    fn looked(&mut self, _finished: bool) {}
+}
+
+impl<S: Socket> Outbound for S {
+    fn finish(&mut self) {
+        let _ = self.flush();
+        self.shutdown_write();
+    }
+}
+
+impl<S: Socket> Outbound for ServerWriteHalf<S> {
+    fn finish(&mut self) {
+        // (the close_notify first, and the FIN after it; with the TLS layer's right to send held between, so that the
+        // reading half sends no record of its own after the FIN)
+        self.close_and(|socket| socket.shutdown_write());
+    }
+}
+
+impl<S: Socket> Inbound for ServerReadHalf<S> {
+    fn linger(&mut self) {
+        // (the writing half, gone by now, has said close_notify: what the client still sends is read as bytes)
+        if let Ok(mut socket) = self.get_ref().duplicate() {
+            runtime::linger(&mut socket);
+        }
     }
 }
 
@@ -564,7 +615,16 @@ impl Request {
         &mut self.body
     }
 
-    /// The body, for a handler that keeps it (to read on another thread, say).
+    /// The body, for a handler that keeps it: to read on another thread while the handler waits for it, say, or as the
+    /// body of the response ([`Response::reader`]).
+    ///
+    /// It is the request's body for as long as the request is being answered, and no longer: once the handler has
+    /// returned and its response is whole, do not count on it. On HTTP/2 what was not read is dropped, data that had
+    /// already come included, and the client is asked to stop sending the rest; a read fails with "the stream is over",
+    /// though it may first wait for the client's next frame (and end in a time-out if none comes). On HTTP/1.1 a
+    /// connection kept alive goes on to its next request and a read fails with "the request this body belongs to is
+    /// over"; one that closes after the response (`Connection: close`, a body past what it drains) may still give what
+    /// it had already read in, then its end. A body kept past that is no use.
     pub fn into_body(self) -> Body {
         self.body
     }

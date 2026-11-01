@@ -11,7 +11,7 @@
 //! reached is an error: the pickle was not read to its end.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{Classes, Kind, Model, TextKind};
@@ -59,18 +59,186 @@ pub struct Seq {
     pub lost: bool,
 }
 
-/// What a call or a NEWOBJ made: the callee, its arguments, and the state a BUILD gave it.
+/// What a call or a NEWOBJ made: the callee, its arguments, the state a BUILD gave it, and what the pickle gave it as
+/// the attributes pickle's own opcodes call (none, mostly: kept apart so that an object costs one pointer for it).
 pub struct Made {
     pub callee: V,
     pub args: V,
     pub state: RefCell<Option<V>>,
+    pub given: RefCell<Option<Box<Given>>>,
 }
 
 impl Made {
     pub fn new(callee: V, args: V) -> Made {
-        Made { callee, args, state: RefCell::new(None) }
+        Made { callee, args, state: RefCell::new(None), given: RefCell::new(None) }
+    }
+
+    /// Add what a state, a helper's or a SETITEM gave the object (Given).
+    fn add_given(&self, g: Given) {
+        if g.is_empty() {
+            return;
+        }
+        if let Ok(mut have) = self.given.try_borrow_mut() {
+            match have.as_mut() {
+                Some(h) => h.merge(g),
+                None => *have = Some(Box::new(g)),
+            }
+        }
     }
 }
+
+/// What the pickle gave an object as the attributes pickle's own opcodes look up on it and call (N1 of the re-review
+/// of Oct 30): APPEND and APPENDS call its `extend`, or its `append` (C's do_append, pickle.py's load_append and
+/// load_appends, and their fallback), ADDITEMS its `add` (load_additems). A BUILD gives them (load_build: its state's
+/// dict, and its slots' setattr), and so do the helpers that set an object's attributes from a state (torch's
+/// _set_obj_state, types.SimpleNamespace's mapping) and SETITEM on an object whose items may be its attributes. Every
+/// one given is kept (a later BUILD may set it again, or not): what APPEND calls is among them. (This object's own
+/// record, for what it calls of any kind; a member of the standard library's data enums any object was given is the
+/// book's too, AnyGiven, whatever object an APPEND reaches.)
+#[derive(Default)]
+pub struct Given {
+    /// the globals given: (as `add`, rather than `extend` or `append`; the global; it is one of the format's helpers,
+    /// a model of its own, whose call depends on its arguments' values), in the order given
+    pub globals: Vec<(bool, u32, bool)>,
+    /// how many of them are helpers
+    helpers: u32,
+    /// a state whose names the reader does not see (a mapping the pickle computed or names, a dict past what the
+    /// reader keeps, a name the pickle computes given a callable, more globals than ITEMS, a state not looked at once
+    /// the record was full or the reading's looks were spent): what it gave is not known
+    pub unseen: bool,
+    /// unseen for a bound of the reader's (a global past the ITEMS kept, a state not looked at once the record was
+    /// full, a dict's or a tuple's items past what the reader keeps, the looks at what objects are given spent): what
+    /// it was given may be a function an APPEND, APPENDS or ADDITEMS on the object calls, and that is said
+    /// (SC-TRUNCATED; round 5, A2; round 6, A7: a record unseen was not looked at again, and hid one given later)
+    pub cut: bool,
+    /// an object the pickle computed given as `extend` or `append` [0], or as `add` [1]: what it is (none, mostly)
+    computed: Option<Box<[Option<String>; 2]>>,
+    /// how many of `globals` an APPEND or APPENDS [0] or an ADDITEMS [1] has called with items of no object, by the
+    /// text they hold (TextKind) and how many they are (none, 1, 2, 3, 4 or more: what the format's helpers look at):
+    /// a global that is no helper, called with such items again, does nothing new (made when first needed)
+    upto: Option<Box<[[[usize; 5]; 4]; 2]>>,
+}
+
+impl Given {
+    fn is_empty(&self) -> bool {
+        self.globals.is_empty() && self.computed.as_ref().is_none_or(|c| c.iter().all(Option::is_none)) && !self.unseen
+    }
+
+    /// It holds all the globals it keeps (ITEMS): one more given is unseen.
+    fn full(&self) -> bool {
+        self.globals.len() >= ITEMS
+    }
+
+    /// What a state the reader does not look at, for a bound of its own, gives: unseen, and said at an APPEND (`cut`).
+    fn skipped() -> Given {
+        Given { unseen: true, cut: true, ..Given::default() }
+    }
+
+    /// A container's items past what the reader keeps (Seq::dropped) give what is not known: a function given as
+    /// `extend` among them would be called by an APPEND, so that is said there (`cut`; round 6, A7).
+    fn past_kept(&mut self, dropped: bool) {
+        if dropped {
+            self.unseen = true;
+            self.cut = true;
+        }
+    }
+
+    /// A global given, kept unless it is already (looked for among the ITEMS at most kept, one by one: what that costs
+    /// `give` charges, and a full record is not looked at again; round 4, a set beside them doubled a record's memory).
+    fn add_global(&mut self, (add, g, helper): (bool, u32, bool)) {
+        if self.globals.iter().any(|&(a, h, _)| (a, h) == (add, g)) {
+            return;
+        }
+        if self.globals.len() >= ITEMS {
+            self.unseen = true;
+            self.cut = true;
+            return;
+        }
+        if self.globals.capacity() == 0 {
+            self.globals.reserve_exact(1);
+        }
+        self.globals.push((add, g, helper));
+        self.helpers += helper as u32;
+    }
+
+    /// An object the pickle computed given as `extend` or `append`, or as `add` (`add`): the first kept.
+    fn add_computed(&mut self, add: bool, what: impl FnOnce() -> String) {
+        let c = self.computed.get_or_insert_with(Default::default);
+        if c[add as usize].is_none() {
+            c[add as usize] = Some(what());
+        }
+    }
+
+    fn merge(&mut self, o: Given) {
+        for x in o.globals {
+            self.add_global(x);
+        }
+        if let Some(c) = o.computed {
+            for (add, w) in [false, true].into_iter().zip(*c) {
+                if let Some(w) = w {
+                    self.add_computed(add, || w);
+                }
+            }
+        }
+        self.unseen |= o.unseen;
+        self.cut |= o.cut;
+    }
+
+    /// What an opcode calls: ADDITEMS's `add` (`add`), or APPEND's and APPENDS's `extend` or `append`. With items of no
+    /// object (`shape`: the text they hold, how many), the helpers and only the globals given since the last such
+    /// call. And whether what it was given is unseen, and unseen for a bound of the reader's (`cut`).
+    fn for_op(&mut self, add: bool, shape: Option<(usize, usize)>) -> (Vec<u32>, Option<String>, bool, bool) {
+        let from = match shape {
+            Some((t, n)) => {
+                let len = self.globals.len();
+                let upto = self.upto.get_or_insert_with(Default::default);
+                std::mem::replace(&mut upto[add as usize][t.min(3)][n.min(4)], len)
+            }
+            None => 0,
+        };
+        let globals = if from >= self.globals.len() && self.helpers == 0 {
+            Vec::new()
+        } else {
+            self.globals.iter().enumerate().filter(|(i, (a, _, helper))| *a == add && (*i >= from || *helper))
+                .map(|(_, (_, g, _))| *g).collect()
+        };
+        let computed = self.computed.as_ref().and_then(|c| c[add as usize].clone());
+        (globals, computed, self.unseen, self.cut)
+    }
+}
+
+/// The book's record of what any object may have been given as the attributes APPEND, APPENDS and ADDITEMS call
+/// (round 3 of the review of FP-MODEL-FILES-PY311, of Oct 30). A member of the standard library's data enums under the
+/// literal name `extend` or `append` [0], or `add` [1], wherever a dict, a SETITEM or a call's arguments write it
+/// (whatever the dict ends up as: an object's BUILD state, a slot state's `__dict__`, torch's setattr-style state, a
+/// dict installed by reference and filled later, a joblib wrapper's state; `_operator.setitem(d, 'extend', m)`,
+/// `dict.update(d, [('extend', m)])`); and, where a dict is or becomes an attribute state (a BUILD's state, its pairs
+/// and halves, a helper's state, SETITEM on an object that is no plain mapping, a dict installed by reference: round
+/// 4, M1), a member under a key the pickle computes, an object the pickle computed given as one, and a mapping of
+/// attributes the reader does not see. Any object an APPEND, APPENDS or ADDITEMS reaches may be the one given it
+/// (through a memo entry, getitem((obj,), 0), logging.getLogger('x') twice, an enum's member, joblib's memoised
+/// wrapper: aliases the reader does not follow), so each of those members is called there, and the rest passes no
+/// member over (Machine::call_any_given).
+#[derive(Default)]
+pub struct AnyGiven {
+    /// the members given, in the order given
+    pub members: [Vec<u32>; 2],
+    /// how many of them an APPEND, APPENDS or ADDITEMS has called (each is called once: its call is then recorded)
+    called: [usize; 2],
+    /// an object the pickle computed given as one (what it calls is not followed: it may call a member)
+    pub computed: [bool; 2],
+    /// attributes the reader does not see: a mapping the pickle computed in place of a state's dict, a slot state's
+    /// `__dict__` or a helper's mapping (what is in it is not known), dicts installed by reference past those kept
+    pub unseen: bool,
+    /// the dicts installed as an object's attributes by reference (a slot or setattr-style state's `__dict__`,
+    /// functools.partial's dict, torch's _rebuild_from_type's), kept alive so that their address names them: what a
+    /// SETITEM puts in them later is an attribute state's (at most MAX_ATTR_DICTS; past it, unseen)
+    attr_dicts: Vec<V>,
+    attr_ptrs: HashSet<*const RefCell<Seq>>,
+}
+
+/// The dicts installed by reference AnyGiven keeps.
+pub const MAX_ATTR_DICTS: usize = 65_536;
 
 // Values are dropped without recursion, however deep the pickle nests them (a list in a list a million times, a call
 // of what a call returned a million times): each container hands its values to one loop.
@@ -214,6 +382,12 @@ pub struct Glob {
     /// an extension code (EXT1, EXT2, EXT4): the global the loading program registered for it with
     /// copyreg.add_extension (none by default), which the file does not name
     pub ext: Option<i64>,
+    /// it names a member of the standard library's data enums exactly (Classes::is_member), and a dotted name where
+    /// Python walks it (Book::plain_lookup): data unless it is called, made or changed
+    pub member: bool,
+    /// such a member given as `extend` or `append` (1) or as `add` (2) by some dict or helper (Book::any_given: noted
+    /// once)
+    pub given_as: u8,
 }
 
 /// Bytes the pickle hands a loader (torch.storage._load_from_bytes, pickle.loads …): read as a file of their own.
@@ -254,6 +428,26 @@ pub struct Book<'c> {
     /// what the looks at states and arguments could not see (SC-TRUNCATED), and the items they went through
     pub state_cut: Option<String>,
     pub state_work: u64,
+    /// what BUILD and SETITEM gave the objects the reader cannot tell apart (V::Opaque: a persistent id's, a buffer)
+    /// as their extend, append or add, all together
+    pub opaque_given: Given,
+    /// an APPEND, APPENDS or ADDITEMS that calls an extend, append or add the pickle may have given the object and the
+    /// reader does not see (Given::unseen, AnyGiven): no member of the standard library's data enums is passed over as
+    /// data
+    pub unseen_given: Option<Hit>,
+    /// the members of the standard library's data enums, and the rest, any object may have been given as what APPEND,
+    /// APPENDS and ADDITEMS call (round 3)
+    pub any_given: AnyGiven,
+    /// (global, add, text, items) an APPEND, APPENDS or ADDITEMS called a given global that is no helper with, items of
+    /// no object: such a call again does nothing new (Given::upto)
+    plain_calls: HashSet<(u32, bool, u8, u8)>,
+    /// the items the looks at what objects are given, and the calls of what they were given, go through (GIVE_WORK:
+    /// their own, apart from `state_work`, so that the reading's other looks reach as far as before: round 4, M2)
+    pub give_work: u64,
+    /// an APPEND, APPENDS or ADDITEMS whose call of what the object was given was not made, or not known, for a bound
+    /// of the reader's (Given::cut; SC-TRUNCATED: round 5, A2, and round 6, A7; said at the APPEND, so a file that only
+    /// gives its objects much is whole)
+    pub give_cut: Option<String>,
 }
 
 impl Drop for Book<'_> {
@@ -284,7 +478,21 @@ impl<'c> Book<'c> {
     pub fn new(cls: &'c Classes) -> Book<'c> {
         Book { cls, globals: Vec::new(), index: HashMap::new(), part: 0, code: Vec::new(), dynamic: None,
                nested: Vec::new(), forks: 0, fork_cut: None, kept: 0, suspects: Vec::new(), torchscript: false,
-               nested_dropped: 0, code_dropped: 0, state_cut: None, state_work: 0 }
+               nested_dropped: 0, code_dropped: 0, state_cut: None, state_work: 0, opaque_given: Given::default(),
+               unseen_given: None, any_given: AnyGiven::default(), plain_calls: HashSet::new(), give_work: 0,
+               give_cut: None }
+    }
+
+    /// A global Python looks up with a plain getattr: GLOBAL, INST and STACK_GLOBAL below protocol 4 (find_class's
+    /// getattr; protocol 4's _getattribute walks a dotted name) and numpy's _ufunc_reconstruct. A dotted name is no
+    /// attribute there: the load stops with AttributeError, and the name is no member's (N3 of the re-review of
+    /// Oct 30: GLOBAL 'ssl' 'TLSVersion.TLSv1_2' at protocol 2 was read as the member). Once so, always so.
+    pub fn plain_lookup(&mut self, g: u32) {
+        if let Some(gl) = self.globals.get_mut(g as usize) {
+            if gl.member && gl.name.contains(&b'.') {
+                gl.member = false;
+            }
+        }
     }
 
     /// The global module.name, entered once (its kind from the pack's tables).
@@ -293,6 +501,7 @@ impl<'c> Book<'c> {
             return g;
         }
         let (kind, model) = self.cls.classify_in(module, name, self.torchscript);
+        let member = self.cls.is_member(module, name);
         let g = self.globals.len() as u32;
         self.globals.push(Glob {
             module: module.to_vec(),
@@ -306,6 +515,8 @@ impl<'c> Book<'c> {
             pushes: 0,
             resolved: 0,
             ext: None,
+            member,
+            given_as: 0,
         });
         self.index.insert((module.to_vec(), name.to_vec()), g);
         g
@@ -331,6 +542,8 @@ impl<'c> Book<'c> {
             pushes: 0,
             resolved: 0,
             ext: Some(code),
+            member: false,
+            given_as: 0,
         });
         self.index.insert(key, g);
         g
@@ -402,6 +615,9 @@ pub struct Machine<'b, 'm> {
     dispatch: usize,
     /// the times each global was put on the stack (Glob::pushes, added to the book when the reading ends)
     pushed: HashMap<u32, u32>,
+    /// the protocol the last PROTO named (the Unpickler's proto, 0 before one): find_class walks a dotted name only
+    /// from 4 on
+    proto: u8,
 }
 
 /// How deep the format's helpers' calls of their arguments are followed (one handed another, and so on).
@@ -412,7 +628,7 @@ type R<T> = Result<T, (usize, String)>;
 impl<'b, 'm> Machine<'b, 'm> {
     pub fn new(buf: &'b [u8], pos: usize, joblib: bool) -> Machine<'b, 'm> {
         Machine { buf, pos, stack: Vec::new(), marks: Vec::new(), memo: HashMap::new(), base: None, spec: false,
-                  joblib, ops: 0, max_ops: u64::MAX, persistent: true, dispatch: 0, pushed: HashMap::new() }
+                  joblib, ops: 0, max_ops: u64::MAX, persistent: true, dispatch: 0, pushed: HashMap::new(), proto: 0 }
     }
 
     fn err<T>(&self, at: usize, why: impl Into<String>) -> R<T> {
@@ -534,6 +750,8 @@ impl<'b, 'm> Machine<'b, 'm> {
         let mut kept = Vec::new();
         let (mut dropped, mut lost) = (false, false);
         if kind == SK::Dict {
+            // (what its pairs may give an object, before any is dropped: Book::any_given)
+            note_pairs(book, &items);
             let mut it = items.into_iter();
             while let (Some(k), Some(v)) = (it.next(), it.next()) {
                 keep_pair(book, &mut kept, ITEMS, k, v, &mut dropped, &mut lost);
@@ -551,10 +769,38 @@ impl<'b, 'm> Machine<'b, 'm> {
     }
 
     /// Items added to a container (APPEND, APPENDS, SETITEM, SETITEMS, ADDITEMS): kept while there is room. A fork
-    /// changes nothing (the container may be the reading's it was forked from); nor does anything but a container.
-    fn extend(&mut self, book: &mut Book, target: &V, items: Vec<V>) {
+    /// changes nothing (the container may be the reading's it was forked from); nor does anything but a container. A
+    /// member of the standard library's data enums given items is changed, as BUILD changes a global: code, in either
+    /// reading (H2 of the review of Oct 29: SETITEM or APPEND on signal.SIGTERM was passed over as the member's data).
+    /// An object the pickle made (or loads: V::Opaque) given items has what SETITEM gives it, and what APPEND, APPENDS
+    /// or ADDITEMS call on it is called (Given, N1 of the re-review of Oct 30), in either reading. SETITEM's and
+    /// SETITEMS's pairs that name `extend`, `append` or `add` literally, whatever they are given to, are what any object
+    /// may be given (a dict installed as one's attributes and filled later: Book::any_given), and all their pairs where
+    /// the target is an attribute state (an object that is no plain mapping, a dict installed by reference: round 4,
+    /// M1); APPEND, APPENDS and ADDITEMS on anything but a container the pickle built call what any object was given
+    /// (call_any_given: round 3 of the review of FP-MODEL-FILES-PY311).
+    fn extend(&mut self, book: &mut Book, target: &V, items: Vec<V>, at: usize, how: &'static str) -> R<()> {
+        if let V::Global(g) = target {
+            if book.globals.get(*g as usize).is_some_and(|gl| gl.member) {
+                let what = book.qual(*g);
+                book.code(format!("changes {what} itself ({how} on it sets its items)"), book.hit(at, how));
+            }
+        }
+        if matches!(how, "SETITEM" | "SETITEMS") {
+            note_pairs(book, &items);
+            if attr_target(book, target) {
+                note_attr_pairs(book, &items, 0);
+            }
+        } else if matches!(target, V::Call(_) | V::Obj(_) | V::Opaque | V::Global(_)) {
+            self.call_any_given(book, how == "ADDITEMS", &items, at, how)?;
+        }
+        match target {
+            V::Call(m) | V::Obj(m) => return self.extend_object(book, Some(m), items, at, how),
+            V::Opaque => return self.extend_object(book, None, items, at, how),
+            _ => {}
+        }
         if self.spec {
-            return;
+            return Ok(());
         }
         if let V::Seq(s) = target {
             // (each value looked at before the container is borrowed: it may be the container, or hold it)
@@ -588,6 +834,161 @@ impl<'b, 'm> Machine<'b, 'm> {
             s.dropped |= dropped;
             s.lost |= lost;
         }
+        Ok(())
+    }
+
+    /// Items given to an object (`m`; none: one the reader cannot tell apart, V::Opaque). SETITEM and SETITEMS may give
+    /// it attributes (an object whose items are its attributes: Given). APPEND and APPENDS call its `extend`, or its
+    /// `append`, and ADDITEMS its `add`, each looked up on the object (C's do_append and load_additems): those the
+    /// pickle gave it are called with the items, as REDUCE calls a callee; an object the pickle computed so given is a
+    /// call of what the pickle computed (book.dynamic); and when what it gave is not seen, no member of the standard
+    /// library's data enums is passed over as data (book.unseen_given). Python's pickle writes an object's APPENDS
+    /// and SETITEMS before its BUILD (save_reduce: listitems, dictitems, then state), so a file Python wrote calls
+    /// nothing given here.
+    /// Its cost (round 3): a global called again with items of no object, of the same text kind and number, does
+    /// nothing new and is not called again (Given::upto, Book::plain_calls; but text that names code, each of whose
+    /// calls is a finding of its own), and each call is charged to the looks at what objects are given (GIVE_WORK):
+    /// past them none is made, no member is passed over (book.unseen_given), and an APPEND whose call is not made, or
+    /// on an object whose record was not looked at for them, says so (book.give_cut, SC-TRUNCATED: round 5, A2).
+    fn extend_object(&mut self, book: &mut Book, m: Option<&Rc<Made>>, items: Vec<V>, at: usize, how: &'static str)
+                     -> R<()> {
+        if matches!(how, "SETITEM" | "SETITEMS") {
+            // (as a BUILD's: a record full or unseen is not looked at again, the rest charged to the looks)
+            let done = match m {
+                Some(m) => record_done(m),
+                None => book.opaque_given.full(),
+            };
+            let g = if done {
+                Given::skipped()
+            } else {
+                give_charged(book, |b, g, left| give_pairs(b, g, &items, left, 0))
+            };
+            match m {
+                Some(m) => m.add_given(g),
+                None => book.opaque_given.merge(g),
+            }
+            return Ok(());
+        }
+        let add = how == "ADDITEMS";
+        // (an object given nothing: nothing to do, and nothing looked at: round 4, k1)
+        let given = match m {
+            Some(m) => match m.given.try_borrow() {
+                Ok(g) => g.as_ref().is_some_and(|g| !g.is_empty()),
+                Err(_) => true,
+            },
+            None => !book.opaque_given.is_empty(),
+        };
+        if !given {
+            return Ok(());
+        }
+        // items of no object, kept whole (no more than a tuple keeps, the reading's items not spent): what a global
+        // that is no helper does with them is what the text they hold and their number say (Given::upto); text that
+        // names code is a finding at each call
+        let scalar = items.len() <= ITEMS && book.kept + items.len() < MAX_KEPT
+            && items.iter().all(|v| matches!(v, V::Num(_) | V::Plain | V::Str(_) | V::Bytes(..) | V::Made_ | V::MadeStr));
+        let shape = if scalar {
+            // (the kind text_of finds in such items, without its sample)
+            let kind = |v: &V| match v {
+                V::Str(s) => book.cls.text_kind(&s.b, s.len),
+                V::Bytes(..) | V::Made_ | V::MadeStr => TextKind::Text,
+                _ => TextKind::Plain,
+            };
+            let text = items.iter().map(kind).max().unwrap_or(TextKind::Plain);
+            (text != TextKind::CodeName).then_some((text as usize, items.len().min(4)))
+        } else {
+            None
+        };
+        let (globals, computed, unseen, cut) = match m {
+            Some(m) => match m.given.try_borrow_mut() {
+                Ok(mut have) => match have.as_mut() {
+                    Some(g) => g.for_op(add, shape),
+                    None => return Ok(()),
+                },
+                // (it cannot be read: what was given is not known, and that is said)
+                Err(_) => (Vec::new(), None, true, true),
+            },
+            None => book.opaque_given.for_op(add, shape),
+        };
+        if globals.is_empty() && computed.is_none() && !unseen {
+            return Ok(());
+        }
+        // what the object was given is not known for a bound of the reader's: what this calls is not, and that is said
+        // (round 5, A2: a function that runs code given after the looks were spent, and called here, was quiet; round
+        // 6, A7: and one given after a state the reader did not see)
+        if cut {
+            give_cut(book, at, how);
+        }
+        let (called, attr) = append_how(how);
+        let work = CALL_WORK + items.len() as u64;
+        let args = self.seq(book, SK::Tuple, items);
+        for g in globals {
+            if let Some((t, n)) = shape {
+                let helper = book.globals.get(g as usize).is_none_or(|gl| gl.model != Model::None);
+                if !helper && !book.plain_calls.insert((g, add, t as u8, n as u8)) {
+                    continue;
+                }
+            }
+            if !spend_give(book, work) {
+                // (a call not made, for the looks spent: said)
+                if book.unseen_given.is_none() {
+                    book.unseen_given = Some(book.hit(at, how));
+                }
+                give_cut(book, at, how);
+                break;
+            }
+            self.call(book, V::Global(g), args.clone(), at, called)?;
+        }
+        if let Some(what) = computed {
+            if spend_give(book, work) {
+                let what = format!("{what}, which the pickle gave the object as its {attr}");
+                let (kind, sample) = text_of(book, &args);
+                if kind == TextKind::CodeName {
+                    book.code(format!("calls {what} with {}", quote(&sample)), book.hit(at, how));
+                }
+                if book.dynamic.is_none() {
+                    book.dynamic = Some(Hit { what: Some(what), text: sample, ..book.hit(at, how) });
+                }
+            } else {
+                if book.unseen_given.is_none() {
+                    book.unseen_given = Some(book.hit(at, how));
+                }
+                give_cut(book, at, how);
+            }
+        }
+        if unseen && book.unseen_given.is_none() {
+            book.unseen_given = Some(book.hit(at, how));
+        }
+        Ok(())
+    }
+
+    /// APPEND, APPENDS or ADDITEMS on what may be an object (anything but a list, a set, a dict or a tuple the pickle
+    /// built: a call's or a NEWOBJ's result, an object the file loads, a global). Python looks its extend, append or
+    /// add up on it (C's do_append and load_additems, pickle.py's load_append, load_appends and load_additems), and
+    /// any object the pickle gave one may be this one, reached through an alias the reader does not follow (a memo
+    /// entry, getitem((obj,), 0), logging.getLogger('x') twice, an enum's member, joblib's memoised wrapper). So each
+    /// member of the standard library's data enums that any dict or helper gave as one (Book::any_given) is called
+    /// here, as REDUCE calls a callee (once: its call is then recorded); and where an object the pickle computed was
+    /// given as one, or attributes the reader does not see were, no member is passed over (book.unseen_given). Round 3
+    /// of the review of FP-MODEL-FILES-PY311 (the gaps (a) to (d) of its re-check of Oct 30). Python writes an
+    /// object's APPENDS before its own state (save_reduce), but a file it wrote may well APPEND to one object (a deque,
+    /// a list subclass) after another's state: so the record notes what a key the pickle computes, or an object it
+    /// computed, gives only where a dict is an attribute state, never in a plain dict (round 4, M1).
+    fn call_any_given(&mut self, book: &mut Book, add: bool, items: &[V], at: usize, how: &'static str) -> R<()> {
+        let k = add as usize;
+        let (from, to) = (book.any_given.called[k], book.any_given.members[k].len());
+        if from < to {
+            book.any_given.called[k] = to;
+            let (called, _) = append_how(how);
+            let args = self.seq(book, SK::Tuple, items.to_vec());
+            for i in from..to {
+                let g = book.any_given.members[k][i];
+                self.call(book, V::Global(g), args.clone(), at, called)?;
+            }
+        }
+        if (book.any_given.computed[k] || book.any_given.unseen) && book.unseen_given.is_none() {
+            book.unseen_given = Some(book.hit(at, how));
+        }
+        Ok(())
     }
 
     /// A string value from bytes (the first KEEP of them).
@@ -642,6 +1043,7 @@ impl<'b, 'm> Machine<'b, 'm> {
                     if v > 5 {
                         return self.err(at, format!("protocol {v}, which no Python reads"));
                     }
+                    self.proto = v;
                 }
                 0x95 => {
                     let n = self.u64_(at)?;
@@ -807,18 +1209,18 @@ impl<'b, 'm> Machine<'b, 'm> {
                 b'a' => {
                     let v = self.pop(at)?;
                     let t = self.top(at)?;
-                    self.extend(book, &t, vec![v]);
+                    self.extend(book, &t, vec![v], at, "APPEND")?;
                 }
                 b'e' | 0x90 => {
                     let items = self.pop_mark(at)?;
                     let t = self.top(at)?;
-                    self.extend(book, &t, items);
+                    self.extend(book, &t, items, at, if op == b'e' { "APPENDS" } else { "ADDITEMS" })?;
                 }
                 b's' => {
                     let v = self.pop(at)?;
                     let k = self.pop(at)?;
                     let t = self.top(at)?;
-                    self.extend(book, &t, vec![k, v]);
+                    self.extend(book, &t, vec![k, v], at, "SETITEM")?;
                 }
                 b'u' => {
                     let items = self.pop_mark(at)?;
@@ -826,7 +1228,7 @@ impl<'b, 'm> Machine<'b, 'm> {
                         return self.err(at, "a SETITEMS of an odd number of items");
                     }
                     let t = self.top(at)?;
-                    self.extend(book, &t, items);
+                    self.extend(book, &t, items, at, "SETITEMS")?;
                 }
                 b'p' => {
                     let l = self.line(at)?;
@@ -868,6 +1270,9 @@ impl<'b, 'm> Machine<'b, 'm> {
                     }
                     let how = if op == b'c' { "GLOBAL" } else { "INST" };
                     let g = book.intern(module, name, at, how);
+                    if self.proto < 4 {
+                        book.plain_lookup(g);
+                    }
                     if op == b'c' {
                         self.push(V::Global(g), at)?;
                     } else {
@@ -887,6 +1292,9 @@ impl<'b, 'm> Machine<'b, 'm> {
                         return self.err(at, "a STACK_GLOBAL name longer than the reader keeps");
                     }
                     let g = book.intern(&m.b, &n.b, at, "STACK_GLOBAL");
+                    if self.proto < 4 {
+                        book.plain_lookup(g);
+                    }
                     self.push(V::Global(g), at)?;
                 }
                 0x82..=0x84 => {
@@ -973,6 +1381,10 @@ impl<'b, 'm> Machine<'b, 'm> {
 
     fn build(&mut self, book: &mut Book, inst: V, state: V, at: usize) -> R<()> {
         dunders(book, &state, at, "BUILD");
+        if matches!(inst, V::Obj(_) | V::Call(_) | V::Opaque) {
+            // (a mapping the pickle computed in place of its dict: what it gives any object is not seen, AnyGiven)
+            note_state(book, &state, StateOf::Build);
+        }
         match &inst {
             V::Global(g) => {
                 let what = book.qual(*g);
@@ -980,8 +1392,16 @@ impl<'b, 'm> Machine<'b, 'm> {
                           book.hit(at, "BUILD"));
             }
             V::Obj(m) | V::Call(m) => {
+                // joblib's array wrappers make an object of the class their state names with numpy's _reconstruct
+                // (numpy before 2.0): that class is made, as NEWOBJ makes it (N2 of the re-review of Oct 30)
+                if let Some(c @ V::Global(_)) = wrapper_class(book, m, &state) {
+                    self.restore(book, &c, at, "joblib's array wrapper");
+                }
                 let wrapper = matches!(&m.callee, V::Global(g) if book.globals[*g as usize].model == Model::ArrayWrapper);
                 if wrapper && self.joblib && !self.spec {
+                    // joblib's load_build runs pickle's first, which gives the wrapper its state's attributes, and a
+                    // memo entry may still hold the wrapper when its array takes its place (round 3, g17)
+                    give_object(book, m, &state);
                     return self.joblib_array(book, &state, at);
                 }
                 // a __setstate__ an earlier BUILD gave the object (its __dict__ or its slots): load_build calls it with
@@ -993,12 +1413,23 @@ impl<'b, 'm> Machine<'b, 'm> {
                               book.hit(at, "BUILD"));
                     return Ok(());
                 }
+                // the attributes it gives the object that APPEND, APPENDS and ADDITEMS call (N1), in either reading:
+                // kept with those earlier BUILDs gave
+                give_object(book, m, &state);
                 if !self.spec {
                     let (state, _) = keepable(book, state, &inst);
                     if let Ok(mut st) = m.state.try_borrow_mut() {
                         *st = Some(state);
                     }
                 }
+            }
+            V::Opaque => {
+                let g = if book.opaque_given.full() {
+                    Given::skipped()
+                } else {
+                    give_charged(book, |b, g, left| give(b, g, &state, left))
+                };
+                book.opaque_given.merge(g);
             }
             _ => {}
         }
@@ -1086,6 +1517,8 @@ impl<'b, 'm> Machine<'b, 'm> {
                 match (items.first(), items.get(1)) {
                     (Some(V::Str(m)), Some(V::Str(n))) if m.len <= KEEP && n.len <= KEEP => {
                         let ng = book.intern(&m.b, &n.b, at, "numpy's _ufunc_reconstruct");
+                        // (getattr(__import__(module), name): a dotted name is no attribute, N3)
+                        book.plain_lookup(ng);
                         result = Some(V::Global(ng));
                     }
                     _ => book.code("hands numpy's _ufunc_reconstruct a name it builds, which it imports".into(),
@@ -1137,6 +1570,16 @@ impl<'b, 'm> Machine<'b, 'm> {
             }
             _ => {}
         }
+        // the format's constructors of an object of the class they are handed (numpy's _reconstruct ...: data_maker's):
+        // that class is made, as NEWOBJ makes it (N2 of the re-review of Oct 30: a member there was passed over)
+        if kind == Kind::Safe {
+            let (classes, maker) = made_classes(&book.globals[g as usize].name);
+            for &i in classes {
+                if let Some(c @ V::Global(_)) = items.get(i) {
+                    self.restore(book, c, at, maker);
+                }
+            }
+        }
         self.dispatch -= 1;
         if kind != Kind::Safe {
             let (mut tk, sample) = text_of(book, &args);
@@ -1159,7 +1602,29 @@ impl<'b, 'm> Machine<'b, 'm> {
                 gl.called = Some((tk, hit));
             }
         }
-        Ok(result.unwrap_or_else(|| made(callee, args)))
+        let r = result.unwrap_or_else(|| made(callee, args));
+        // a helper that sets the object it returns attributes from a state, as BUILD does (N1): that object's, and an
+        // attribute state's for any object (round 3); torch's _rebuild_from_type installs its dict by reference
+        // (ret.__dict__ = dict)
+        if let (V::Call(m), Some((st, of))) = (&r, attr_state(book, g, &items)) {
+            note_state(book, &st, of);
+            if book.globals[g as usize].name == b"_rebuild_from_type" {
+                note_installed(book, &st);
+            }
+            let given = give_charged(book, |b, g, left| give(b, g, &st, left));
+            m.add_given(given);
+        }
+        // a call that may fill a dict (`_operator.setitem(d, 'extend', m)`, `dict.setdefault(d, 'extend', m)` or
+        // `dict.update(d, [('extend', m)])` through getattr), unless it is one of the format's data constructors:
+        // the literal names beside members among its arguments, and in the pairs of a list or tuple among them, are
+        // what any object may be given (round 4, (f))
+        let pairs = call_pairs(book, &items);
+        if !pairs.is_empty() && !matches!(&r, V::Call(m) if data_maker(book, m).is_some()) {
+            for (mg, add) in pairs {
+                note_member(book, mg, add);
+            }
+        }
+        Ok(r)
     }
 
     /// joblib's NumpyArrayWrapper: its array's bytes follow its BUILD (numpy_pickle.py's write_array and
@@ -1249,6 +1714,7 @@ impl<'b, 'm> Machine<'b, 'm> {
             persistent: self.persistent,
             dispatch: 0,
             pushed,
+            proto: self.proto,
         };
         if let End::Error(_, why) = f.run(book) {
             if why.starts_with("more than") && why.ends_with("opcodes in a fork") {
@@ -1587,6 +2053,9 @@ fn scalar_is_data(m: &Made) -> bool {
 /// scalar, a UserString do).
 fn computed_key(book: &Book, k: &V) -> bool {
     match k {
+        // (a member of the standard library's data enums by its exact name, signal.SIGTERM as 3.10 writes it, is an
+        // int: a key no special method has, as signal.Signals(15), 3.12's, is: FP-MODEL-FILES-PY311)
+        V::Global(g) if book.globals.get(*g as usize).is_some_and(|gl| gl.member) => false,
         V::MadeStr | V::Opaque | V::Global(_) => true,
         V::Call(m) | V::Obj(m) => match data_maker(book, m) {
             None => true,
@@ -1656,6 +2125,553 @@ fn setstate_of(book: &Book, st: &V) -> Option<V> {
         return find(&s.items[0]).or_else(|| find(&s.items[1]));
     }
     None
+}
+
+/// What a state gives an object as the attributes APPEND, APPENDS and ADDITEMS call (Given): its dict's names, and a
+/// tuple's or a list's dicts (load_build's (dict, slots), functools.partial's (func, args, kwds, dict)) and pairs
+/// (types.SimpleNamespace's iterable). A mapping the pickle computed or names (a dict subclass made by a call, an
+/// object, a global) or a dict past what the reader keeps is unseen. (No more than one level down, and a `__dict__`
+/// key's dict one more: load_build sets the attributes of the dicts it is handed, and a slot state's `__dict__`, set
+/// with setattr, replaces the object's.) Each item looked at is one of `left` (the reading's looks, STATE_WORK): past
+/// them the rest is unseen (round 3 of the review of FP-MODEL-FILES-PY311, the cost).
+fn give(book: &Book, to: &mut Given, state: &V, left: &mut u64) {
+    match state {
+        V::Seq(s) => {
+            let Ok(s) = s.try_borrow() else {
+                to.unseen = true;
+                return;
+            };
+            match s.kind {
+                SK::Dict => {
+                    to.past_kept(s.dropped);
+                    give_pairs(book, to, &s.items, left, 0);
+                }
+                SK::Tuple | SK::List => {
+                    to.past_kept(s.dropped);
+                    // (a dict it holds twice gives the same twice: looked at once; a pair is cheaper to look at again
+                    // than to look for, round 6, A5)
+                    let mut seen: Vec<*const RefCell<Seq>> = Vec::new();
+                    for x in &s.items {
+                        if !look(to, left) {
+                            return;
+                        }
+                        match x {
+                            V::Seq(d) => {
+                                let Ok(d2) = d.try_borrow() else {
+                                    to.unseen = true;
+                                    continue;
+                                };
+                                match d2.kind {
+                                    SK::Dict if seen.contains(&Rc::as_ptr(d)) => {}
+                                    SK::Dict => {
+                                        seen.push(Rc::as_ptr(d));
+                                        to.past_kept(d2.dropped);
+                                        give_pairs(book, to, &d2.items, left, 0);
+                                    }
+                                    SK::Tuple | SK::List if d2.items.len() == 2 => {
+                                        give_pair(book, to, &d2.items[0], &d2.items[1], left, 0)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            V::Call(_) | V::Obj(_) | V::Opaque | V::Global(_) => to.unseen = true,
+                            _ => {}
+                        }
+                    }
+                }
+                SK::Set => {}
+            }
+        }
+        V::Call(_) | V::Obj(_) | V::Opaque | V::Global(_) => to.unseen = true,
+        _ => {}
+    }
+}
+
+/// One item of a state looked at, of `left`: false, and what the state gives unseen, once they are spent.
+fn look(to: &mut Given, left: &mut u64) -> bool {
+    if *left == 0 {
+        to.unseen = true;
+        return false;
+    }
+    *left -= 1;
+    true
+}
+
+/// A dict's items, (key, value) after (key, value) (`depth`: 1 inside a `__dict__` key's dict).
+fn give_pairs(book: &Book, to: &mut Given, items: &[V], left: &mut u64, depth: u8) {
+    for p in items.chunks_exact(2) {
+        if !look(to, left) {
+            return;
+        }
+        give_pair(book, to, &p[0], &p[1], left, depth);
+    }
+}
+
+/// An attribute given: by the name `extend` or `append` (what APPEND and APPENDS call), or `add` (ADDITEMS'), a global
+/// or an object the pickle computed that may be called (not data a data constructor made, nor text, a number or a
+/// container). A key the pickle computes (it may be any name) given a callable is unseen. A `__dict__` key's dict
+/// gives its own pairs (setattr(obj, '__dict__', d) makes d the object's attributes: round 3, g01 and g02), once; a
+/// mapping the pickle computed there is unseen.
+fn give_pair(book: &Book, to: &mut Given, k: &V, v: &V, left: &mut u64, depth: u8) {
+    let add = match k {
+        V::Str(s) if s.b == b"extend" || s.b == b"append" => false,
+        V::Str(s) if s.b == b"add" => true,
+        V::Str(s) if s.b == b"__dict__" && depth == 0 => {
+            match v {
+                V::Seq(d) => match d.try_borrow() {
+                    Ok(d) if d.kind == SK::Dict => {
+                        to.past_kept(d.dropped);
+                        give_pairs(book, to, &d.items, left, 1);
+                    }
+                    Ok(_) => {}
+                    Err(_) => to.unseen = true,
+                },
+                V::Call(_) | V::Obj(_) | V::Opaque | V::Global(_) => to.unseen = true,
+                _ => {}
+            }
+            return;
+        }
+        V::Str(_) => return,
+        k => {
+            // (the value looked at first: a key the pickle computes is costly to tell, round 4, k2b; and not again once
+            // the record is unseen, round 6, A5)
+            if !to.unseen && callable(book, v) && computed_key(book, k) {
+                to.unseen = true;
+            }
+            return;
+        }
+    };
+    match v {
+        V::Global(g) => {
+            let helper = book.globals.get(*g as usize).is_none_or(|gl| gl.model != Model::None);
+            // (the record looked through for it: charged)
+            *left = left.saturating_sub(to.globals.len() as u64);
+            to.add_global((add, *g, helper))
+        }
+        V::Call(_) | V::Obj(_) | V::Opaque if callable(book, v) => to.add_computed(add, || describe(book, v)),
+        _ => {}
+    }
+}
+
+/// The items the looks at what objects are given (`give`, `note_state`, a call's pairs) and the calls of what they were
+/// given go through together, apart from the reading's other looks (STATE_WORK): past them, what any object is given
+/// is unseen and no member is passed over (round 4, M2: sharing STATE_WORK, they made BUILD-heavy files reach it
+/// sooner than base), and an APPEND that would call what an object was given says what it cannot (give_cut).
+pub const GIVE_WORK: u64 = 50_000_000;
+
+/// Charge `n` to the looks at what objects are given (GIVE_WORK): false once they are spent (and from then on), what
+/// any object is given then unseen. The cut is said where it matters, at an APPEND (give_cut): an object's record
+/// unseen passes no member over, but hides what a function it was given does with the items (round 5, A2).
+fn spend_give(book: &mut Book, n: u64) -> bool {
+    if book.give_work < GIVE_WORK {
+        book.give_work = book.give_work.saturating_add(n);
+        if book.give_work < GIVE_WORK {
+            return true;
+        }
+    }
+    book.any_given.unseen = true;
+    false
+}
+
+/// What `walk` finds a state gives an object (its BUILD, SETITEM on it, a helper's call), each item it looks at
+/// charged to GIVE_WORK: past it, unseen for the looks spent (`cut`: what an APPEND on the object calls is not known, and
+/// is said there; round 5, A2: an empty record here hid a function given after them), and, once it is spent, what any
+/// object is given (AnyGiven).
+fn give_charged(book: &mut Book, walk: impl FnOnce(&Book, &mut Given, &mut u64)) -> Given {
+    if book.give_work >= GIVE_WORK {
+        book.any_given.unseen = true;
+        return Given::skipped();
+    }
+    let mut g = Given::default();
+    let start = GIVE_WORK - book.give_work;
+    let mut left = start;
+    walk(book, &mut g, &mut left);
+    book.give_work += start - left;
+    if book.give_work >= GIVE_WORK {
+        book.any_given.unseen = true;
+        g.unseen = true;
+        g.cut = true;
+    }
+    g
+}
+
+/// An APPEND, APPENDS or ADDITEMS (`how`, at `at`) whose call of what the object was given is not made, or not known,
+/// for a bound of the reader's (the looks at what objects are given spent, a record full, a state's items past what it
+/// keeps): SC-TRUNCATED, once (round 5, A2; round 6, A7).
+fn give_cut(book: &mut Book, at: usize, how: &str) {
+    if book.give_cut.is_none() {
+        book.give_cut = Some(format!("what the pickle gave the object passes what the reader keeps of it or looks at \
+                                      ({ITEMS} globals, a container's items, the {GIVE_WORK} items of its looks; {how}, \
+                                      byte {at}): what {how} calls on the object is not known"));
+    }
+}
+
+/// An object's record is full (what more it is given cannot be kept) or cannot be read: what it is given next is not
+/// looked at, and is unseen and said at an APPEND (Given::skipped; round 3, the cost: twenty thousand BUILDs of one state
+/// of 64 dicts walked each). A record only unseen is looked at again (round 6, A7: a state the pickle computed, then
+/// a function given as `extend` and called by an APPEND, was quiet), GIVE_WORK bounding what that costs.
+fn record_done(m: &Made) -> bool {
+    match m.given.try_borrow() {
+        Ok(g) => g.as_ref().is_some_and(|g| g.full()),
+        Err(_) => true,
+    }
+}
+
+/// What a BUILD's state gives an object, kept with what earlier ones gave it (Made::add_given); not looked at when the
+/// object's record is done (record_done).
+fn give_object(book: &mut Book, m: &Made, state: &V) {
+    let g = if record_done(m) {
+        Given::skipped()
+    } else {
+        give_charged(book, |b, g, left| give(b, g, state, left))
+    };
+    m.add_given(g);
+}
+
+/// What one call of a given global costs the looks, besides its items: about what a look at that many items costs (a
+/// call looks at its arguments' text and dunders, and builds its record: several dozen items' worth).
+const CALL_WORK: u64 = 64;
+
+/// How an APPEND, APPENDS or ADDITEMS calls what the object was given, for a finding, and the attribute's name.
+fn append_how(how: &str) -> (&'static str, &'static str) {
+    match how {
+        "APPEND" => ("APPEND, calling the object's extend or append", "extend or append"),
+        "APPENDS" => ("APPENDS, calling the object's extend or append", "extend or append"),
+        _ => ("ADDITEMS, calling the object's add", "add"),
+    }
+}
+
+/// A dict's pairs that name what APPEND, APPENDS or ADDITEMS call literally, for what any object may be given
+/// (Book::any_given): every dict the pickles build (DICT, and EMPTY_DICT filled by SETITEM and SETITEMS) and every
+/// SETITEM or SETITEMS on anything, before the reader drops any, whatever the dict becomes (an object's state, a slot
+/// state's `__dict__`, torch's setattr-style state, a dict installed by reference and filled after it was given, a
+/// joblib wrapper's state). One look at each pair, the value first.
+fn note_pairs(book: &mut Book, items: &[V]) {
+    for p in items.chunks_exact(2) {
+        if let Some((g, add)) = literal_pair(book, &p[0], &p[1]) {
+            note_member(book, g, add);
+        }
+    }
+}
+
+/// A member of the standard library's data enums under the literal name `extend` or `append` (add: false), or `add`.
+fn literal_pair(book: &Book, k: &V, v: &V) -> Option<(u32, bool)> {
+    let V::Global(g) = v else { return None };
+    if !book.globals.get(*g as usize).is_some_and(|gl| gl.member) {
+        return None;
+    }
+    match k {
+        V::Str(s) if s.b == b"extend" || s.b == b"append" => Some((*g, false)),
+        V::Str(s) if s.b == b"add" => Some((*g, true)),
+        _ => None,
+    }
+}
+
+/// A global given as one (`add`: as `add`): kept when it is a member of the standard library's data enums, once.
+fn note_member(book: &mut Book, g: u32, add: bool) {
+    let bit = 1u8 << add as u8;
+    let Some(gl) = book.globals.get_mut(g as usize) else { return };
+    if !gl.member || gl.given_as & bit != 0 {
+        return;
+    }
+    gl.given_as |= bit;
+    book.any_given.members[add as usize].push(g);
+}
+
+/// An attribute state's pairs (`depth`: 1 inside a `__dict__` key's dict), charged to GIVE_WORK all at once (round 5,
+/// A5: one charge a dict, not one a pair).
+fn note_attr_pairs(book: &mut Book, items: &[V], depth: u8) {
+    if !spend_give(book, items.len() as u64 / 2 + 1) {
+        return;
+    }
+    for p in items.chunks_exact(2) {
+        note_attr_pair(book, &p[0], &p[1], depth);
+    }
+}
+
+/// A pair of a dict that is, or becomes, an object's attributes (round 4, M1: only there, never in a plain dict, a
+/// file Python wrote may hold a dict keyed by an enum's member or a class and then APPEND to a deque). Under the name
+/// `extend` or `append` [0], or `add` [1], a member is given as one and an object the pickle computed that may be
+/// called is a computed one; under a key the pickle computes (it may be any name: the value looked at first, the key
+/// only when the value matters), an object the pickle computed that may be called is a computed one, as either, and a
+/// member is passed over (round 6, A1': a known limit, PY311-MEMBER-PARITY: no member of PICKLE_DATA_MEMBERS can be
+/// called, and a file Python wrote holds a state keyed by an enum's member or a class with members in it); under
+/// `__dict__`, its dict is installed by reference (note_installed).
+fn note_attr_pair(book: &mut Book, k: &V, v: &V, depth: u8) {
+    let add = match k {
+        V::Str(s) if s.b == b"extend" || s.b == b"append" => Some(false),
+        V::Str(s) if s.b == b"add" => Some(true),
+        V::Str(s) if s.b == b"__dict__" && depth == 0 => {
+            note_installed(book, v);
+            return;
+        }
+        V::Str(_) => return,
+        _ => None,
+    };
+    let computed = |book: &Book| matches!(v, V::Call(_) | V::Obj(_) | V::Opaque) && callable(book, v);
+    match (add, v) {
+        (Some(add), V::Global(g)) => note_member(book, *g, add),
+        (Some(add), _) if computed(book) => book.any_given.computed[add as usize] = true,
+        (None, _) if computed(book) && computed_key(book, k) => book.any_given.computed = [true, true],
+        _ => {}
+    }
+}
+
+/// A dict installed as an object's attributes by reference (setattr(obj, '__dict__', d) in a slot state or torch's
+/// _set_obj_state, functools.partial's dict, torch's _rebuild_from_type's): its pairs are an attribute state's, and so
+/// are those a SETITEM puts in it later (kept by address, MAX_ATTR_DICTS; past it, unseen); a mapping the pickle
+/// computed there is attributes not seen.
+fn note_installed(book: &mut Book, v: &V) {
+    match v {
+        V::Seq(d) => {
+            let Ok(b) = d.try_borrow() else {
+                book.any_given.unseen = true;
+                return;
+            };
+            if b.kind != SK::Dict {
+                return;
+            }
+            book.any_given.unseen |= b.lost;
+            note_attr_pairs(book, &b.items, 1);
+            drop(b);
+            let ptr = Rc::as_ptr(d);
+            if !book.any_given.attr_ptrs.contains(&ptr) {
+                if book.any_given.attr_ptrs.len() >= MAX_ATTR_DICTS {
+                    book.any_given.unseen = true;
+                } else {
+                    book.any_given.attr_ptrs.insert(ptr);
+                    book.any_given.attr_dicts.push(v.clone());
+                }
+            }
+        }
+        V::Call(_) | V::Obj(_) | V::Opaque | V::Global(_) => book.any_given.unseen = true,
+        _ => {}
+    }
+}
+
+/// A container SETITEM gives attributes to: an object the pickle made or loads that is no plain mapping (OrderedDict,
+/// defaultdict, Counter, ChainMap, UserDict, dict, named exactly, whose items are no attributes), and a dict installed
+/// as an object's attributes by reference.
+fn attr_target(book: &Book, target: &V) -> bool {
+    match target {
+        V::Seq(s) => book.any_given.attr_ptrs.contains(&Rc::as_ptr(s)),
+        V::Opaque => true,
+        V::Call(m) | V::Obj(m) => {
+            // (the class: NEWOBJ's, a call's callee, copyreg.__newobj__'s first argument)
+            let class = match &m.callee {
+                V::Global(g) if book.globals.get(*g as usize).is_some_and(|gl| gl.model == Model::NewObj) => {
+                    match &m.args {
+                        V::Seq(a) => a.try_borrow().ok().and_then(|a| a.items.first().cloned()),
+                        _ => None,
+                    }
+                }
+                c => Some(c.clone()),
+            };
+            let plain = matches!(class, Some(V::Global(c)) if book.globals.get(c as usize).is_some_and(|gl| {
+                gl.kind == Kind::Safe && gl.ext.is_none() && matches!(
+                    [gl.module.as_slice(), b".", gl.name.as_slice()].concat().as_slice(),
+                    b"collections.OrderedDict" | b"collections.defaultdict" | b"collections.Counter"
+                    | b"collections.ChainMap" | b"collections.UserDict" | b"builtins.dict" | b"__builtin__.dict")
+            }));
+            !plain
+        }
+        _ => false,
+    }
+}
+
+/// (f, round 4) A call's arguments that may fill a dict: a literal name beside a member among them
+/// (`_operator.setitem(d, 'extend', m)`, `dict.setdefault(d, 'extend', m)`), and in the pairs of a list or tuple among
+/// them (`dict.update(d, [('extend', m)])`): (member, add). Each item looked at charged to GIVE_WORK.
+fn call_pairs(book: &mut Book, items: &[V]) -> Vec<(u32, bool)> {
+    let mut out = Vec::new();
+    for w in items.windows(2) {
+        if let Some(x) = literal_pair(book, &w[0], &w[1]) {
+            out.push(x);
+        }
+    }
+    for x in items {
+        let V::Seq(s) = x else { continue };
+        let Ok(b) = s.try_borrow() else { continue };
+        if !matches!(b.kind, SK::Tuple | SK::List) {
+            continue;
+        }
+        if !spend_give(book, b.items.len() as u64 + 1) {
+            break;
+        }
+        for p in &b.items {
+            let V::Seq(p) = p else { continue };
+            let Ok(p) = p.try_borrow() else { continue };
+            if matches!(p.kind, SK::Tuple | SK::List) && p.items.len() == 2 {
+                if let Some(x) = literal_pair(book, &p.items[0], &p.items[1]) {
+                    out.push(x);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How a state sets an object's attributes (note_state): a BUILD's (load_build: a dict, or a (dict, slots) pair; a
+/// list or a tuple only to a __setstate__ of the object's own), a helper's that sets them one by one (torch's
+/// _set_obj_state: a dict or a (dict, slots) pair; _rebuild_from_type's dict), or a helper's that reads a mapping or an
+/// iterable of pairs (types.SimpleNamespace, and copyreg._reconstructor with it as the base).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StateOf {
+    Build,
+    Setattr,
+    Pairs,
+}
+
+/// A 2-item tuple or list: a pair dict.update reads as one key and its value.
+fn is_pair_seq(p: &Seq) -> bool {
+    matches!(p.kind, SK::Tuple | SK::List) && p.items.len() == 2
+}
+
+fn is_pair(x: &V) -> bool {
+    matches!(x, V::Seq(p) if p.try_borrow().is_ok_and(|p| is_pair_seq(&p)))
+}
+
+/// A state an object's attributes are set from, for what any object may be given (Book::any_given), charged to
+/// GIVE_WORK: a dict's pairs (note_attr_pair); in place of a dict, a mapping the pickle computed (a dict subclass a call
+/// made, an object, a global) is attributes not seen: a BUILD's state, the halves of its (state, slotstate) pair
+/// (load_build), the fourth of functools.partial's (func, args, kwds, dict), which it installs by reference; a
+/// helper's state and each item of it. A list or a tuple is read as pairs (round 4, (e): the pairs dict.update reads,
+/// torch.nn.Module.__setstate__'s `self.__dict__.update(state)`) only where the helper reads pairs (StateOf::Pairs:
+/// types.SimpleNamespace's iterable), or where every item is a pair (a 2-item tuple or list: is_pair); and there, no
+/// helper reading it, its literal names only (round 6, A1'; round 5, A1: any 2-item container
+/// in any tuple state read as a pair made pandas' BlockManager axes, a numpy object array of two objects,
+/// functools.partial's two arguments and a custom __setstate__'s list of (enum member, object) pairs an attribute
+/// state; elsewhere only its attribute positions are read, as before).
+fn note_state(book: &mut Book, state: &V, of: StateOf) {
+    let computed = |v: &V| matches!(v, V::Call(_) | V::Obj(_) | V::Opaque | V::Global(_));
+    if computed(state) {
+        book.any_given.unseen = true;
+        return;
+    }
+    let V::Seq(s) = state else { return };
+    let Ok(b) = s.try_borrow() else {
+        book.any_given.unseen = true;
+        return;
+    };
+    match b.kind {
+        SK::Dict => {
+            book.any_given.unseen |= b.lost;
+            note_attr_pairs(book, &b.items, 0);
+        }
+        SK::Tuple | SK::List => {
+            let helper = of != StateOf::Build;
+            if helper {
+                book.any_given.unseen |= b.dropped;
+            }
+            let n = b.items.len();
+            if !spend_give(book, n as u64 + 1) {
+                return;
+            }
+            // (a state of pairs: what the helper reads, or every item a pair; there no helper reads it, its literal names
+            // only, round 6, A1': a key the pickle computes holding a member is a known limit, and one holding an object
+            // a state Python writes, p17)
+            if of == StateOf::Pairs || (n > 0 && b.items.iter().all(|x| is_pair(x))) {
+                for x in b.items.iter() {
+                    match x {
+                        V::Seq(p) => {
+                            let Ok(p) = p.try_borrow() else { continue };
+                            if is_pair_seq(&p) && (of == StateOf::Pairs || matches!(p.items[0], V::Str(_))) {
+                                note_attr_pair(book, &p.items[0], &p.items[1], 0);
+                            }
+                        }
+                        x if computed(x) => book.any_given.unseen = true,
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            for (i, x) in b.items.iter().enumerate() {
+                // (load_build's halves; functools.partial's dict; any of a helper's)
+                let attrs = helper || (b.kind == SK::Tuple && (n == 2 || (n == 4 && i == 3)));
+                if !attrs {
+                    continue;
+                }
+                match x {
+                    V::Seq(pr) => {
+                        let Ok(p) = pr.try_borrow() else {
+                            book.any_given.unseen = true;
+                            continue;
+                        };
+                        if p.kind != SK::Dict {
+                            continue;
+                        }
+                        if !helper && n == 4 {
+                            drop(p);
+                            note_installed(book, x);
+                        } else {
+                            book.any_given.unseen |= p.lost;
+                            note_attr_pairs(book, &p.items, 0);
+                        }
+                    }
+                    x if computed(x) => book.any_given.unseen = true,
+                    _ => {}
+                }
+            }
+        }
+        SK::Set => {}
+    }
+}
+
+/// The argument a helper sets the attributes of the object it returns from, as BUILD does from its state: torch's
+/// _rebuild_parameter_with_state and _rebuild_from_type_v2 (torch._utils._set_obj_state: a (dict, slots) or a dict)
+/// and _rebuild_from_type (ret.__dict__ = dict), types.SimpleNamespace's mapping or pairs (3.13's), and
+/// copyreg._reconstructor's state when its base is types.SimpleNamespace (base.__init__(obj, state)). And how the helper
+/// reads it: SimpleNamespace a mapping or an iterable of pairs (StateOf::Pairs), torch a dict or a (dict, slots) pair.
+fn attr_state(book: &Book, g: u32, items: &[V]) -> Option<(V, StateOf)> {
+    // (safe globals, so named exactly: a safe name is its module's)
+    let safe = |g: u32| book.globals.get(g as usize).filter(|gl| gl.kind == Kind::Safe && gl.ext.is_none());
+    let gl = safe(g)?;
+    let namespace = |gl: &Glob| gl.module == b"types" && gl.name == b"SimpleNamespace";
+    let st = |i: usize, how: StateOf| items.get(i).cloned().map(|v| (v, how));
+    match gl.model {
+        Model::FromType => st(3, StateOf::Setattr),
+        Model::Reconstructor => match items.get(1) {
+            Some(V::Global(b)) if safe(*b).is_some_and(namespace) => st(2, StateOf::Pairs),
+            _ => None,
+        },
+        _ if gl.module == b"torch._utils" && gl.name == b"_rebuild_parameter_with_state" => st(3, StateOf::Setattr),
+        _ if namespace(gl) => st(0, StateOf::Pairs),
+        _ => None,
+    }
+}
+
+/// The format's constructors that make an object of a class they are handed (data_maker's: numpy's _reconstruct,
+/// _internal._reconstruct and _mareconstruct, array's _array_reconstructor, numpy's __pyx_unpickle_SeedSequence,
+/// torch's _rebuild_wrapper_subclass), by a safe global's name: the arguments that are classes, and the constructor
+/// for a finding. (_mareconstruct(subtype, baseclass, …) makes an object of each.)
+fn made_classes(name: &[u8]) -> (&'static [usize], &'static str) {
+    const FIRST: &[usize] = &[0];
+    const BOTH: &[usize] = &[0, 1];
+    const NONE: &[usize] = &[];
+    match name {
+        b"_reconstruct" => (FIRST, "numpy's _reconstruct"),
+        b"_mareconstruct" => (BOTH, "numpy's _mareconstruct"),
+        b"_array_reconstructor" => (FIRST, "array's _array_reconstructor"),
+        b"__pyx_unpickle_SeedSequence" => (FIRST, "numpy's __pyx_unpickle_SeedSequence"),
+        b"_rebuild_wrapper_subclass" => (FIRST, "torch's _rebuild_wrapper_subclass"),
+        _ => (NONE, ""),
+    }
+}
+
+/// The class a joblib array wrapper's state names, of which joblib makes an object (numpy before 2.0: _reconstruct of
+/// NumpyArrayWrapper's and NDArrayWrapper's subclass, ZNDArrayWrapper's init_args[0]).
+fn wrapper_class(book: &Book, m: &Made, state: &V) -> Option<V> {
+    let V::Global(w) = &m.callee else { return None };
+    let gl = book.globals.get(*w as usize)?;
+    if gl.kind != Kind::Safe || gl.ext.is_some() {
+        return None;
+    }
+    match [gl.module.as_slice(), b".", gl.name.as_slice()].concat().as_slice() {
+        b"joblib.numpy_pickle.NumpyArrayWrapper" | b"sklearn.externals.joblib.numpy_pickle.NumpyArrayWrapper"
+        | b"joblib.numpy_pickle_compat.NDArrayWrapper" => dict_get(state, b"subclass"),
+        b"joblib.numpy_pickle_compat.ZNDArrayWrapper" => dict_get(state, b"init_args").as_ref().and_then(first_item),
+        _ => None,
+    }
 }
 
 /// The containers one look at a state or a call's arguments goes through, and how deep (more: SC-TRUNCATED).

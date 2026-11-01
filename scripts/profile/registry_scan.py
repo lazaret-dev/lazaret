@@ -16,13 +16,25 @@ import argparse
 import contextlib
 import json
 import os
-import resource
 import sys
 import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _common  # noqa: E402
+
+try:
+    import resource
+except ImportError:                                              # Windows: no peak figure
+    resource = None
+
+
+def peak_mb():
+    """The peak resident memory of this process in MB, or None where the platform does not say."""
+    if resource is None:
+        return None
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(peak / 1e6 if sys.platform == "darwin" else peak / 1024, 1)        # (bytes on macOS, KB elsewhere)
 
 
 @contextlib.contextmanager
@@ -109,7 +121,7 @@ def main(argv=None):
                                archiveBytes=res["archiveBytes"], issues=len(res["issues"]))
                 except Exception as exc:                        # noqa: BLE001 - a profile goes on to the next package
                     row["error"] = f"{type(exc).__name__}: {exc}"
-                row["maxrss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                row["maxrss_mb"] = peak_mb()
                 row["timings"] = t.report()
                 print(f"{row['pkg']} ({args.mode}, run {rep + 1}/{args.reps})" + (f": {row['error']}" if "error" in row else ""))
                 print("\n".join(timings.render(row["timings"])))

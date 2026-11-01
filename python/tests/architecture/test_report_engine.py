@@ -315,13 +315,14 @@ SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 
 
 def _isabs(p):
-    """os.path.isabs as Python 3.13 reads it, the rule the engine follows (report.rs is_abs): on Windows a path rooted
-    without a drive ("\\x") is not absolute. 3.10 to 3.12's ntpath said it was, and as_uri() then refused it (CI's
-    python-unit, Oct 29)."""
+    """os.path.isabs as the engine reads it (report.rs is_abs), which is Python 3.13's rule for a drive that is a
+    letter: on Windows a path rooted without a drive ("\\x") is not absolute. 3.10 to 3.12's ntpath said it was,
+    and as_uri() then refused it (CI's python-unit, Oct 29); 3.13's also takes a drive that is not a letter ("1:\\x"),
+    which the engine does not."""
     if PATH is not ntpath:
         return PATH.isabs(p)
     s = p[:3].replace("/", "\\")
-    return s.startswith(":\\", 1) or s.startswith("\\\\")
+    return s[:1].isascii() and s[:1].isalpha() and s.startswith(":\\", 1) or s.startswith("\\\\")
 
 
 def sarif_uri(path):
@@ -523,7 +524,10 @@ class FormTests(unittest.TestCase):
                     root = res["project"]
                     self.assertEqual("".join(core.sarif_chunks(res, root, windows=windows)),
                                      ref_sarif_renderer(sarif_report(res, root)))
-                    self.assertEqual(core.sarif_report(res, root) if not windows else sarif_report(res, root),
+                    # (core.sarif_report reads paths by the rules of the system it runs on: compared where those
+                    # are the rules this case is held to, Windows' on Windows, as CI's Windows jobs found, Oct 29)
+                    host = os.name == "nt"
+                    self.assertEqual(core.sarif_report(res, root) if windows == host else sarif_report(res, root),
                                      sarif_report(res, root))
 
     def test_html(self):

@@ -2018,7 +2018,7 @@ def _tree_stats_at(tree, parts):
     while stack:
         cur = stack.pop()
         try:
-            entries = tree.listdir(cur)
+            entries = tree.listdir(cur, identify=False)
         except OSError:
             continue
         for e in entries:
@@ -2983,7 +2983,7 @@ def _script_key_lines(text, section="scripts"):
     return _native.call("manifest_check", {"check": "key_lines", "section": section}, text)
 
 
-def scan_manifest(path, content, registry=False, hooks=None):
+def scan_manifest(path, content, registry=False, hooks=None, windows=False):
     """Check package.json install hooks — the primary supply-chain attack
     vector — and its dependencies from an insecure source. The engine's
     (BR-7 step 3 b: rust/crates/lazaret-engine/src/manifest/, the
@@ -3015,12 +3015,20 @@ def scan_manifest(path, content, registry=False, hooks=None):
     a package's root manifest counts in a registry or --deps scan, and none
     whose `hooks` are not npm's. MAJOR (WARN in the registry). `registry`
     None: a manifest under a dependency folder (DEP_MARKERS) is a
-    dependency's (the engine's: collect.rs)."""
+    dependency's (the engine's: collect.rs).
+
+    `windows`: `path` is the walk's on Windows (os.sep, _WINDOWS_PATHS:
+    _scan_manifest_entry), where a backslash separates its folders too, so
+    a dependency's node_modules\\dep\\test\\package.json is no package's
+    root manifest (WIN-DEP-PATHS). Otherwise a backslash is a file name's,
+    as on POSIX; a registry's member paths are '/'-separated on every
+    system and pass none."""
     if not isinstance(content, str):
         return load_manifest(path, content)[1]
     args = engine._budget({"path": path, "registry": None if registry is None else bool(registry),
                            "redact": bool(REDACT_SECRETS),
-                           "hooks": list(hooks) if hooks is not None else None})
+                           "hooks": list(hooks) if hooks is not None else None,
+                           "windows": bool(windows)})
     try:
         return engine._issues(path, _native.call("scan_manifest", args, content)["issues"])
     except _native.NativeError as exc:
@@ -3409,30 +3417,63 @@ class _TooDeep(OSError):
     """_Root: a folder nested deeper than MAX_WALK_DEPTH below the root is not opened."""
 
 
+#: Windows' stat calls: the third time the walk holds a file to is its creation time there, not its change time
+#: (_held_time).
+_WINDOWS_TIMES = os.name == "nt"
+
+
+def _held_time(st):
+    """The time the walk holds a file to beside its size and modification time (_file_record, _unwritten), the same
+    whichever stat call gave `st`. On POSIX its change time (st_ctime_ns), which only the system sets. On Windows its
+    creation time, the one time every stat call there fills alike: from Python 3.12, os.lstat and os.stat give
+    st_ctime the creation time (posixmodule.c's win32_xstat copies st_birthtime into it, as DirEntry_from_find_data
+    does for the listing's from 3.12.3; 3.12.0 to 3.12.2 leave the listing's 0) but os.fstat gives it the change time
+    (fileutils.c's _Py_fstat_noraise:
+    FILE_BASIC_INFO.ChangeTime), so the walk's lstat and a read's fstat of one file never agreed on it once the file
+    was written after it was made; st_birthtime_ns is the creation time in all of them (FILE_BASIC_INFO's, or
+    FILE_STAT_BASIC_INFORMATION's, CreationTime; the listing's ftCreationTime). Python 3.10 and 3.11 have no
+    st_birthtime there and give st_ctime the creation time in all of them (BY_HANDLE_FILE_INFORMATION's
+    ftCreationTime). Windows' change time is not held: no lstat there gives it (3.12 and later overwrite it with the
+    creation time; 3.10 and 3.11 never read it), and its writer can set it, as every time NTFS keeps
+    (SetFileInformationByHandle). So a file written in place at the same size whose modification time is kept or set
+    back (SetFileTime, or its updates suspended with -1) is not told from the file the walk listed there: writing in
+    place never moves its creation time (docs/DESIGN.md)."""
+    if not _WINDOWS_TIMES:
+        return st.st_ctime_ns
+    born = getattr(st, "st_birthtime_ns", None)
+    return st.st_ctime_ns if born is None else born
+
+
 def _file_record(st):
-    """What the walk keeps of a regular file it listed (`st`, its lstat): (st_dev, st_ino, st_size, st_mtime_ns,
-    st_ctime_ns). The size and times tell a file deleted and made again under its name, which can reuse its inode (ext4
-    does), or written in place, from the file the walk listed (LZ-03's re-check 2, N5)."""
-    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+    """What the walk keeps of a regular file it listed (`st`, its lstat): (st_dev, st_ino, st_size, st_mtime_ns, its
+    change time: _held_time, Windows' creation time). The size and times tell a file deleted and made again under its
+    name, which can reuse its inode (ext4 does), or written in place, from the file the walk listed (LZ-03's re-check
+    2, N5)."""
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, _held_time(st)
 
 
 def _unwritten(st, then, inode_known):
-    """Is `st` unwritten since `then` (st_size, st_mtime_ns, st_ctime_ns, or () where none was kept)? Its change time
-    is compared only where both have an inode: a listing without one (Windows' DirEntry.stat) has a change time of its
-    own making, which an fstat need not share."""
+    """Is `st` unwritten since `then` (st_size, st_mtime_ns, _held_time, or () where none was kept)? The held time is
+    compared only where both have an inode: a listing without one (a disk that keeps no file IDs) has times of its own
+    making, which an fstat need not share."""
     if not then:
         return True
     size, mtime, ctime = then
-    return st.st_size == size and st.st_mtime_ns == mtime and (not inode_known or st.st_ctime_ns == ctime)
+    return st.st_size == size and st.st_mtime_ns == mtime and (not inode_known or _held_time(st) == ctime)
 
 
 def _same_file(st, expect):
     """Is `st` (an lstat or an fstat) the regular file `expect` (_file_record: as the walk's lstat gave it), unwritten
-    since? Where an inode is not known (0: Windows' DirEntry.stat), its kind, size and modification time are compared."""
+    since? Its device and inode (a file ID on Windows: _Root.listdir) are compared, then its size, modification time
+    and _held_time (Windows' creation time: an fstat there has another change time than the lstat). Where neither has
+    an inode (0: a disk that keeps no file IDs), its kind, size and modification time are; where one has and the other
+    has not, it is not told to be that file (fail closed)."""
     if not _stat.S_ISREG(st.st_mode):
         return False
     dev, ino = expect[:2]
-    known = bool(ino and st.st_ino)
+    if bool(ino) != bool(st.st_ino):
+        return False
+    known = bool(ino)
     if known and (st.st_dev, st.st_ino) != (dev, ino):
         return False
     return _unwritten(st, expect[2:], known)
@@ -3440,15 +3481,44 @@ def _same_file(st, expect):
 
 def _same_entry(st, rec):
     """Is `st` (an lstat) the entry `rec`, (st_dev, st_ino, its kind: S_IFMT) as the walk's listing gave them, and a
-    regular file's size and times (_file_record) after them, unwritten since? Where an inode is not known (0: Windows'
-    DirEntry.stat), its kind (and a regular file's size and modification time) are compared."""
+    regular file's size and times (_file_record) after them, unwritten since? Where neither has an inode (0: a disk
+    that keeps no file IDs), its kind (and a regular file's size and modification time) are compared; where one has
+    and the other has not, it is not told to be that entry (fail closed)."""
     dev, ino, kind = rec[:3]
     if _stat.S_IFMT(st.st_mode) != kind:
         return False
-    known = bool(ino and st.st_ino)
+    if bool(ino) != bool(st.st_ino):
+        return False
+    known = bool(ino)
     if known and (st.st_dev, st.st_ino) != (dev, ino):
         return False
     return _unwritten(st, rec[3:], known)
+
+
+def _exact_path(folder, name):
+    """The path of `name` in `folder` as the system takes it exactly: on Windows, _windows_exact_path; elsewhere the
+    two joined."""
+    if os.name != "nt":
+        return os.path.join(folder, name)
+    return _windows_exact_path(folder, name)
+
+
+def _windows_exact_path(folder, name):
+    """Windows' path of `name` in `folder` as the system takes it exactly: absolute and with the \\\\?\\ prefix, so
+    that no name in it is rewritten (Win32 drops a name's trailing dots and spaces, so `a.js.` would name `a.js`) and
+    its length is not capped at MAX_PATH (`name` is joined once `folder` is made absolute, which would rewrite it too).
+    A \\\\.\\ folder is made \\\\?\\ (the device form still has its names rewritten), a UNC one \\\\?\\UNC\\, and NT's
+    \\??\\ form, which Win32 also opens (a root given so), \\\\?\\: the same namespace, but ntpath would take it for a
+    path rooted on the current drive, and every exact lstat under it would fail (each file then held to no file ID:
+    the whole tree changed, fail closed, but unreadable)."""
+    if folder.startswith("\\??\\"):
+        folder = "\\\\?\\" + folder[4:]
+    folder = ntpath.abspath(folder)
+    if folder.startswith("\\\\.\\"):
+        folder = "\\\\?\\" + folder[4:]
+    elif not folder.startswith("\\\\?\\"):
+        folder = "\\\\?\\UNC\\" + folder[2:] if folder.startswith("\\\\") else "\\\\?\\" + folder
+    return folder.rstrip("\\") + "\\" + name
 
 
 def _name_keys(name):
@@ -3529,7 +3599,10 @@ class _Root:
     its final path, its links followed (CreateFileW with FILE_FLAG_BACKUP_SEMANTICS, GetFinalPathNameByHandleW), is
     under `within` (the root's real path); every file is opened and read only when its handle's final path is
     (_open_verified), so no file outside the root is read. A folder swapped between that check and its listing can
-    still show its names there (not its files' contents): the gap docs/DESIGN.md states."""
+    still show its names there (not its files' contents): the gap docs/DESIGN.md states. Its listing gives no file
+    IDs: each entry is lstat'ed by its exact path for its volume and file ID (`listdir`), which the walk holds what
+    it found to, as to a device and inode elsewhere, with its size, modification time and creation time
+    (_held_time: Windows' fstat has another change time than its lstat)."""
 
     _KEEP = 16
     _STRIDE = 16
@@ -3819,10 +3892,18 @@ class _Root:
                 self.changed_at(parts[:n])
                 return
 
-    def listdir(self, parts=()):
+    def listdir(self, parts=(), identify=True):
         """[_Entry] of the folder `parts`, each lstat'ed while it is open. The folder itself is opened afresh (a
         descriptor of it kept from before is let go): what is listed is the folder its name names now, and a folder
-        that is a link or no folder now is _PathChanged."""
+        that is a link or no folder now is _PathChanged.
+
+        Where the listing gives an entry no identity (Windows' DirEntry.stat: st_ino and st_dev 0), the entry is
+        lstat'ed by its exact path (_exact_path) for its volume and file ID, which every later lstat and fstat of it
+        is held to (_same_file, _same_entry): a file replaced by another, whose size and times can be the same (a
+        copy made within one tick of the system's clock has them on NTFS, and SetFileTime sets them), is a change, as
+        it is by its inode on POSIX. Where that lstat fails or gives no ID either, the entry keeps the listing's stat:
+        no lstat or fstat with an ID is taken for it. `identify` False (a count or a probe of names and kinds, which
+        nothing is held to): the listing's stat as it is."""
         parts = tuple(parts)
         where = self._dir(parts, fresh=True)
         out = []
@@ -3832,8 +3913,20 @@ class _Root:
                     st = e.stat(follow_symlinks=False)
                 except OSError as exc:
                     st = exc
+                else:
+                    if identify and not st.st_ino and not _ANCHORED_OPEN:
+                        st = self._identified(where, e.name, st)
                 out.append(_Entry(e.name, st))
         return out
+
+    @staticmethod
+    def _identified(where, name, st):
+        """The lstat of `name` in the folder `where` (a path) by its exact path, where it has a file ID; else `st`."""
+        try:
+            now = os.lstat(_exact_path(where, name))
+        except (OSError, ValueError):
+            return st
+        return now if now.st_ino else st
 
     def listdir_after(self, parts):
         """listdir, for a reader after the walk: a regular file the walk listed in that folder that is gone from it,
@@ -4195,7 +4288,7 @@ def _listing(path):
 def _listing_at(tree, parts):
     """_listing of the folder `parts` of a _Root (a probe: None when it cannot be listed, a link now among them)."""
     try:
-        return [[_fs_display(e.name), e.is_dir(follow_symlinks=False)] for e in tree.listdir(parts)]
+        return [[_fs_display(e.name), e.is_dir(follow_symlinks=False)] for e in tree.listdir(parts, identify=False)]
     except OSError:
         return None
 
@@ -4548,7 +4641,11 @@ def _walk_tree(tree, excludes, include_deps, col):
             if _stat.S_ISLNK(mode) or (_stat.S_ISDIR(mode) and _is_reparse_point(st)):
                 listed.append([name, "link", _readlink((tree, parts + (e.name,)))])
             elif _stat.S_ISDIR(mode):
-                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino else None
+                # (a loop is a folder met again by its identity, as before on POSIX, however the tree is read; on
+                # Windows no link is followed and NTFS has no hard-linked folders, and a file ID there (_Root.listdir's)
+                # need not tell folders apart: 3.10's and 3.11's 64-bit one of ReFS's 128-bit IDs is not unique, so
+                # none is used)
+                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino and os.name != "nt" else None
                 listed.append([name, "dir", key, key in seen_dirs])
             elif not _stat.S_ISREG(mode):
                 listed.append([name, "special", next((c for test, c in _SPECIAL_CODES if test(mode)), "other")])
@@ -4670,10 +4767,11 @@ def collect_files(root, extra_excludes, include_deps=False):
 def _scan_manifest_entry(mf):
     """binding.gyp and every other .gyp / .gypi file -> scan_gyp (G11);
     package.json -> scan_manifest. A manifest inside a detected dependency
-    tree gets the registry hook set."""
+    tree gets the registry hook set. Its path is the walk's: os.sep-separated
+    (`windows` on Windows, WIN-DEP-PATHS)."""
     if os.path.splitext(mf["path"])[1].lower() in GYP_EXTS:
         return scan_gyp(mf["path"], mf["content"])
-    return scan_manifest(mf["path"], mf["content"], registry=mf.get("dep"))
+    return scan_manifest(mf["path"], mf["content"], registry=mf.get("dep"), windows=_WINDOWS_PATHS)
 
 
 # ---------------- --deps: what a dependency runs ----------------
@@ -6327,10 +6425,11 @@ def scan_twins(twins, exclude=(), include_deps=False, redact_secrets=True, shown
     with more beside it, and merge_findings keeps it once. -> (the trees' findings, merged, at their paths in the
     commit; {path: the tree its own file is in}; why a scan was not whole, [str]; how many trees held something to
     read; what the trees hold of their own for the metrics, {"files": [file], "configs": how many config files}). A
-    tree holding nothing Lazaret reads adds nothing."""
+    tree holding nothing Lazaret reads adds nothing. (`overlaid` holds the commit's paths, '/'-separated; they are
+    compared with the scan's in the scan's form, os.sep-separated as _fs_display shows them.)"""
     issues, where, why, read, own = [], {}, [], 0, {"files": [], "configs": 0}
     for twin in twins:
-        given, collected = (overlaid or {}).get(twin, set()), {}
+        given, collected = {_fs_display(p.replace("/", os.sep)) for p in (overlaid or {}).get(twin, ())}, {}
         try:
             got = scan_project(twin, exclude, include_deps=include_deps, redact_secrets=redact_secrets, shown=shown,
                                collected=collected)

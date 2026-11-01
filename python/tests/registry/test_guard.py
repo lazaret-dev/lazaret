@@ -26,10 +26,11 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from unittest import mock
 
 from lazaret import _cli
-from lazaret.registry import guard, repo
+from lazaret.registry import guard, pmsettings, repo
 
 UTC = datetime.timezone.utc
 
@@ -1284,6 +1285,32 @@ class ReportTests(unittest.TestCase):
             self.assertEqual((doc["generatedBy"], doc["installed"], doc["blocked"], doc["exitCode"]),
                              ("lazaret-guard-1", False, 1, 1))
             self.assertEqual([p["name"] for p in doc["packages"]], ["evil", "warn", "ok"])
+
+    def test_signed_query_credentials_do_not_reach_errors_terminal_or_json(self):
+        query_secret = "query-" + "secret-canary"
+        fragment_secret = "fragment-" + "secret-canary"
+        url = ("https://registry.example.invalid/pkg.tgz?X-Amz-Credential=TEMPKEY&"
+               f"X-Amz-Signature={query_secret}&unknown=opaque#{fragment_secret}")
+        fetcher = guard.Fetcher({"registry.example.invalid"})
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.URLError("contained refusal")
+        with mock.patch.object(fetcher, "_open_native", return_value=None), \
+                mock.patch.object(fetcher, "_opener", return_value=opener), \
+                self.assertRaises(repo.FetchError) as caught:
+            fetcher.get(url)
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "report.json")
+            ctx = context(json=path)
+            check = ctx.add(guard.Check("npm", "package", "1.0.0", pmsettings.shown(url)))
+            ctx.not_checked(check, caught.exception)
+            guard.finish(ctx, installed=False)
+            with open(path, encoding="utf-8") as report:
+                written = report.read()
+        output = "\n".join((str(caught.exception), ctx.out.getvalue(), written))
+        self.assertIn("https://registry.example.invalid/pkg.tgz [query redacted]", output)
+        for secret in ("TEMPKEY", query_secret, "opaque", fragment_secret):
+            self.assertNotIn(secret, output)
 
     def test_plan_and_unchecked(self):
         ctx = context(plan=True)

@@ -256,10 +256,10 @@ class Unreadable(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         real = core._Root.listdir               # (folders are listed from the root's descriptor: LZ-03)
 
-        def listdir(tree, parts=()):
+        def listdir(tree, parts=(), **kwargs):
             if tuple(parts)[-1:] == ("sub",):
                 raise PermissionError(13, "Permission denied")
-            return real(tree, parts)
+            return real(tree, parts, **kwargs)
         with mock.patch.object(core._Root, "listdir", listdir):
             res = core.scan_project(root)
         subs = [i for i in res["issues"] if i["file"] == "sub"]

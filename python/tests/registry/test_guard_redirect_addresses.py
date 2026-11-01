@@ -20,6 +20,7 @@ import http.server
 import io
 import ipaddress
 import os
+import re
 import socket
 import ssl
 import tempfile
@@ -39,6 +40,16 @@ NAMES = ("localhost", "proxy.test", "other.test", "storage.test", "cdn.test", "r
 PUBLIC_PROXY, PUBLIC_CDN = "8.8.8.8", "1.1.1.1"
 PRIVATE_PROXY, PRIVATE_STORAGE = "10.20.0.2", "10.30.0.3"
 BODY = b"module zip bytes"
+
+
+def read_as_an_address(host):
+    """The addresses this system's resolver gives for `host`, an address written as a number (2130706433, 0x7f000001,
+    127.1, 0177.0.0.1); none where it gives none. glibc's reads each as 127.0.0.1, macOS's 0177.0.0.1 as 177.0.0.1,
+    and Windows' none of them as an address: it looks them up as names, and finds none (11001, CI's windows-2025)."""
+    try:
+        return {a[4][0] for a in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+    except socket.gaierror:
+        return set()
 
 
 # ---------------------------------------------------------------- the classes
@@ -533,17 +544,31 @@ class _RedirectTests:
         # (2130706433, 0x7f000001, 127.1 and 0177.0.0.1 are names to the URL and addresses to the resolver: judged
         # by the address the lookup gives, before anything is connected. Resolvers differ on them: glibc's reads
         # 0177.0.0.1 as octal, 127.0.0.1, and macOS's as decimal, 177.0.0.1, a public address that is connected to
-        # there, as it may be, and a test must not reach out to; so a form this system's resolver does not read as
-        # 127.0.0.1 is skipped here, never fetched)
+        # there, as it may be, and a test must not reach out to; Windows' reads none of them as an address. A form
+        # this system's resolver reads as no address (Windows': it looks it up as a name and finds none) is a hop that
+        # fails, there being nothing to judge or to connect to, and nothing past the proxy asked; one it reads as
+        # another address (macOS's 0177.0.0.1) is skipped here, never fetched)
         f = self.fetcher({"proxy.test": PUBLIC_PROXY})
+        asked = 0
         for host in ("2130706433", "0x7f000001", "127.1", "0177.0.0.1"):
             with self.subTest(host=host):
-                read = {a[4][0] for a in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
-                if read != {"127.0.0.1"}:
+                read = read_as_an_address(host)
+                if read and read != {"127.0.0.1"}:
                     self.skipTest(f"this system's resolver reads {host} as {', '.join(sorted(read))}")
-                self.refused(f, f"/hop/{host}/blob", f"redirect to {host}, a loopback address (127.0.0.1), refused: "
-                                                     f"the proxy is on a public address")
-        self.assertEqual(set(self.server.hosts()), {"proxy.test"})
+                with self.server.lock:
+                    self.server.connections, self.server.requests = 0, []
+                asked += 1
+                if not read:
+                    url = self.url("proxy.test", f"/hop/{host}/blob")
+                    with self.assertRaises(repo.FetchError) as caught:
+                        f.get(url, max_bytes=1000)
+                    self.assertNotIsInstance(caught.exception, guard.HopRefused)    # (no address: nothing judged)
+                    self.assertRegex(str(caught.exception), rf"^(URL|network) error fetching {re.escape(url)}: ")
+                else:
+                    self.refused(f, f"/hop/{host}/blob", f"redirect to {host}, a loopback address (127.0.0.1), "
+                                                         f"refused: the proxy is on a public address")
+                self.assertEqual(self.server.hosts(), ["proxy.test"], "only the proxy was asked")
+        self.assertTrue(asked, "every form was skipped")
 
     def test_a_name_with_one_address_it_may_not_reach_is_refused(self):
         self.names["cdn.test"] = ["127.0.0.1", "10.9.9.9"]           # (every address the name gives is judged)
@@ -953,7 +978,7 @@ class FeedDownloadTests(_ServerCase):
         """sca_feeds' opener, built again in this test's environment: urllib's ProxyHandler reads the proxy settings
         when it is made, and the module's was made with the environment the tests started in; its HTTPS handler keeps
         the context its first request made (this test's root)."""
-        opener = urllib.request.build_opener(sca_feeds._HttpsRedirects, sca_feeds._HTTPSHandler())
+        opener = nativenet.build_opener(sca_feeds._HttpsRedirects, sca_feeds._HTTPSHandler())
         patch = mock.patch.object(sca_feeds, "_OPENER", opener)
         patch.start()
         self.addCleanup(patch.stop)
@@ -990,6 +1015,8 @@ class FeedDownloadTests(_ServerCase):
         ]
         for hop, message in cases:
             with self.subTest(hop=hop):
+                if hop.isdigit() and read_as_an_address(hop) != {"127.0.0.1"}:     # (as the redirect tests do)
+                    self.skipTest(f"this system's resolver does not read {hop} as 127.0.0.1")
                 with self.server.lock:
                     self.server.connections, self.server.requests = 0, []
                 self.refused(f"/hop/{hop}/latest/meta-data/", message, dict(public, **{"storage.test": PRIVATE_STORAGE}))

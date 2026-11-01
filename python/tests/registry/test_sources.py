@@ -6,6 +6,7 @@ out (`export-ignore`), and what is written where. Archives are built in
 memory from inert text and the network seam is a fake: nothing is fetched.
 """
 
+import builtins
 import contextlib
 import email.message
 import io
@@ -524,6 +525,22 @@ class CheckoutGitHub(Tmp):
         self.assertEqual(self.cases(ck), [("A", "one name on this disk with a/: kept apart and read at its own path")])
         self.assertEqual(sources.not_covered(ck), [("case", APART.format(1, "A"))])
 
+    def test_a_file_whose_name_is_a_folders_on_a_disk_that_denies_it_is_kept_apart(self):
+        # (Windows' disk answers a file `A` where a folder `a/` is with "access denied", not EEXIST: such a file was
+        # not written at all; it is kept apart in a twin tree, as on a Mac)
+        real_open = builtins.open
+
+        def denying(file, mode="r", *args, **kwargs):
+            if "x" in mode and os.path.isdir(file):
+                raise PermissionError(13, "Access is denied", file)
+            return real_open(file, mode, *args, **kwargs)
+        with mock.patch.object(sources, "open", denying, create=True):
+            ck, trees = self.kept({"a/b.js": b"under", "A": b"file"}, fold=apfs_fold)
+        self.assertEqual(trees, [{"a/b.js": b"under"}, {"A": b"file"}])
+        self.assertEqual(self.cases(ck), [("A", "one name on this disk with a/: kept apart and read at its own path")])
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(1, "A"))])
+        self.assertEqual(ck.skipped, [])
+
     def test_folders_that_differ_only_in_case_are_not_one_folder(self):
         # (a disk that ignores case had lib/b.js written into Lib/, and what was found in it reported at Lib/b.js: no
         # path of the commit)
@@ -617,8 +634,16 @@ class CheckoutGitHub(Tmp):
             "dot.": "could not be written (a name ending in a dot or a space, which Windows does not keep as given)",
             "lpt¹": "could not be written (a device's name, which Windows does not keep as given)"})
         self.assertEqual(len(sources.not_covered(ck)), 7)
-        ck, trees = self.kept({"CONTRIBUTING.md": b"1", "console.js": b"2", "nul.d/x": b"3"}, check_tree=False)
-        self.assertEqual(len(trees[0]), 3)                                   # (elsewhere, and names like them: kept)
+        like = {"CONTRIBUTING.md": b"1", "console.js": b"2"}
+        with mock.patch.object(sources, "WINDOWS", True):
+            ck, trees = self.kept(like, check_tree=False)
+        self.assertEqual((trees, ck.skipped), ([like], []))                 # (names like a device's: kept on Windows)
+        ck, trees = self.kept({**like, "nul.d/x": b"3"}, check_tree=False)
+        if sources.WINDOWS:                                                  # (nul.d is NUL's name with an extension)
+            self.assertEqual((trees, dict(ck.skipped)), ([like], {
+                "nul.d/x": "could not be written (a device's name, which Windows does not keep as given)"}))
+        else:
+            self.assertEqual(len(trees[0]), 3)                               # (elsewhere, a device's name too: kept)
 
     def test_an_entry_again_is_written_over_its_own_file(self):
         # (an archive's later entry of a path wins, as an extractor writes it, in the tree it went to; the reader

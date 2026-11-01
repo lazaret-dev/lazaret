@@ -696,6 +696,8 @@ pub struct ServerConnection {
     got_close_notify: bool,
     sent_close_notify: bool,
     failed: bool,
+    /// A fatal alert was queued (the client caused the failure), which the stream makes sure the client can read.
+    alerted: bool,
     ccs_skipped: u8,
     suite: Option<Suite>,
     alpn: Option<Vec<u8>>,
@@ -751,6 +753,7 @@ impl ServerConnection {
             got_close_notify: false,
             sent_close_notify: false,
             failed: false,
+            alerted: false,
             ccs_skipped: 0,
             suite: None,
             alpn: None,
@@ -804,6 +807,12 @@ impl ServerConnection {
     /// True after a fatal error (a fatal alert may be waiting in the output).
     pub fn is_failed(&self) -> bool {
         self.failed
+    }
+
+    /// True the first time it is asked after a fatal error has queued a fatal alert (see [`Linger`](super::Linger)): the
+    /// stream closes gently once, not again at each read that follows.
+    pub(crate) fn take_alerted(&mut self) -> bool {
+        std::mem::take(&mut self.alerted)
     }
 
     pub fn cipher_suite(&self) -> Option<Suite> {
@@ -1043,6 +1052,7 @@ impl ServerConnection {
                 } else {
                     self.queue_plain(RT_ALERT, &alert);
                 }
+                self.alerted = true;
             }
             self.sent_close_notify = true;
         }
@@ -1889,8 +1899,10 @@ impl ServerConnection {
                     }
                     let next = self.read_cipher.as_ref().map(|c| c.next_generation());
                     self.read_cipher = next;
-                    if msg[4] == 1 {
-                        // asked to update too: answer under the old keys, then rotate
+                    if msg[4] == 1 && !self.sent_close_notify {
+                        // asked to update too: answer under the old keys, then rotate (unless we have sent close_notify:
+                        // nothing is sent after that, RFC 8446 section 6.1, and our keys are not used again; as the
+                        // client does, B-39)
                         self.send_key_update(false)?;
                     }
                 }
@@ -1930,7 +1942,8 @@ impl Drop for ServerConnection {
 // ------------------------------------------------------------------------------------------------ blocking driver
 
 /// An accepted TLS 1.3 connection over a blocking transport. Implements [`Read`] and [`Write`]; a
-/// close_notify is sent when it is dropped.
+/// close_notify is sent when it is dropped. After a fatal alert, during the handshake or after it, the transport is
+/// closed gently ([`Linger`](super::Linger)), so that the client reads the alert even if it was still sending.
 pub struct ServerStream<S: Read + Write> {
     io: S,
     conn: ServerConnection,
@@ -1939,7 +1952,10 @@ pub struct ServerStream<S: Read + Write> {
 
 impl<S: Read + Write> ServerStream<S> {
     /// Performs the server side of the handshake over `io`.
-    pub fn accept(io: S, config: &Arc<ServerConfig>) -> Result<ServerStream<S>> {
+    pub fn accept(io: S, config: &Arc<ServerConfig>) -> Result<ServerStream<S>>
+    where
+        S: super::Linger,
+    {
         let mut s = ServerStream {
             io,
             conn: ServerConnection::new(config.clone()),
@@ -1947,8 +1963,7 @@ impl<S: Read + Write> ServerStream<S> {
         };
         while s.conn.is_handshaking() {
             if let Err(e) = s.pump() {
-                let _ = s.send_output();
-                let _ = s.io.flush();
+                s.send_alert();
                 return Err(e);
             }
         }
@@ -1990,6 +2005,18 @@ impl<S: Read + Write> ServerStream<S> {
         let n = self.conn.output().len();
         self.conn.consume_output(n);
         res
+    }
+
+    /// After a fatal error: sends the alert it queued, if it queued one, and closes gently, so that a client that was
+    /// still sending reads it before the connection is closed (B-119).
+    fn send_alert(&mut self)
+    where
+        S: super::Linger,
+    {
+        let sent = self.send_output().and_then(|_| self.io.flush()).is_ok();
+        if self.conn.take_alerted() && sent {
+            self.io.linger();
+        }
     }
 
     pub fn cipher_suite(&self) -> Option<Suite> {
@@ -2070,7 +2097,7 @@ fn to_io(e: Error) -> io::Error {
     }
 }
 
-impl<S: Read + Write> Read for ServerStream<S> {
+impl<S: Read + Write + super::Linger> Read for ServerStream<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -2084,8 +2111,7 @@ impl<S: Read + Write> Read for ServerStream<S> {
                 return Ok(0);
             }
             if let Err(e) = self.conn.process() {
-                let _ = self.send_output();
-                let _ = self.io.flush();
+                self.send_alert();
                 return Err(to_io(e));
             }
             if self.conn.has_plaintext() || self.conn.peer_closed() {
