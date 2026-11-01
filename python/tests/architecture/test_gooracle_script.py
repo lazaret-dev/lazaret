@@ -179,6 +179,23 @@ class OracleTests(unittest.TestCase):
                 gooracle.build("/nowhere")
         self.assertIn("go is not installed", str(caught.exception))
 
+    def test_the_generated_module_uses_the_installed_toolchain_language(self):
+        for reported, want in (("go1.22.9\n", "1.22"), ("go1.27.2\n", "1.27"),
+                               ("devel go1.28-abcd\n", "1.28")):
+            with self.subTest(reported=reported), self.fake_run(reported) as run:
+                self.assertEqual(gooracle.toolchain_language("/go"), want)
+            self.assertEqual(run.call_args.args[0], ["/go", "env", "GOVERSION"])
+
+    def test_the_go_language_probe_rejects_old_or_unreadable_versions(self):
+        with self.fake_run("go1.21.13\n"):
+            with self.assertRaises(SystemExit) as caught:
+                gooracle.toolchain_language("/go")
+        self.assertIn("needs Go 1.22 or later", str(caught.exception))
+        with self.fake_run("", 2, "broken go env"):
+            with self.assertRaises(SystemExit) as caught:
+                gooracle.toolchain_language("/go")
+        self.assertIn("broken go env", str(caught.exception))
+
 
 class CompareTests(unittest.TestCase):
     def test_nothing_differs_when_the_answers_are_this_module_s_own(self):
