@@ -45,6 +45,12 @@ on:
       - ".github/workflows/wheels.yml"
   workflow_call:
   workflow_dispatch:
+    inputs:
+      tart_runner_smoke:
+        description: Run only the disposable Tart runner identity probe
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -60,6 +66,7 @@ jobs:
   # The check, the load and the Python suite then run inside the image too,
   # on its glibc 2.28 and its Python 3.12.
   linux:
+    if: ${{ !inputs.tart_runner_smoke }}
     name: library (${{ matrix.tag }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -119,6 +126,7 @@ jobs:
   # Windows DLL links the C runtime statically: machines without the Visual
   # C++ redistributable can load it.
   macos-windows:
+    if: ${{ !inputs.tart_runner_smoke }}
     name: library (${{ matrix.tag }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -178,6 +186,7 @@ jobs:
   # platform wheel is the sdist's package files plus a library, which the
   # check holds it to, against its own tag.
   dist:
+    if: ${{ !inputs.tart_runner_smoke }}
     name: sdist and wheels
     needs: [linux, macos-windows]
     runs-on: ubuntu-24.04
@@ -225,6 +234,7 @@ jobs:
   # platform without a platform wheel: it compiles the engine (with the
   # pinned toolchain) and the package runs it.
   install:
+    if: ${{ !inputs.tart_runner_smoke }}
     name: install (${{ matrix.tag }})
     needs: dist
     runs-on: ${{ matrix.runner }}
@@ -266,6 +276,7 @@ jobs:
           assert out == f"lazaret {v} (engine: rust {v})", out
           print(out)
           '
+
       - name: Rust ${{ env.RUST_VERSION }}, for the sdist
         if: matrix.tag == 'manylinux_2_28_x86_64'
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
@@ -286,3 +297,19 @@ jobs:
           assert out == f"lazaret {v} (engine: rust {v})", out
           print(out)
           '
+
+  tart-runner-smoke:
+    if: ${{ inputs.tart_runner_smoke }}
+    name: Disposable Tart runner identity
+    runs-on: [self-hosted, macOS, ARM64, lazaret-tart, macos-26-arm64]
+    timeout-minutes: 10
+    steps:
+      - name: Verify the isolated Apple-silicon guest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test ! -S /var/run/docker.sock
+          sw_vers
+          uname -a
+          whoami
