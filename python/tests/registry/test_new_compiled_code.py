@@ -238,16 +238,21 @@ class GuardPypiTests(unittest.TestCase):
     def test_an_ok_wheel_with_compiled_code_its_predecessor_had_none_of(self):
         cache = G.VerdictCache(None)
         name = "pkg-1.1-cp311-abi3-manylinux_2_17_x86_64.whl"
-        check, scanner = self.check(cache, wheel("1.0", PURE), name, wheel("1.1", NATIVE))
+        # Reuse the artifacts themselves for the cache-hit check.  ZipFile stamps
+        # newly written members with the current time, so rebuilding the same
+        # logical wheel later can give it a different digest.  That is correctly
+        # a cache miss, not evidence that this exact artifact was not cached.
+        old, new = wheel("1.0", PURE), wheel("1.1", NATIVE)
+        check, scanner = self.check(cache, old, name, new)
         self.assertEqual((check.verdict, check.blocked, scanner.scans), ("WARN", [], 2))
         self.assertTrue(check.indicators[0].startswith("SC-NEW-COMPILED-CODE (MAJOR) pkg/_native.abi3.so"),
                         check.indicators)
         self.assertEqual(check.prior["newCompiledCode"], ["pkg/_native.abi3.so"])
         # the verdict cached WARN with the comparison; the predecessor's with its compiled code (none)
-        check, scanner = self.check(cache, wheel("1.0", PURE), name, wheel("1.1", NATIVE))
+        check, scanner = self.check(cache, old, name, new)
         self.assertEqual((check.verdict, scanner.scans), ("WARN", 0))
         older = cache.get(G.VerdictCache.key("pypi", "pkg", "1.0",
-                                             "sha256:" + hashlib.sha256(wheel("1.0", PURE)).hexdigest()))
+                                             "sha256:" + hashlib.sha256(old).hexdigest()))
         self.assertEqual((older["verdict"], older["compiled"]), ("OK", []))
 
     def test_a_predecessor_cached_without_its_compiled_code_is_scanned_again(self):
