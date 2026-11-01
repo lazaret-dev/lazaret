@@ -756,6 +756,13 @@ class Fetcher:
         class Redirects(urllib.request.HTTPRedirectHandler):
             max_redirections = repo.MAX_REDIRECTS
 
+            # Python 3.10 has no http_error_308 handler (it was added in
+            # Python 3.11), even though Lazaret supports 3.10 and the kept
+            # transport handles 308 itself.  Route 308 through urllib's
+            # normal redirect machinery so our check below sees and refuses
+            # redirect-introduced credentials on every supported Python.
+            http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302
+
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 deadline = getattr(req, "lazaret_deadline", None)
                 if deadline is not None and deadline.expired():
@@ -770,7 +777,11 @@ class Fetcher:
                 except repo.FetchError as exc:
                     fp.close()
                     raise urllib.error.URLError(f"redirect blocked: {exc}")
-                new = super().redirect_request(req, fp, code, msg, headers, newurl)
+                # Python 3.10's redirect_request also predates 308 and only
+                # accepts 307 for the equivalent method-preserving semantics.
+                compatible_code = (307 if code == 308 and
+                                   not hasattr(urllib.request.HTTPRedirectHandler, "http_error_308") else code)
+                new = super().redirect_request(req, fp, compatible_code, msg, headers, newurl)
                 header = fetcher.auth.header(newurl, from_url=req.full_url) if new is not None else None
                 if header:                                  # (the request's own was not carried over)
                     new.add_unredirected_header("Authorization", header)
