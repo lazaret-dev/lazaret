@@ -44,9 +44,9 @@ jobs:
         ) &&
         (
           matrix.os == 'macos-latest' &&
-          fromJSON('["self-hosted","macOS","ARM64","lazaret-tart","macos-26-arm64"]') ||
+          fromJSON('["self-hosted","macOS","ARM64"]') ||
           matrix.os == 'macos-15' &&
-          fromJSON('["self-hosted","macOS","ARM64","lazaret-tart","macos-15-arm64"]')
+          fromJSON('["self-hosted","macOS","ARM64","macos-15-arm64"]')
         ) ||
         matrix.os
       }}
