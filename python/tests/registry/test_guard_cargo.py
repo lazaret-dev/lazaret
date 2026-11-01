@@ -322,6 +322,12 @@ class CheckCrateTests(CrateCase):
 
 
 class AgeTests(CrateCase):
+    def setUp(self):
+        super().setUp()
+        clock = mock.patch.object(guard, "now", return_value=cs.NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def test_a_release_younger_than_min_age_is_blocked_by_the_indexs_pubtime(self):
         ctx = self.context()
         check = self.check(ctx, self.pkg("onlynew"))
