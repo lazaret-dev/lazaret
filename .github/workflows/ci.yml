@@ -28,7 +28,24 @@ jobs:
   # the suite runs, since the engine's own tests skip without it. Tests that
   # need Postgres skip themselves here (LAZARET_TEST_PG_DSN is unset).
   python-unit:
-    runs-on: ${{ matrix.os }}
+    # One representative Apple-silicon lane uses the disposable Tart runner
+    # for trusted main pushes and same-repository PRs from the sole maintainer.
+    # Forks, bots, other actors and workflow_call remain GitHub-hosted.
+    runs-on: >-
+      ${{
+        matrix.os == 'macos-latest' &&
+        matrix.python == '3.12' &&
+        (
+          github.event_name == 'push' ||
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.actor == 'johnabooth-afk'
+          )
+        ) &&
+        fromJSON('["self-hosted","macOS","ARM64","lazaret-tart","macos-26-arm64"]') ||
+        matrix.os
+      }}
     strategy:
       fail-fast: false
       matrix:
