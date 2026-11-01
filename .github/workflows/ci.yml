@@ -29,12 +29,36 @@ jobs:
   # the suite runs, since the engine's own tests skip without it. Tests that
   # need Postgres skip themselves here (LAZARET_TEST_PG_DSN is unset).
   python-unit:
-    runs-on: ${{ matrix.os }}
+    # Two representative Apple-silicon lanes use disposable Tart runners for
+    # trusted main pushes and same-repository PRs from the sole maintainer.
+    # Forks, bots, other actors and workflow_call remain GitHub-hosted.
+    runs-on: >-
+      ${{
+        matrix.python == '3.12' &&
+        (
+          github.event_name == 'push' ||
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.actor == 'johnabooth-afk'
+          )
+        ) &&
+        (
+          matrix.os == 'macos-latest' &&
+          fromJSON('["self-hosted","macOS","ARM64"]') ||
+          matrix.os == 'macos-15' &&
+          fromJSON('["self-hosted","macOS","ARM64","macos-15-arm64"]')
+        ) ||
+        matrix.os
+      }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: macos-15
+            python: "3.12"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,6 +66,17 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Rust toolchain for the disposable self-hosted runner
+        if: runner.environment == 'self-hosted'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
+      - name: Match the GitHub-hosted optional tool surface
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          pnpm_path=$(command -v pnpm || true)
+          if [[ -n "$pnpm_path" ]]; then
+            /bin/mv "$pnpm_path" "${pnpm_path}.lazaret-disabled"
+          fi
       - name: The native engine
         working-directory: rust
         run: cargo build --release --offline --locked
