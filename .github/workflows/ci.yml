@@ -58,6 +58,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Rust toolchain for the disposable self-hosted runner
+        if: runner.environment == 'self-hosted'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-16
       - name: The native engine
         working-directory: rust
         run: cargo build --release --offline --locked
