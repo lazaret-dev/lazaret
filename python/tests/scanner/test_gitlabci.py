@@ -436,9 +436,11 @@ class LinearTimeTests(unittest.TestCase):
 
     def test_hostile_files(self):
         for text in ADVERSARIAL():
-            start = time.perf_counter()
+            # This guards the scanner's CPU complexity.  Wall time also counts
+            # time that a contended CI worker has scheduled this process out.
+            start = time.process_time()
             gitlabci.hardening(text)
-            self.assertLess(time.perf_counter() - start, 3.0, text[:40])
+            self.assertLess(time.process_time() - start, 3.0, text[:40])
 
 
 if __name__ == "__main__":
