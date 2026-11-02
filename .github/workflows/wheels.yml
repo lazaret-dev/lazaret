@@ -199,7 +199,9 @@ jobs:
     # (the Python suite alone took some 20 minutes on win_amd64, PR #17's
     # first run, and the second's win_amd64 and macOS jobs were cancelled at
     # 30 with the build before it)
-    timeout-minutes: 60
+    # The full Python suite takes about 53 minutes on the Tart macOS image;
+    # setup and the native build put the complete job just over one hour.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
