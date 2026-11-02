@@ -94,13 +94,13 @@ class MagicBytes(unittest.TestCase):
             fh.write(ELF)
             fh.truncate(3 * 1024 ** 3)          # sparse 3 GB: never read whole
         reads = []
-        real = core._read_prefix
+        real = core._Root.read                  # (the walk reads from the root's descriptor: LZ-03)
 
-        def spy(path, limit):
-            reads.append((os.path.basename(path), limit))
-            return real(path, limit)
+        def spy(tree, parts, limit, expect=None):
+            reads.append((parts[-1], limit))
+            return real(tree, parts, limit, expect)
         from unittest import mock
-        with mock.patch.object(core, "_read_prefix", spy):
+        with mock.patch.object(core._Root, "read", spy):
             files = by_file(core.scan_project(root))
         self.assertEqual(files.get("disk.img"), {"SC-BINARY"})
         self.assertIn(("disk.img", core.HEADER_SAMPLE_BYTES), reads)

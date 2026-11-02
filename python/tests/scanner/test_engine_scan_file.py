@@ -1,11 +1,10 @@
-"""engine.scan_files and engine.scan_file: the native engine scans the files
-in dependency mode (Python, JavaScript, SQL), and the first part of the
-others (project mode: its scan_rules), after which core runs the passes that
-follow, the markers and the cap (core.scan_file_after_rules). A file the
-engine cannot answer is SC-TRUNCATED, which fails the gate: EXHAUSTED when
-it spent its work budget, "its scan failed" on an internal error. The
-answers come back in the order asked, and redaction follows
-core.REDACT_SECRETS.
+"""engine.scan_files and engine.scan_file: the native engine scans each file
+whole, in dependency mode (Python, JavaScript, SQL) and in project mode
+(the rules, then the passes after them, the markers and the cap: Q-1, with
+the configured part of the taint model, core.taint_args). A file the engine
+cannot answer is SC-TRUNCATED, which fails the gate: EXHAUSTED when it
+spent its work budget, "its scan failed" on an internal error. The answers
+come back in the order asked, and redaction follows core.REDACT_SECRETS.
 
 What is sent, and what an unanswered file becomes, are checked with the
 library mocked; the findings, with the library (skipped where it is not
@@ -59,16 +58,27 @@ class CallTests(unittest.TestCase):
 
     def test_what_each_file_is_sent_as(self):
         call = answering({"ok": []})
-        with mock.patch.object(_native, "call", side_effect=call), \
-                mock.patch.object(core, "scan_file_after_rules", lambda path, content, lang, found: found):
+        with mock.patch.object(_native, "call", side_effect=call):
             engine.scan_files(FILES)
         self.assertEqual([text for _call, _args, text in call.sent], [f[1] for f in FILES])
         for (name, args, _text), (_path, _t, lang, dep) in zip(call.sent, FILES):
-            self.assertEqual(name, "scan_file" if dep else "scan_rules")
+            self.assertEqual(name, "scan_file")
             self.assertEqual(args["dep"], dep)
             self.assertEqual(args["lang"], lang)
             self.assertEqual(args["redact"], bool(core.REDACT_SECRETS))
             self.assertIs(args["neumaier"], False)
+            self.assertNotIn("taint", args)                 # (nothing configured)
+
+    def test_a_taint_configuration_goes_with_a_project_file(self):
+        configured = {"sources": [r"get_param\("], "sinks": [[r"run_query\(", "SQL injection"]], "full": [],
+                      "partial": []}
+        call = answering({"ok": []})
+        with mock.patch.object(_native, "call", side_effect=call), \
+                mock.patch.object(core, "taint_args", lambda lang: configured if lang == "py" else None):
+            engine.scan_files(FILES)
+        sent = {path: args for (_name, args, _text), (path, *_rest) in zip(call.sent, FILES)}
+        self.assertEqual(sent["app/own.py"]["taint"], configured)          # project mode, Python
+        self.assertNotIn("taint", sent["pkg/key.py"])                      # dependency mode: never
 
     def test_a_file_that_spends_the_work_budget_is_truncated(self):
         deps = [f for f in FILES if f[3]]
@@ -93,7 +103,7 @@ class NativeEngineTests(unittest.TestCase):
         self.assertEqual(got, one_by_one(FILES))
         self.assertIn("SC-EVAL-DECODE", rules(got)[0])
         self.assertIn("S-TOKEN", rules(got)[1])
-        self.assertEqual(rules(got)[2], ["S-OSCMD-PY", "S-TOKEN", "T-CMD"])   # (project mode: the engine's rules, core's taint)
+        self.assertEqual(rules(got)[2], ["S-OSCMD-PY", "S-TOKEN", "T-CMD"])   # (project mode: the rules and the taint)
         self.assertEqual(got[4], [])
 
     def test_more_files_than_a_batch(self):
@@ -109,10 +119,12 @@ class NativeEngineTests(unittest.TestCase):
                 shown = "\n".join(line for i in got[0] for line in i["snippet"])
                 self.assertEqual(AWS in shown, not redact)
 
-    def test_in_project_mode_the_passes_that_follow_still_run(self):
+    def test_in_project_mode_an_unanswered_file_is_truncated_too(self):
+        # (Q-1: the passes after the rules are the engine's, and nothing of the file is read when it is not answered)
         with mock.patch.object(_native, "call", side_effect=answering({"error": "exhausted", "exhausted": True})):
             got = engine.scan_files(FILES[2:3])
-        self.assertEqual(rules(got), [["SC-TRUNCATED", "T-CMD"]])
+        self.assertEqual(rules(got), [["SC-TRUNCATED"]])
+        self.assertIn(engine.EXHAUSTED, got[0][0]["msg"])
 
     def test_core_scan_file_is_the_engines(self):
         path, text, lang, dep = FILES[0]

@@ -9,11 +9,11 @@ export const version = pkg.version;
 export const TAGLINE = "lazaret: quarantine for your dependencies";
 
 // Product surface
-export { scanFile, scanConfigFile, detectLang, taintScan, setScanTimeBudget } from "./scanner/scan.js";
+export { scanFile, scanConfigFile, detectLang, taintScan } from "./scanner/scan.js";
 export { isConfigFile } from "./lib/configsecrets.js";
 export { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 export { SEV_ORDER, TYPES } from "./scanner/rules.js";
-export { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
+export { computeMetrics } from "./scanner/metrics.js";
 export {
   buildResult, jsonRenderer, htmlRenderer, printReport, sarifReport, sarifRenderer,
   jsonReportChunks, htmlReportChunks, sarifChunks, sanitizeTerm, sanitizeTermLine, safeExcerpt,
@@ -21,8 +21,8 @@ export {
 export { scanManifest, scanGyp, redactResult, setRedactSecrets } from "./lib/supplychain.js";
 // The supply-chain tests, answered by the native engine (Rust, as WebAssembly: lib/native.js)
 export {
-  followHook, hookScriptTargets, installScriptRisk, importTimeRisk, importTimeSeverity, nodeCandidates,
-  persistenceReasons, runsReceivedCode, runsSubstitutedDownload,
+  followHook, hookScriptTargets, installScriptRisk, importTimeRisk, importTimeSeverity, installScriptSeverity, nodeCandidates,
+  persistenceReasons, runsReceivedCode, runsSubstitutedDownload, jsDialect, jsRefusal,
 } from "./lib/native.js";
 export {
   collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir, isOurReport,

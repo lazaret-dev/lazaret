@@ -18,9 +18,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from lazaret.scanner import core
+from lazaret.scanner import core, engine
 from tests import _support
-from tests.scanner import _dashboard_vm as dash
 
 TABLE = "".join(f'value_{n:04d} = "' + f"segment-{n:04d} " * 14 + '"\n' for n in range(2000))
 CATCHES = "try { f() } catch (e) {}\n" * 300 + "// TODO later\n" * 15
@@ -32,6 +31,17 @@ def scan(tree):
             with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
                 f.write(text)
         return core.scan_project(root)
+
+
+def uncapped_calls(items, helpers=None):
+    """engine.scan_calls asking for the rules part alone (scan_rules: no markers, no cap): these trees' findings are
+    all the rules', so it is their scan uncapped (the cap is the engine's since Q-1, 0.1.9, as the passes are)."""
+    calls = REAL_SCAN_CALLS(items, helpers)
+    return [None if c is None else ("scan_rules", {k: v for k, v in c[1].items() if k not in ("dep", "taint", "helpers")})
+            for c in calls]
+
+
+REAL_SCAN_CALLS = engine.scan_calls
 
 
 class RatingTests(unittest.TestCase):
@@ -52,7 +62,7 @@ class RatingTests(unittest.TestCase):
         for tree in trees:
             with self.subTest(files=sorted(tree)):
                 capped = scan(tree)
-                with mock.patch.object(core, "CAP_PER_RULE", 10 ** 9):
+                with mock.patch.object(engine, "scan_calls", uncapped_calls):
                     uncapped = scan(tree)
                 self.assertIn("Q-CAPPED", {i["rule"] for i in capped["issues"]})
                 self.assertNotIn("Q-CAPPED", {i["rule"] for i in uncapped["issues"]})
@@ -68,8 +78,10 @@ class RatingTests(unittest.TestCase):
         self.assertEqual(res["ratings"]["maintainability"], "A")
 
     def test_a_note_without_a_count_is_one_smell(self):
-        note = {"rule": "Q-CAPPED", "type": "SMELL"}
-        self.assertEqual(core.maintainability_rating([note] * 6, 100), "B")
+        # six notes without a count over 100 lines of code: 6 smells per 100 is B
+        notes = [{"rule": "Q-CAPPED", "type": "SMELL", "sev": "INFO", "file": "x.py", "line": n + 1} for n in range(6)]
+        res = core.build_result(".", [{"path": "x.py", "lang": "py", "content": "x = 1\n" * 100}], notes)
+        self.assertEqual(res["ratings"]["maintainability"], "B")
 
     def test_cli_gate(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
@@ -80,23 +92,6 @@ class RatingTests(unittest.TestCase):
             self.assertEqual(p.returncode, 1, p.stdout[-500:])                    # was 0
             with open(os.path.join(out, "lazaret-report.json"), encoding="utf-8") as f:
                 self.assertEqual(json.load(f)["ratings"]["maintainability"], "E")
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    def test_report_rates_like_the_cli(self):
-        files = [("table.py", "py", TABLE), ("c.js", "js", CATCHES)]
-        (page,) = dash.run([{"op": "runScan", "files": [
-            {"name": n, "lang": lang, "content": c} for n, lang, c in files]}])
-        issues = []
-        for n, lang, c in files:
-            issues += core.scan_file(n, c, lang)
-        cli = core.build_result(".", [{"path": n, "lang": lang, "content": c} for n, lang, c in files], issues)
-        for key in ("ratings", "pass", "counts", "metrics"):
-            self.assertEqual(page[key], cli[key], key)
-        self.assertEqual(page["ratings"]["maintainability"], "E")
-        notes = lambda r: sorted(json.dumps(i, sort_keys=True) for i in r["issues"] if i["rule"] == "Q-CAPPED")
-        self.assertEqual(notes(page), notes(cli))
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ pub fn write_tree(tree: &Tree, root: NodeId, spans: bool, out: &mut String) {
                 out.push_str("{\"type\":\"");
                 out.push_str(n.kind.name());
                 out.push_str("\",\"line\":");
-                push_num(out, n.line);
+                push_num(out, tree.line(id));
                 if spans {
                     out.push_str(",\"start\":");
                     push_num(out, n.start);

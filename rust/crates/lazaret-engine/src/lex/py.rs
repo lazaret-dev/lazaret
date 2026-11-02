@@ -7,15 +7,26 @@
 //! plain reading of Python's strings and comments ([`fallback`]).
 
 use super::{Kind, Token};
-use crate::pyparse::lexer::{tokenize_with, T};
+use crate::pyparse::lexer::{shared_with_tstrings, T};
 
 const fn c(ch: char) -> u32 {
     ch as u32
 }
 
 /// The tokens of `s`.
-pub fn tokens(s: &[u32]) -> Vec<Token> {
-    let lexed = match tokenize_with(s, true) {
+pub fn tokens(s: &[u32]) -> std::rc::Rc<Vec<Token>> {
+    // (a call's tests lex its text more than once: the open gate keeps them, shared: js::tokens)
+    crate::textgate::memo(s, "py-tokens", || {
+        let mut toks = lex(s);
+        toks.shrink_to_fit();
+        std::rc::Rc::new(toks)
+    })
+}
+
+fn lex(s: &[u32]) -> Vec<Token> {
+    // (the parser's reading where it is the same: P-1)
+    let shared = shared_with_tstrings(s);
+    let lexed = match &*shared {
         Ok(l) => l,
         Err(_) => {
             let mut out = Vec::new();

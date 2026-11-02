@@ -1,7 +1,7 @@
-// Review regression: --sarif (review finding 3). The document matches the
-// Python engine's SARIF writer byte-for-byte in structure: provenance
-// marker first, %SRCROOT% base URI, percent-encoded artifact URIs, ruleIndex,
-// the package version and https://lazaret.dev as informationUri.
+// Review regression: --sarif (review finding 3). The engine writes the log for
+// both packages (report.rs): provenance marker first, %SRCROOT% base URI,
+// percent-encoded artifact URIs, ruleIndex, the package version and
+// https://lazaret.dev as informationUri.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run, version } from "../src/index.js";
-import { fileUri } from "../src/report.js";
 
 test("SARIF 2.1.0 report: tool identity, %SRCROOT%, encoded URIs, ruleIndex", () => {
   const d = mkdtempSync(join(tmpdir(), "lazaret sarif "));
@@ -35,7 +34,8 @@ test("SARIF 2.1.0 report: tool identity, %SRCROOT%, encoded URIs, ruleIndex", ()
     // the scan root as a file: URI that names this directory. Not compared to
     // pathToFileURL's text: on Windows it writes "~" as %7E (RUNNER%7E1),
     // where pathlib's as_uri() and ours keep "~" (an unreserved character,
-    // the same URI); the exact form is checked in the fileUri test below
+    // the same URI); the exact forms are the engine's (report.rs; tests/architecture/test_report_engine.py holds
+    // them, Windows' too, to pathlib's as_uri())
     const base = runObj.originalUriBaseIds["%SRCROOT%"].uri;
     assert.ok(base.startsWith("file:///") && base.endsWith("/"), base);
     assert.equal(resolve(fileURLToPath(base)), resolve(d));
@@ -58,15 +58,4 @@ test("SARIF 2.1.0 report: tool identity, %SRCROOT%, encoded URIs, ruleIndex", ()
     rmSync(d, { recursive: true, force: true });
     rmSync(out, { recursive: true, force: true });
   }
-});
-
-test("file: URIs follow pathlib's as_uri() for Windows paths, on every OS", () => {
-  // checked against pathlib.PureWindowsPath(...).as_uri(); the drive colon
-  // stays literal (the Windows runners saw file:///C%3A/... before)
-  assert.equal(fileUri("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\lazaret sarif x"),
-    "file:///C:/Users/RUNNER~1/AppData/Local/Temp/lazaret%20sarif%20x");
-  assert.equal(fileUri("d:\\caf\u00e9\\a#1.py"), "file:///d:/caf%C3%A9/a%231.py");
-  assert.equal(fileUri("\\\\srv\\share\\a b"), "file://srv/share/a%20b");
-  assert.equal(fileUri("/tmp/a b%#"), "file:///tmp/a%20b%25%23");
-  assert.equal(fileUri("/home/u/~x"), "file:///home/u/~x");            // "~" stays, as in as_uri()
 });

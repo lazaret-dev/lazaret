@@ -1,15 +1,13 @@
 // Audit P0: taint through f-strings and template literals, statements over
 // several lines, augmented assignments, the Flask / Django sinks and the
 // precision around them (twin of python/tests/scanner/test_taint_fstrings.py;
-// the engines are held to each other on every case of that module by
-// tests/architecture/test_js_parity_taint.py). Nothing here runs.
+// since Q-1, 0.1.9, the pass is the native engine's in both packages, and
+// tests/architecture/test_js_parity_taint.py holds the two packages' reports
+// to each other). Nothing here runs.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scanFile } from "../src/index.js";
-import {
-  taintCode, firstArg, positionalArgs, extent, offsiteArgs, viewBody, scopeOpener, guardedNames, neutralize,
-} from "../src/scanner/taint.js";
 
 const FLASK = "from flask import Flask, request, redirect, url_for, make_response, jsonify, render_template, abort\n";
 const found = (lang, content) => new Set(scanFile({ path: `x.${lang}`, content, lang })
@@ -65,29 +63,14 @@ test("guards and where a taint lives", () => {
   assert.deepEqual(found("py", "import os\nq = input()\nsql = \"\"\"\nSELECT (\n\"\"\"\nq = 'x'\nos.system(q)\n"), new Set());
 });
 
-test("helpers", () => {
-  assert.deepEqual(taintCode('os.system(f"ls {d!r} {{x}}" + rb"q")', "py").split(/\s+/).filter(Boolean), ["os.system(", "d!r", "+", ")"]);
-  assert.deepEqual(taintCode("exec(`ls ${a}`); q = sql`x ${b}`; return `${c}`", "js").split(/\s+/).filter(Boolean),
-    ["exec(", "a", ");", "q", "=", "sql;", "return", "c"]);
-  assert.equal(firstArg(" (body, {'h': bar}))"), "body");
-  assert.equal(positionalArgs(" url, data=d, headers=h)"), " url");
-  assert.equal(extent("cmd); log(location.href)"), "cmd");
-  assert.equal(offsiteArgs(" 301, '/x' + y"), " 301");
-  assert.equal(viewBody(" User.to_dict(q, page=1)"), false);
-  assert.equal(viewBody(" str(q)"), true);
-  assert.equal(scopeOpener("app.get('/a', (req, res) => {", "js"), true);
-  assert.equal(scopeOpener("if (x) {", "js"), false);
-  assert.deepEqual(guardedNames("if '..' in name or not p.startswith(BASE):", "py"), ["name", "p"]);
-  assert.equal(neutralize("n = request.args.get('n', 1, type=int)", "py"), "n =  ");
-});
-
 test("linear time on hostile lines", () => {
+  // (the helpers' own cases and bounds: the engine's tests, rust/crates/lazaret-engine/src/taint_tests.rs)
   for (const text of ["(".repeat(200_000), "'".repeat(200_000), "a,".repeat(200_000), "f'{".repeat(100_000),
     "=>".repeat(200_000) + " {", "a.".repeat(200_000) + "get(type=int)", " ".repeat(100_000) + "if '..' in x:"]) {
-    const t0 = Date.now();
-    firstArg(text); positionalArgs(text); extent(text); offsiteArgs(text);
-    taintCode(text, "py"); taintCode(text, "js"); scopeOpener(text, "js");
-    neutralize(text, "py", "XSS"); guardedNames(text, "py");
-    assert.ok(Date.now() - t0 < 10_000, text.slice(0, 12));
+    for (const lang of ["py", "js"]) {
+      const t0 = Date.now();
+      scanFile({ path: `x.${lang}`, content: ["q = input()", "os.system(" + text, "x = " + text, text].join("\n"), lang });
+      assert.ok(Date.now() - t0 < 10_000, `${text.slice(0, 12)} ${lang}`);
+    }
   }
 });

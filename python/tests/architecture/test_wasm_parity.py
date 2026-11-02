@@ -37,7 +37,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 const n = await import(pathToFileURL(process.argv[1]).href);
-const calls = JSON.parse(readFileSync(0, "utf8"));
+const calls = JSON.parse(readFileSync(0).toString("utf8"));
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 process.stdout.write(JSON.stringify(calls.map(([name, args, text]) => {
   try { return sha(JSON.stringify(n.call(name, args, text))); } catch (e) { return `${e.name}: ${e.message}`; }

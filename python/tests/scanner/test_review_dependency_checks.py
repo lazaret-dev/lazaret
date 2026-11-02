@@ -9,9 +9,11 @@ is followed to the files it runs and escalates to CRITICAL when one fails the
 install-script test (as in the registry), and every other JavaScript or
 Python file of a dependency gets the import-time test (SC-IMPORT-RISK).
 
-The npm engine's twin is js/src/deps.js (tests/architecture/test_js_parity.py
-compares the two CLIs on the tree below). Payloads are inert text: hosts are
-.invalid, and nothing is executed.
+The decisions are the engine's since BR-7 step 3e (deps.rs: its unit tests
+hold the paths a hook's target joins to, and the entry points a package.json
+names); both packages read the tree for it, and js/test/
+review-dependency-checks.test.js has the same cases. Payloads are inert
+text: hosts are .invalid, and nothing is executed.
 """
 import json
 import os
@@ -33,7 +35,7 @@ def pkg(name, **scripts):
 #: package -> files (inert); the tree the parity test uses too
 TREE = {
     "package.json": pkg("app", postinstall="node build.js"),
-    "build.js": EXFIL,                                           # first-party: its hook is not followed
+    "build.js": EXFIL,                  # first-party: followed by the project's own follow (test_review_project_hooks)
     "scripts/first-party.js": EXFIL,
     # a hook that runs a file the walk does not read as source: read, scanned as JavaScript
     "node_modules/a/package.json": pkg("a", postinstall="node install.dat"),
@@ -139,6 +141,8 @@ class DependencyCheckTests(unittest.TestCase):
             "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
             "node_modules/r/package.json": '"postinstall" script pipes a download into a shell.',
             "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
+            # (0.1.9) the project's own hook too (core.project_hook_checks)
+            "package.json": f"Install hook runs build.js, which {env}.",
         }
         for manifest, msg in want_critical.items():
             with self.subTest(manifest=manifest):
@@ -152,7 +156,7 @@ class DependencyCheckTests(unittest.TestCase):
                           ("MAJOR", '"install (implicit)" script runs code at install time: \'node-gyp rebuild\'.')])
         for manifest in ("node_modules/e/package.json", "node_modules/g/package.json", "node_modules/h/package.json",
                          "node_modules/j/package.json", "node_modules/l/package.json", "node_modules/o/package.json",
-                         "node_modules/u/package.json", "package.json"):
+                         "node_modules/u/package.json"):
             with self.subTest(manifest=manifest):
                 if manifest == "node_modules/e/package.json" and not self.linked:
                     continue
@@ -196,7 +200,8 @@ class DependencyCheckTests(unittest.TestCase):
         rules = {i["rule"] for i in res["issues"]}
         self.assertFalse(rules & {"SC-IMPORT-RISK", "SC-TRUNCATED"}, rules)
         (hook,) = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
-        self.assertEqual((hook["file"], hook["sev"]), ("package.json", "MAJOR"))
+        # the project's own hook is followed without --deps too (0.1.9, core.project_hook_checks)
+        self.assertEqual((hook["file"], hook["sev"]), ("package.json", "CRITICAL"))
 
     def test_a_stop_during_the_checks_leaves_the_scan_incomplete(self):
         calls = []
@@ -256,24 +261,28 @@ class WebAssetTests(unittest.TestCase):
                           "node_modules/w/public/widget.js", "node_modules/x/static/cli.js",
                           "node_modules/x/static/index.js", "node_modules/x/static/y.js"])
 
-    def test_entries(self):
-        self.assertEqual(core._deps_npm_entries({"main": "a.js", "module": "b.mjs", "bin": {"c": "c.js", "d": 1},
-                                                 "exports": {".": {"import": "./e.mjs", "require": ["./f.js", "./g.js"]},
-                                                             "./*": "./h/*.js"}}),
-                         ["a.js", "b.mjs", "c.js", "./e.mjs", "./f.js", "./g.js"])
-        self.assertEqual(core._deps_npm_entries({"bin": "x.js", "exports": "./y.js"}), ["x.js", "./y.js"])
-
-
-class HelperTests(unittest.TestCase):
-    def test_tree_join(self):
-        cases = {("node_modules/a", "x.js"): "node_modules/a/x.js", ("node_modules/a", "./b/../x.js"): "node_modules/a/x.js",
-                 ("node_modules/a", "../../y.js"): "y.js", ("node_modules/a", "../../../y.js"): None,
-                 ("node_modules/a", "/usr/y.js"): None, ("node_modules/a", "C:/y.js"): None,
-                 ("node_modules/a", "lib\\z.js"): "node_modules/a/lib/z.js", ("", "x.js"): "x.js", ("", ".."): None,
-                 ("a", "."): "a", ("a", ".."): None, ("a", "b//c/"): "a/b/c"}
-        for (base, target), want in cases.items():
-            with self.subTest(base=base, target=target):
-                self.assertEqual(core._tree_join(base, target), want)
+    def test_padding_hides_no_file(self):
+        # BR-5: the walk from a package's entry points stopped at 5,000 files, and its exports were read to 5,000 entry
+        # points, so a file in static/ reached past them was left out as a web asset (the npm twin's test: the same)
+        files = [{"path": f"node_modules/w/lib/f{i}.js", "content": f"require('./f{i + 1}.js');\n", "lang": "js",
+                  "dep": True} for i in range(5_100)]
+        files += [{"path": "node_modules/w/lib/f5100.js", "content": "require('../static/run.js');\n", "lang": "js",
+                   "dep": True},
+                  {"path": "node_modules/w/static/run.js", "content": WEB, "lang": "js", "dep": True}]
+        manifest = {"path": "node_modules/w/package.json",
+                    "content": json.dumps({"name": "w", "version": "1.0.0", "main": "lib/f0.js"})}
+        root = tempfile.mkdtemp(prefix="lz-deps-pad-")
+        self.addCleanup(shutil.rmtree, root, True)
+        plan, _stopped = core._deps_plan(core._DependencyTree(root, files, [manifest], ()), files)
+        self.assertEqual(plan["assets"], [])
+        # an entry point past 6,000 exports
+        exports = {f"./p{i}": f"./p{i}.js" for i in range(6_000)}
+        exports["./run"] = "./static/run.js"
+        files = [{"path": "node_modules/v/static/run.js", "content": WEB, "lang": "js", "dep": True}]
+        manifest = {"path": "node_modules/v/package.json",
+                    "content": json.dumps({"name": "v", "version": "1.0.0", "exports": exports})}
+        plan, _stopped = core._deps_plan(core._DependencyTree(root, files, [manifest], ()), files)
+        self.assertEqual(plan["assets"], [])
 
 
 if __name__ == "__main__":

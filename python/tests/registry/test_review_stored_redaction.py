@@ -7,8 +7,10 @@ blob raw, where the MCP tools and a shared Postgres read it back.
 repo.scan_package now always redacts, whatever the switch says; the switch
 keeps working for project scans (the user's own code).
 
-The "credential" is AWS's documented example key pair: inert. The network is
-faked (repo's resolve/download seam), nothing is fetched or executed.
+The "credential" is a made-up key pair in AWS's formats, built from pieces
+(AWS's documented example pair is a sample S-TOKEN leaves alone since
+SECRET-FP): inert. The network is faked (repo's resolve/download seam),
+nothing is fetched or executed.
 """
 import json
 import os
@@ -26,9 +28,9 @@ from lazaret.registry import repo
 from lazaret.scanner import core
 from tests.registry._review_support import manifest, scan_npm, tarball
 
-KEY = "AKIAIOSFODNN7EXAMPLE"
+KEY = "AKI\x41" + "Q7R2ZK9M" + "4TXW8B3N"
 SECRET_JS = ('const creds = {accessKeyId: "%s", '
-             'secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"};\n' % KEY)
+             'secretAccessKey: "' % KEY + "q8Zr2LmX0vB7" + "nTg4Wk1pYc9Hs6Jd3Fe5Rt" + '"};\n')
 PKG = {"package.json": manifest(main="index.js"), "index.js": SECRET_JS}
 
 

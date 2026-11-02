@@ -25,6 +25,12 @@
 //!   arrows): its attributes' strings have no escapes, its children are
 //!   text up to a `<` or a `{`, a `{…}` is code, elements nest; type
 //!   arguments after a tag's name (`<Select<Option> …>`) are code.
+//! - a name after `.` or `?.` is a property's, an operand whatever word it
+//!   is (`obj.return < b` compares); `of` is the keyword an expression
+//!   follows only in a `for (…)` head, after the binding (`for (x of y)`);
+//!   anywhere else it is a name, an operand (`of < b` compares). (The review
+//!   of FP-HOMOGLYPH-ORDINAL, Oct 27: either read as a word an expression
+//!   follows made `<b> evªl(…)` JSX text.)
 //! - a hashbang `#!` at the start is a comment. Annex B's HTML-like
 //!   comments (`<!--`, and `-->` where a line begins) are comments in a
 //!   script and code in a module (`x <!--y` is `x < !--y`), and a `.js`
@@ -117,6 +123,12 @@ fn unclosed_string_end(s: &[u32], b: usize) -> usize {
     s.len()
 }
 
+/// What an open parenthesis is: a call's or a group's, an `if`/`while`/`with`
+/// head, a `for` head.
+const PAREN: u8 = 0;
+const HEAD: u8 = 1;
+const FOR_HEAD: u8 = 2;
+
 /// An open JSX element: in its tag (reading attributes) or in its children,
 /// and whether a `{…}` of it is open.
 #[derive(Clone, Copy, Debug)]
@@ -131,8 +143,11 @@ struct Lexer<'a> {
     i: usize,
     out: Vec<Token>,
     braces: Vec<Brace>,
-    /// the open parentheses: true for an `if`/`for`/`while`/`with` head
-    parens: Vec<bool>,
+    /// the open parentheses: PAREN, HEAD (`if`, `while`, `with`) or FOR_HEAD
+    parens: Vec<u8>,
+    /// the last name was `for` (or `await` after it): a `(` now opens a
+    /// `for` head
+    for_next: bool,
     /// may an expression begin here?
     expr: bool,
     last: Last,
@@ -145,7 +160,13 @@ struct Lexer<'a> {
 
 /// The tokens of `s` (`jsx`: elements may appear where an expression may
 /// begin).
-pub fn tokens(s: &[u32], jsx: bool) -> Vec<Token> {
+pub fn tokens(s: &[u32], jsx: bool) -> std::rc::Rc<Vec<Token>> {
+    // (a call's tests lex its text more than once: the open gate keeps them, shared rather than copied for each:
+    // a 16,000,000-character bundle's are 50 MB)
+    crate::textgate::memo(s, if jsx { "js-tokens-jsx" } else { "js-tokens" }, || std::rc::Rc::new(lex(s, jsx)))
+}
+
+fn lex(s: &[u32], jsx: bool) -> Vec<Token> {
     let mut lx = Lexer {
         s,
         jsx,
@@ -157,8 +178,10 @@ pub fn tokens(s: &[u32], jsx: bool) -> Vec<Token> {
         last: Last::None,
         no_regex_until: 0,
         tags: Vec::new(),
+        for_next: false,
     };
     lx.run();
+    lx.out.shrink_to_fit();
     lx.out
 }
 
@@ -258,7 +281,18 @@ impl<'a> Lexer<'a> {
             }
         }
         if let Some((e, _)) = ident_end(s, i) {
-            let w = word_of(&s[i..e]);
+            let text = &s[i..e];
+            let property = matches!(self.last, Last::Punct(p) if p == P_DOT || p == P_OPTIONAL);
+            let w = if property {
+                Word::Other // (a property's name is an operand, whatever word it is)
+            } else if text == [c('o'), c('f')] && !self.for_binding_done() {
+                Word::Other // (`of` outside a `for` head's `x of`: a name)
+            } else {
+                word_of(text)
+            };
+            let is_for = !property && text == [c('f'), c('o'), c('r')];
+            let is_await = !property && text == [c('a'), c('w'), c('a'), c('i'), c('t')];
+            self.for_next = is_for || (self.for_next && is_await);
             self.push(Kind::Name, i, e);
             self.i = e;
             // (after `else` and `do` a statement, so an expression, may begin)
@@ -281,8 +315,16 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Is an `of` here the keyword: directly in a `for (…)` head, after the
+    /// binding (a name, or a pattern's `]` or `}`)?
+    fn for_binding_done(&self) -> bool {
+        self.parens.last() == Some(&FOR_HEAD)
+            && matches!(self.last, Last::Word(_) | Last::Close(_) | Last::Punct(P_RBRACK))
+    }
+
     /// A string, number, regular expression: a value.
     fn value(&mut self, kind: Kind, a: usize, e: usize) {
+        self.for_next = false;
         self.push(kind, a, e);
         self.i = e;
         self.expr = false;
@@ -308,6 +350,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn punctuator(&mut self, id: u32, a: usize, e: usize) {
+        let for_next = std::mem::replace(&mut self.for_next, false);
         if id == P_RBRACE {
             match self.braces.pop() {
                 Some(Brace::Hole) => {
@@ -358,10 +401,16 @@ impl<'a> Lexer<'a> {
             self.braces.push(if block { Brace::Block } else { Brace::Object });
             self.expr = true;
         } else if id == P_LPAREN {
-            self.parens.push(self.last == Last::Word(Word::Head));
+            self.parens.push(if for_next {
+                FOR_HEAD
+            } else if self.last == Last::Word(Word::Head) {
+                HEAD
+            } else {
+                PAREN
+            });
             self.expr = true;
         } else if id == P_RPAREN {
-            self.expr = self.parens.pop().unwrap_or(false);
+            self.expr = self.parens.pop().is_some_and(|h| h != PAREN);
         } else if id == P_RBRACK || id == P_DOT || id == P_OPTIONAL {
             // (`.` and `?.` are followed by a name, `(` or `[`: never by a
             // regular expression or an element)

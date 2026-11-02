@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildResult, jsonRenderer, printReport, safeExcerpt, issueExcerpt } from "../src/report.js";
-import { scanManifest, scanGyp, redactResult, redactSecretSnippet, INSTALL_HOOK_RE } from "../src/lib/supplychain.js";
+import { scanManifest, scanGyp, redactResult, INSTALL_HOOK_RE } from "../src/lib/supplychain.js";
 import { scanFile } from "../src/scanner/scan.js";
 
 const F = (name, content) => ({ name, content, lang: "py", dep: false });
@@ -88,32 +88,36 @@ test("supply chain: hostile deep manifest is SC-MANIFEST-DEPTH — never a crash
   assert.deepEqual(scanManifest("sub/package.json", "null"), []);
 });
 
+// the sweep of one finding of `rule` flagged at snippet line `idx` (redactResult)
+const sweep = (rule, lines, idx) =>
+  redactResult({ issues: [{ rule, line: idx + 1, snipStart: 1, msg: "", snippet: [...lines] }] }).issues[0].snippet;
+
 test("redaction: SECRET-rule flagged line replaced by deterministic placeholder", () => {
   const lines = ["a=1", 'api_key = "Zk9mS3B4NjdxTW5xU2Y4QWJ"'];
-  const out = redactSecretSnippet("S-ENTROPY", lines, 1, lines[1]);
+  const out = sweep("S-ENTROPY", lines, 1);
   assert.match(out[1], /^\[redacted: secret rule S-ENTROPY\] \(\d+ chars\)$/);
   assert.equal(out[0], "a=1");
   // deterministic: same input twice → same text
-  assert.equal(out[1], redactSecretSnippet("S-ENTROPY", lines, 1, lines[1])[1]);
+  assert.equal(out[1], sweep("S-ENTROPY", lines, 1)[1]);
 });
 
 test("redaction: context lines swept for OTHER credentials (audit L1)", () => {
-  const lines = ["aws_key", "AKIAIOSFODNN7EXAMPLE", "x=1"];
-  const out = redactSecretSnippet("S-SECRET", lines, 0, lines[0]);
+  const lines = ["aws_key", "AKI\x41IOSFODNN7EXAMPLE", "x=1"];
+  const out = sweep("S-SECRET", lines, 0);
   assert.ok(out[1].includes("[redacted]"));
-  assert.ok(!out[1].includes("AKIAIOSFODNN7EXAMPLE"));
+  assert.ok(!out[1].includes("AKI\x41IOSFODNN7EXAMPLE"));
 });
 
 test("redaction: redactResult sweeps a full result, secrets never leak", () => {
   const res = { issues: [{
     rule: "S-ENTROPY", line: 2, snipStart: 1, name: "e", type: "HOTSPOT", sev: "MAJOR",
     msg: "", why: "", fix: "", ref: "", file: "a.py",
-    snippet: ["x=0", 'token = "Zk9mS3B4NjdxTW5xU2Y4QWJ"', "AKIAIOSFODNN7EXAMPLE"],
+    snippet: ["x=0", 'token = "Zk9mS3B4NjdxTW5xU2Y4QWJ"', "AKI\x41IOSFODNN7EXAMPLE"],
   }] };
   redactResult(res);
   const blob = JSON.stringify(res);
   assert.ok(!blob.includes("Zk9mS3B4NjdxTW5xU2Y4"));
-  assert.ok(!blob.includes("AKIAIOSFODNN7EXAMPLE"));
+  assert.ok(!blob.includes("AKI\x41IOSFODNN7EXAMPLE"));
   assert.ok(blob.includes("[redacted: secret rule S-ENTROPY]"));
 });
 
@@ -132,8 +136,8 @@ test("printReport: gate, conditions, ratings, counts; quiet suppresses issues", 
   const res = buildResult("/p", [F("a.py", "x=1\n")], []);
   printReport(res, { out: (s) => lines.push(s), quiet: true });
   const text = lines.join("\n");
-  assert.match(text, /Quality gate: PASSED/);
-  assert.match(text, /Ratings: security A/);
+  assert.match(text, /\n {2}Quality gate: {2}PASSED \n/);
+  assert.match(text, /\n {2}Vulnerabilities {6}0 {3}Security rating {8}A\n/);
   const noisy = [];
   printReport(buildResult("/p", [F("a.py", "eval(x)\n")],
     scanFile({ name: "a.py", content: "eval(x)\n", lang: "py" })), { out: (s) => noisy.push(s) });

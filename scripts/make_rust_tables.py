@@ -12,9 +12,11 @@
   them. Edit it by hand; this script writes it back in its canonical form
   (sorted keys, one space of indent, ASCII), and --check fails when it is
   not in that form, when its rule set is not the registry's ENGINE_VERSION,
-  when a pattern does not compile with Python's re, or when a value core
+  when a pattern does not compile with Python's re, when a value core
   still holds differs from the pack's (core keeps the few the Python side
-  reads itself: reasons the registry ranks, limits the walk applies).
+  reads itself: reasons the registry ranks, limits the walk applies), or
+  when live secret verification's provider table (_VERIFY_PROVIDERS) breaks
+  the rules of lazaret.scanner.secretverify.validate.
 
 * rust/crates/lazaret-engine/src/generated/unicode13.rs: the character data
   the engine reads source text with, from Unicode 13.0 (Python 3.10's
@@ -22,7 +24,7 @@
   lazaret/scanner/_unicode13.py). What Python's `re` and `str` use: \\w
   (isalnum), \\d (isdecimal), \\s (isspace), the simple case mappings sre
   folds with, the full case mappings and the Final_Sigma context of
-  str.lower(), re's extra case equivalences (ſ → s, K → k, …), printable and
+  str.lower(), re's extra case equivalences (s and ſ, µ and μ, …), printable and
   identifier characters. Only Python 3.10 writes it; on any other Python,
   --check verifies that every code point Unicode 13.0 assigns reads the same
   there for the properties the scanner relies on (STABLE), and that the table
@@ -114,12 +116,38 @@ def sre_upper(c):
 
 
 def case_fixes():
+    """re's extra case equivalences, from Unicode's case mappings: the
+    lowercase letters that share an uppercase with another lowercase letter
+    (s and ſ, both S; µ and μ; the Greek letters' variant forms), each ->
+    the others in code point order. Unicode 13.0's letters only, whatever
+    this Python's Unicode; --check holds the result to re's own table."""
+    from lazaret.scanner import _unicode13
+    lows_by_upper = {}
+    for c in range(MAX_CP):
+        if not _unicode13.assigned(c):
+            continue
+        low = chr(c).lower()
+        if len(low) == 1:
+            lows_by_upper.setdefault(chr(c).upper(), set()).add(ord(low))
+    fixes = {}
+    for lows in lows_by_upper.values():
+        if len(lows) > 1:
+            for c in lows:
+                fixes[c] = tuple(sorted(lows - {c}))
+    return fixes
+
+
+def check_case_fixes():
+    """The equivalences re itself adds under IGNORECASE (re._casefix on
+    3.11 and later, sre_compile's table on 3.10) are case_fixes()'s."""
     try:
-        from re._casefix import _EXTRA_CASES as fixes            # 3.11+
+        from re._casefix import _EXTRA_CASES as res                # 3.11+
     except ImportError:
         import sre_compile                                        # 3.10
-        fixes = sre_compile._ignorecase_fixes
-    return {k: tuple(v) for k, v in fixes.items()}
+        res = sre_compile._ignorecase_fixes
+    if {k: tuple(sorted(v)) for k, v in res.items()} != case_fixes():
+        return ["re's extra case equivalences are not the lowercase letters that share an uppercase"]
+    return []
 
 
 def unicode_data():
@@ -140,6 +168,8 @@ def unicode_data():
         up = chr(c).upper()
         if len(up) != 1 or ord(up) != upper.get(c, c):
             full_upper[c] = [ord(x) for x in up]
+    # str.casefold() where it is not str.lower() of the character alone (Σ's alone is σ, its fold too)
+    full_fold = {c: [ord(x) for x in chr(c).casefold()] for c in range(MAX_CP) if chr(c).casefold() != chr(c).lower()}
     import unicodedata
     decimal_runs = []                              # (first, last, value of first): int() of a digit
     for ch in range(MAX_CP):
@@ -151,7 +181,7 @@ def unicode_data():
             else:
                 decimal_runs.append([ch, ch, v])
     return {"flags": flags, "lower": lower, "upper": upper, "full_lower": full_lower,
-            "full_upper": full_upper, "fixes": case_fixes(), "decimal_runs": decimal_runs,
+            "full_upper": full_upper, "full_fold": full_fold, "fixes": case_fixes(), "decimal_runs": decimal_runs,
             **normalization_data()}
 
 
@@ -229,7 +259,9 @@ def render_unicode(data):
     lists("FULL_LOWER", "str.lower() where it is not LOWER's one character (Σ excepted: its context decides).",
           data["full_lower"])
     lists("FULL_UPPER", "str.upper() where it is not UPPER's one character.", data["full_upper"])
-    lists("CASE_FIXES", "re's extra case equivalences (re._casefix._EXTRA_CASES): lowercase -> the others.",
+    lists("FULL_FOLD", "str.casefold() where it is not the character's str.lower() (FULL_LOWER's, or LOWER's one "
+          "character).", data["full_fold"])
+    lists("CASE_FIXES", "re's extra case equivalences: lowercase letters that share an uppercase -> the others.",
           data["fixes"])
     out.append("/// (first, last, value of first) of each run of decimal digits: int() reads them.\n")
     out.append("pub const DECIMAL_RUNS: &[(u32, u32, u32)] = &[\n")
@@ -316,11 +348,23 @@ def check_unicode_here(path):
             bad.append(f"U+{c:04X} uppercase differs")
         if len(bad) > 20:
             break
-    body = text.split("pub const CASE_FIXES:")[1].split("];\n")[0]
-    table = {int(a, 16): tuple(int(x, 16) for x in re.findall(r"0x([0-9A-F]+)", b))
-             for a, b in re.findall(r"\(0x([0-9A-F]+), &\[([^\]]*)\]\)", body)}
-    if table != want["fixes"]:
+    def table_lists(name):
+        body = text.split(f"pub const {name}:")[1].split("];\n")[0]
+        return {int(a, 16): tuple(int(x, 16) for x in re.findall(r"0x([0-9A-F]+)", b))
+                for a, b in re.findall(r"\(0x([0-9A-F]+), &\[([^\]]*)\]\)", body)}
+
+    if table_lists("CASE_FIXES") != want["fixes"]:
         bad.append("re's extra case equivalences differ")
+    # str.casefold() (BR-2): Unicode's case folding stability policy, checked
+    fold, full_lower = table_lists("FULL_FOLD"), table_lists("FULL_LOWER")
+    for c in range(MAX_CP):
+        if not _unicode13.assigned(c):
+            if c in fold:
+                bad.append(f"U+{c:04X} is unassigned in Unicode 13.0 but has a case fold in the table")
+        elif tuple(map(ord, chr(c).casefold())) != fold.get(c, full_lower.get(c, (lower.get(c, c),))):
+            bad.append(f"U+{c:04X} case fold differs")
+        if len(bad) > 20:
+            break
     return bad + check_normalization_here(text, want)
 
 
@@ -466,6 +510,13 @@ def check_pack(text):
                 problems.append(f"core.{name} differs from the pack's {name}: change both")
     if not shared:
         problems.append("no value of core was compared with the pack (the check is broken)")
+    # live secret verification's provider table (V-1): the rules of secretverify.validate, which the engine applies too
+    from lazaret.scanner import secretverify
+    table = data.get("values", {}).get(secretverify.TABLE)
+    try:
+        secretverify.validate(table.get("value") if isinstance(table, dict) else None)
+    except (ValueError, TypeError, AttributeError) as e:
+        problems.append(f"the pack's {secretverify.TABLE}: {e}")
     return problems
 
 
@@ -484,6 +535,8 @@ def main(argv):
     else:
         with open(PACK_OUT, "w", encoding="utf-8", newline="\n") as f:
             f.write(render_pack(json.loads(pack)))
+    if check:
+        problems += check_case_fixes()
     if is310:
         uni = render_unicode(unicode_data())
         if check:

@@ -12,6 +12,9 @@
 //!   jsparse's scanner, a regular expression told from a division by what
 //!   comes before it, templates and their holes nested to any depth, a
 //!   hashbang (Annex B's HTML-like comments, code in a module, are code);
+//! - [`go`] and [`rs`]: Go and Rust (0.1.9), read as their specifications
+//!   read them: raw strings, nested block comments, runes and characters,
+//!   lifetimes told from characters;
 //! - [`py`]: Python 3.13's tokenizer (pyparse's), f-strings in pieces
 //!   (PEP 701), t-strings as 3.14 reads them, and after a token it refuses
 //!   the rest read plainly, as Python 3.11 reads strings and comments.
@@ -21,8 +24,10 @@
 //! expressions, a template's or an f-string's text, JSX text) and the code
 //! in a template's or an f-string's holes.
 
+pub mod go;
 pub mod js;
 pub mod py;
+pub mod rs;
 pub mod value;
 
 /// A token's kind.
@@ -177,9 +182,15 @@ pub fn structure(text: &[u32], lang: &str, jsx: bool) -> Option<Structure> {
             py::fallback(text, 0, &mut old);
             Some(Structure::of(&py::tokens(text)).intersect(&Structure::of(&old)))
         }
+        "go" => Some(Structure::of(&go::tokens(text))),
+        "rs" => Some(Structure::of(&rs::tokens(text))),
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_go_rs;
+#[cfg(test)]
+mod tests_fuzz;

@@ -207,6 +207,80 @@ class PypiTests(unittest.TestCase):
         self.assertEqual(reg.fetched, [])
 
 
+class PypiUnusedNewTests(unittest.TestCase):
+    """D-5 (0.1.9): a brand-new requirement the release imports none of the modules of. Its latest release's smallest
+    wheel (else sdist) is listed, never unpacked or run; the archives are built here."""
+    FILES = "https://files.invalid/"
+
+    def project(self, files):
+        """A dependency's JSON document serving `files`: [(filename, packagetype, bytes)]."""
+        urls = [{"filename": f, "packagetype": t, "url": self.FILES + f, "size": len(b)} for f, t, b in files]
+        blobs = {self.FILES + f: b for f, _t, b in files}
+        return {PYPI + "easy-day/json": {"urls": urls}}, blobs
+
+    def unused(self, files, imports=("requests", "acme")):
+        docs, blobs = self.project(files)
+        fetched = []
+
+        def fetch_bytes(url):
+            fetched.append(url)
+            return blobs[url]
+        return repo.pypi_unused_new("easy-day", list(imports), fetch=Registry(docs), fetch_bytes=fetch_bytes), fetched
+
+    def test_a_wheel_whose_modules_nothing_imports(self):
+        from tests.registry._review_support import zipball
+        wheel = zipball({"easy_day/__init__.py": "", "easy_day-0.1.dist-info/METADATA": "Name: easy-day\n"})
+        self.assertEqual(self.unused([("easy_day-0.1-py3-none-any.whl", "bdist_wheel", wheel)]), (
+            True, [self.FILES + "easy_day-0.1-py3-none-any.whl"]))
+        self.assertEqual(self.unused([("easy_day-0.1-py3-none-any.whl", "bdist_wheel", wheel)],
+                                     imports=("easy-day",))[0], False)
+
+    def test_the_smallest_wheel_before_an_sdist(self):
+        from tests.registry._review_support import zipball
+        small = zipball({"day/__init__.py": ""})
+        big = zipball({"day/__init__.py": "", "day/big.py": "x = 1\n" * 500})
+        sdist = tarball({"setup.py": "", "PKG-INFO": ""}, root="easy-day-0.1/")
+        result, fetched = self.unused([("easy-day-0.1.tar.gz", "sdist", sdist), ("b.whl", "bdist_wheel", big),
+                                       ("a.whl", "bdist_wheel", small)], imports=("day",))
+        self.assertEqual((result, fetched), (False, [self.FILES + "a.whl"]))
+
+    def test_an_sdist_of_setup_py_alone_is_imported_by_nothing(self):
+        sdist = tarball({"setup.py": "from setuptools import setup\nsetup()\n", "PKG-INFO": "Name: easy-day\n"},
+                        root="easy-day-0.1/")
+        self.assertEqual(self.unused([("easy-day-0.1.tar.gz", "sdist", sdist)])[0], True)
+        named = tarball({"setup.py": "", "src/easy_day/__init__.py": ""}, root="easy-day-0.1/")
+        self.assertEqual(self.unused([("easy-day-0.1.tar.gz", "sdist", named)], imports=("easy-day",))[0], False)
+
+    def test_what_cannot_say(self):
+        from tests.registry._review_support import zipball
+        wheel = zipball({"easy_day/__init__.py": ""})
+        self.assertEqual(self.unused([])[0], False)                                       # no file
+        with mock.patch.object(repo, "PYPI_DEP_LIST_BYTES", 10):
+            self.assertEqual(self.unused([("e.whl", "bdist_wheel", wheel)]), (False, []))    # over the limit
+        self.assertEqual(self.unused([("e.whl", "bdist_wheel", b"not a zip")])[0], False)  # a broken archive
+        self.assertEqual(repo.pypi_unused_new("easy-day", ["x"], fetch=Registry({}), fetch_bytes=None), False)
+
+    def test_the_finding_is_critical_with_it(self):
+        day = datetime.timedelta(days=12)
+        found = [("easy-day", day, ["mallory"])]
+        with mock.patch.object(repo, "pypi_new_dependencies", return_value=("1.0", found)), \
+                mock.patch.object(repo, "pypi_unused_new", return_value=True) as exact:
+            issues = repo.new_dependency_issues("pypi", "acme", "1.1", None, unused=["guessed"], imports=["acme"])
+        exact.assert_called_once_with("easy-day", ["acme"])
+        self.assertEqual(issues[0]["sev"], "CRITICAL")
+        self.assertIn("which 1.0 did not have and no module of this release imports: a package first published",
+                      issues[0]["msg"])
+        # not read exactly (no file read whole, or it cannot say): MAJOR, whatever the names guess
+        with mock.patch.object(repo, "pypi_new_dependencies", return_value=("1.0", found)), \
+                mock.patch.object(repo, "pypi_unused_new", return_value=False):
+            self.assertEqual(repo.new_dependency_issues("pypi", "acme", "1.1", None, unused=["easy-day"],
+                                                        imports=["acme"])[0]["sev"], "MAJOR")
+        with mock.patch.object(repo, "pypi_new_dependencies", return_value=("1.0", found)), \
+                mock.patch.object(repo, "pypi_unused_new", side_effect=AssertionError("asked")):
+            self.assertEqual(repo.new_dependency_issues("pypi", "acme", "1.1", None, unused=["easy-day"],
+                                                        imports=None)[0]["sev"], "MAJOR")
+
+
 class ScanPackageTests(unittest.TestCase):
     def test_the_release_is_suspicious_and_the_check_can_be_turned_off(self):
         manifest = parent()["versions"]["0.2.1"]
@@ -246,6 +320,32 @@ class ScanPackageTests(unittest.TestCase):
                 res = repo.scan_package("npm", "@acme/files", "0.2.1", resolved=rv)
                 self.assertEqual([(i["sev"], i["msg"]) for i in res["issues"] if i["rule"] == "SC-NEW-DEPENDENCY"],
                                  [want])
+
+    def test_a_pypi_requirement_no_module_imports_is_critical(self):
+        """(D-5) a PyPI requirement 7 to 30 days old whose own modules the release imports none of."""
+        from tests.registry._review_support import zipball
+        meta = "Name: acme\nVersion: 1.1\nRequires-Dist: requests\nRequires-Dist: easy-day\n"
+        info = {"requires_dist": ["requests", "easy-day"]}
+        dep_wheel = zipball({"easy_day/__init__.py": "", "easy_day-0.1.dist-info/METADATA": "Name: easy-day\n"})
+        docs = {PYPI + "acme/json": pypi_project({"1.0": OLD, "1.1": RELEASE}),
+                PYPI + "acme/1.0/json": {"info": {"requires_dist": ["requests"]}},
+                PYPI + "easy-day/json": {**pypi_project({"0.1": RELEASE - datetime.timedelta(days=10)}),
+                                         "urls": [{"filename": "easy_day-0.1-py3-none-any.whl", "size": len(dep_wheel),
+                                                   "packagetype": "bdist_wheel",
+                                                   "url": "https://files.pythonhosted.org/easy_day-0.1-py3-none-any.whl"}]}}
+        art = [{"url": "https://files.pythonhosted.org/acme-1.1-py3-none-any.whl", "container": "zip",
+                "artifact": "wheel", "entry": {}, "filename": "acme-1.1-py3-none-any.whl"}]
+        for code, want in (("import requests\n", "CRITICAL"), ("import requests\nimport easy_day\n", "MAJOR")):
+            data = zipball({"acme/__init__.py": code, "acme-1.1.dist-info/METADATA": meta})
+
+            def fetch(url, data=data):
+                return dep_wheel if "easy_day" in url else data
+            with self.subTest(code=code), mock.patch.object(repo, "http_json", side_effect=Registry(docs)), \
+                    mock.patch.object(repo, "http_bytes", side_effect=fetch), \
+                    mock.patch.object(repo, "_fetch", side_effect=lambda url, **kw: fetch(url)), \
+                    mock.patch.object(repo, "verify_digest", return_value=None):
+                res = repo.scan_package("pypi", "acme", "1.1", resolved=repo.Resolution("1.1", art, info=info))
+                self.assertEqual([i["sev"] for i in res["issues"] if i["rule"] == "SC-NEW-DEPENDENCY"], [want])
 
     def test_an_unreachable_registry_is_not_a_finding(self):
         manifest = parent()["versions"]["0.2.1"]

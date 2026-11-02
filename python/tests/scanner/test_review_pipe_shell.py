@@ -12,7 +12,7 @@ finding. Help text showing the command, a comment, and a download followed
 by a separate shell command are not it.
 
 The npm engine's twin: js/test/review-pipe-shell.test.js (and
-tests/architecture/test_js_parity.py, test_review_dashboard_parity.py).
+tests/architecture/test_js_parity.py; the dashboard runs the npm engine).
 Payloads are inert text: hosts are .invalid.
 """
 import json

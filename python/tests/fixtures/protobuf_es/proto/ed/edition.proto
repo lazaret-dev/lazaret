@@ -1,0 +1,10 @@
+edition = "2023";
+package ed.v1;
+option features.field_presence = IMPLICIT;
+message Thing {
+  string name = 1;
+  int32 count = 2 [features.field_presence = EXPLICIT];
+  repeated string tags = 3;
+  Kind kind = 4 [features.field_presence = EXPLICIT];
+}
+enum Kind { option features.enum_type = CLOSED; KIND_A = 0; KIND_B = 1; }

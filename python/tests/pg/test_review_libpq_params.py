@@ -21,7 +21,7 @@ from lazaret.pg._dsn import default_ssl_dir, lookup_pgpass, resolve
 from lazaret.pg.connection import Connection, _check_peer
 from tests.pg.test_hostile_server import FakeServer, auth, msg
 from tests.pg.test_hostile_server import connect as fake_connect
-from tests import _support
+from tests import _pki, _support
 from tests.pg.test_review_tls import MATRIX, HomeDirCase
 
 
@@ -124,25 +124,27 @@ class DefaultClientCertificateTests(HomeDirCase):
             self.context(sslmode="require")
         self.context(sslmode="require", sslcertmode="disable")  # not loaded at all
 
-    @unittest.skipUnless(shutil.which("openssl"), "needs the openssl command to make a throwaway key")
-    def test_default_certificate_is_loaded(self):
-        import subprocess
+    def stage_default_certificate(self, password=None):
+        """A throwaway certificate and key (tests/_pki.py; the key under `password` when given) as libpq's default
+        client certificate in the private home -> (the key's path, the certificate's)."""
+        made = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, made)
+        pki = _pki.Pki(made, server_name="u", password=password)
         os.makedirs(default_ssl_dir())
         key, crt = (os.path.join(default_ssl_dir(), n) for n in ("postgresql.key", "postgresql.crt"))
-        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", crt,
-                        "-days", "1", "-subj", "/CN=u"], check=True, capture_output=True, timeout=40)
+        shutil.copyfile(pki.key, key)
+        shutil.copyfile(pki.cert, crt)
+        os.chmod(key, 0o600)
+        return key, crt
+
+    def test_default_certificate_is_loaded(self):
+        key, crt = self.stage_default_certificate()
         with mock.patch.object(ssl.SSLContext, "load_cert_chain") as load:
             self.context(sslmode="require")
         load.assert_called_once_with(crt, key, password="")
 
-    @unittest.skipUnless(shutil.which("openssl"), "needs the openssl command to make a throwaway key")
     def test_encrypted_key_uses_sslpassword_and_never_prompts(self):
-        import subprocess
-        os.makedirs(default_ssl_dir())
-        key, crt = (os.path.join(default_ssl_dir(), n) for n in ("postgresql.key", "postgresql.crt"))
-        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-passout", "pass:dummy-pass",
-                        "-keyout", key, "-out", crt, "-days", "1", "-subj", "/CN=u"],
-                       check=True, capture_output=True, timeout=40)
+        self.stage_default_certificate(password="dummy-pass")
         with self.assertRaisesRegex(pg.OperationalError, "sslpassword"):
             self.context(sslmode="require")
         self.context(sslmode="require", sslpassword="dummy-pass")

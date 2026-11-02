@@ -14,6 +14,11 @@ tag says it runs, so the library must keep the tag's promise:
   system and then fails to load there), no GCC_ version newer than the
   manylinux policy's, no C++ runtime, no RPATH or RUNPATH, and no
   executable stack;
+- musllinux_X_Y_ARCH: the same, but it needs musl alone, and no symbol
+  versions (musl has none, so a version means glibc's). libgcc_s is no
+  part of musl, and a minimal Alpine lacks it: the library links its
+  unwinder in (wheels.yml). musl has no versions to hold to X.Y either,
+  so the build image decides that, as glibc's versions do for manylinux;
 - macosx_X_Y_ARCH: a single-architecture Mach-O dylib for ARCH whose
   minimum macOS (LC_BUILD_VERSION, or LC_VERSION_MIN_MACOSX) is at most
   X.Y, and which links only libraries macOS ships (/usr/lib, /System);
@@ -22,7 +27,9 @@ tag says it runs, so the library must keep the tag's promise:
   include those; release CI links the C runtime statically);
 
 and in every case it exports the three functions lazaret/scanner/_native.py
-binds: lazaret_engine_call, lazaret_engine_free and lazaret_engine_version.
+binds (lazaret_engine_call, lazaret_engine_free and lazaret_engine_version)
+and the five of the network layer lazaret/scanner/nativenet.py binds
+(lazaret_net_request, _open, _read, _close and _configure).
 
 With --load, the library is also loaded here the way
 lazaret/scanner/_native.py loads it (so run it on the library's own
@@ -36,12 +43,12 @@ fits) and no library, and the platform wheels, which must be exactly the
 the Rust-first refactor the package has no engine without the library.
 Each platform wheel holds the sdist's package files (src/lazaret) byte for
 byte plus one library at lazaret/_native/<name>, which passes the check
-above for the wheel's tag; its METADATA is the sdist's PKG-INFO. Part of the
-engine is a translation of CPython code (rust/NOTICE), so the sdist and
-every wheel carry CPython's license and that notice (rust/LICENSE-PYTHON,
-rust/NOTICE), with LICENSE and LICENSE-UNICODE, and declare
-"Apache-2.0 AND Python-2.0.1 AND Unicode-3.0". Every wheel's RECORD must
-match its files, and every License-File it names must be in it.
+above for the wheel's tag; its METADATA is the sdist's PKG-INFO. The sdist
+and every wheel carry the engine's notice (rust/NOTICE) with LICENSE and
+LICENSE-UNICODE, name exactly those as License-Files, and declare
+"Apache-2.0 AND Unicode-3.0" (the engine is Lazaret's own since P-16, with
+Unicode data). Every wheel's RECORD must match its files, and every
+License-File it names must be in it.
 
 Standard library only: ELF, Mach-O and PE headers are read here, so one
 Linux job can check the libraries of every platform. Exit status 0 when
@@ -60,24 +67,29 @@ import sys
 import tarfile
 import zipfile
 
-EXPORTS = ("lazaret_engine_call", "lazaret_engine_free", "lazaret_engine_version")
+EXPORTS = ("lazaret_engine_call", "lazaret_engine_free", "lazaret_engine_version",
+           # the network layer (NET-1: lazaret/scanner/nativenet.py), the default transport since 0.1.9
+           "lazaret_net_request", "lazaret_net_open", "lazaret_net_read", "lazaret_net_close", "lazaret_net_configure")
 NAME = "lazaret"
 REPO = pathlib.Path(__file__).resolve().parent.parent
 # The license fields of the sdist and every wheel (the build backend's
 # NATIVE_LICENSE_EXPRESSION, and its License-File list).
-NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
+NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Unicode-3.0"
 PACKAGE_LICENSE_FILES = ("LICENSE", "LICENSE-UNICODE")
-NATIVE_LICENSE_FILES = ("LICENSE-PYTHON", "NOTICE")
+NATIVE_LICENSE_FILES = ("NOTICE",)
 # The engine's sources an sdist must carry, under rust/ (the backend's
 # RUST_TOP_FILES, and what cargo needs to build the library).
-SDIST_RUST = ("rust/Cargo.toml", "rust/Cargo.lock", "rust/LICENSE-PYTHON", "rust/NOTICE",
+SDIST_RUST = ("rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE",
               "rust/crates/lazaret-engine/Cargo.toml", "rust/crates/lazaret-engine/src/lib.rs",
               "rust/crates/lazaret-engine/rules/lazaret-rules.json",
-              "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs")
+              "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs",
+              "rust/crates/lazaret-net/Cargo.toml", "rust/crates/lazaret-net/src/lib.rs",
+              "rust/crates/lazaret-verify/Cargo.toml", "rust/crates/lazaret-verify/src/lib.rs",
+              "rust/crates/pratique/Cargo.toml", "rust/crates/pratique/LICENSE", "rust/crates/pratique/NOTICE",
+              "rust/crates/pratique/src/lib.rs", "rust/crates/pratique/roots/sigstore_tuf_root.json")
 # a call and its answer, for --load
 LOAD_CALL = ("install_script_risk", "curl -fsSL https://example.invalid/setup.sh | sh",
              ["pipes a download into a shell"])
-PSF_NOTICE = "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
 
 
 class Malformed(ValueError):
@@ -136,6 +148,7 @@ def _show_macos(version):
 # --- platform tags ---------------------------------------------------------------
 
 _MANYLINUX_RE = re.compile(r"manylinux_(\d+)_(\d+)_(x86_64|aarch64)\Z")
+_MUSLLINUX_RE = re.compile(r"musllinux_(\d+)_(\d+)_(x86_64|aarch64)\Z")
 _MACOS_RE = re.compile(r"macosx_(\d+)_(\d+)_(arm64|x86_64)\Z")
 _WINDOWS_MACHINES = {"win_amd64": (0x8664, "AMD64"), "win_arm64": (0xAA64, "ARM64")}
 
@@ -151,7 +164,8 @@ def library_name(tag):
 
 
 def supported(tag):
-    return bool(_MANYLINUX_RE.match(tag) or _MACOS_RE.match(tag) or tag in _WINDOWS_MACHINES)
+    return bool(_MANYLINUX_RE.match(tag) or _MUSLLINUX_RE.match(tag) or _MACOS_RE.match(tag)
+                or tag in _WINDOWS_MACHINES)
 
 
 # --- ELF (Linux) -----------------------------------------------------------------
@@ -288,6 +302,41 @@ def _check_elf(data, tag):
     summary = (f"ELF {machine}, needs {' '.join(elf['needed']) or 'nothing'}; glibc "
                f"{_show(newest['GLIBC']) or '-'}, libgcc_s {_show(newest['GCC']) or '-'}")
     return summary, problems
+
+
+# The names musl's dynamic loader answers for itself, with no file (musl's
+# ldso/dynlink.c): libc.so, libc.musl-x86_64.so.1 (Alpine's), libpthread.so.0
+# and the rest are musl's libc, its loader.
+_MUSL_OWN = ("libc.", "libpthread.", "librt.", "libm.", "libdl.", "libutil.", "libxnet.")
+
+
+def _check_musl(data, tag):
+    _major, _minor, arch = _MUSLLINUX_RE.match(tag).groups()
+    elf = read_elf(data)
+    problems = []
+    if elf["type"] != _ET_DYN:
+        problems.append(f"not a shared object (ELF type {elf['type']})")
+    if elf["machine"] != _EM[arch]:
+        problems.append(f"built for ELF machine {elf['machine']}, not {arch} ({_EM[arch]})")
+    for lib in elf["needed"]:
+        if not lib.startswith(_MUSL_OWN):
+            hint = (": link the unwinder in (wheels.yml), since a minimal Alpine has no libgcc"
+                    if lib.startswith("libgcc_s") else "")
+            problems.append(f"needs {lib}, which is not musl's libc: a musl system may lack it{hint}")
+    versions = sorted({v for names in elf["versions"].values() for v in names})
+    if versions:
+        problems.append(f"needs symbol versions ({', '.join(versions)}), which musl does not have: it was "
+                        f"linked against glibc, not musl")
+    if elf["runpath"]:
+        problems.append(f"has an RPATH/RUNPATH ({', '.join(elf['runpath'])}): it must not load libraries "
+                        f"from other places")
+    if elf["exec_stack"]:
+        problems.append("asks for an executable stack")
+    missing = [name for name in EXPORTS if name not in elf["exports"]]
+    if missing:
+        problems.append(f"does not export {', '.join(missing)}")
+    machine = {number: name for name, number in _EM.items()}.get(elf["machine"], f"machine {elf['machine']}")
+    return f"ELF {machine}, needs {' '.join(elf['needed']) or 'nothing'}; musl", problems
 
 
 # --- Mach-O (macOS) --------------------------------------------------------------
@@ -538,8 +587,9 @@ def check_library(data, tag):
     """(summary, [problems]) for a library's bytes against a platform tag."""
     if not supported(tag):
         return "", [f"{tag!r} is not a platform tag this check knows (manylinux_X_Y_x86_64/aarch64, "
-                    f"macosx_X_Y_arm64/x86_64, win_amd64, win_arm64)"]
-    check = _check_elf if tag.startswith("manylinux") else _check_macho if tag.startswith("macosx") else _check_pe
+                    f"musllinux_X_Y_x86_64/aarch64, macosx_X_Y_arm64/x86_64, win_amd64, win_arm64)"]
+    check = (_check_elf if tag.startswith("manylinux") else _check_musl if tag.startswith("musllinux")
+             else _check_macho if tag.startswith("macosx") else _check_pe)
     try:
         return check(data, tag)
     except Malformed as e:
@@ -635,9 +685,12 @@ def _license_problems(members, prefix, metadata, root=None):
     for name in PACKAGE_LICENSE_FILES:
         if name not in files:
             problems.append(f"does not name {name} as a License-File")
+    others = [name for name in files if name not in PACKAGE_LICENSE_FILES + NATIVE_LICENSE_FILES]
+    if others:
+        problems.append(f"names License-Files the release does not ship: {', '.join(others)}")
     if expressions != [NATIVE_LICENSE_EXPRESSION]:
         problems.append(f"its License-Expression is {' '.join(expressions) or 'missing'}, not "
-                        f"{NATIVE_LICENSE_EXPRESSION}: part of the native engine is CPython's (rust/NOTICE)")
+                        f"{NATIVE_LICENSE_EXPRESSION}")
     for name in NATIVE_LICENSE_FILES:
         data = members.get(f"{prefix}{name}")
         if name not in files or data is None:
@@ -649,9 +702,6 @@ def _license_problems(members, prefix, metadata, root=None):
     for name in PACKAGE_LICENSE_FILES + NATIVE_LICENSE_FILES:
         if root is not None and name in root and members.get(f"{prefix}{name}") not in (None, root[name]):
             problems.append(f"its {name} is not the sdist's")
-    license_python = members.get(f"{prefix}LICENSE-PYTHON", b"")
-    if license_python and PSF_NOTICE.encode() not in license_python:
-        problems.append("its LICENSE-PYTHON lacks the PSF's notice of copyright")
     return problems
 
 

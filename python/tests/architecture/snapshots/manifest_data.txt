@@ -1,0 +1,9 @@
+# manifest_data: 800 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+c94612d35fc3b3ea
+321492988fe9758a
+34809dd08e560ccf
+6ee8b4ecb7611175
+05625b946aae96a2
+46f9b5d0d6c49f98
+8d5e89af89487986
+14a333035f771f78

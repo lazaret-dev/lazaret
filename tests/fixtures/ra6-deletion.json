@@ -1,0 +1,350 @@
+[
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"/home/example/Documents\")",
+    "found": true
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import os\nos.remove(os.path.join(os.getenv(\"HOME\"), \".ssh\", \"id_example\"))",
+    "found": true
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "from pathlib import Path\nPath.home().joinpath(\"Documents\").unlink()",
+    "found": true
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil, os\np = os.path.expanduser(\"~\")\nshutil.rmtree(f\"{p}/Documents\")",
+    "found": true
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"/\")",
+    "found": true
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"C:/\")",
+    "found": true
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nfrom pathlib import Path\nfor p in Path(\"/home/example\").rglob(\".git\"):\n shutil.rmtree(p.parent)",
+    "found": true
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"~/.cache/../Documents\")",
+    "found": true
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"build/\")",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"dist\")",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(self.build_temp)",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil,tempfile\np=tempfile.mkdtemp()\nshutil.rmtree(p)",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"~/.cache/example-package/build\")",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"tests/fixtures/work\")",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "# shutil.rmtree(\"/home/example\")\nDOC = 'shutil.rmtree(\"/\")'",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\"), os=require(\"os\"); fs.rmSync(os.homedir(), {recursive:true});",
+    "found": true
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\"); fs.rm(process.env.HOME+\"/Documents\", {recursive:true}, ()=>{});",
+    "found": true
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "import {rm} from \"node:fs/promises\"; await rm(\"/\", {recursive:true});",
+    "found": true
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\"); fs.rmdirSync(\"/home/example\", {recursive:true});",
+    "found": true
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\"),path=require(\"path\"),os=require(\"os\"); const p=path.join(os.homedir(),\".aws\"); fs.rmSync(p,{recursive:true});",
+    "found": true
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\");fs.unlinkSync(\"/Users/example/Documents/note.txt\");",
+    "found": true
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\");fs.rmSync(\"C:/\",{recursive:true});",
+    "found": true
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\"); fs.rmSync(\"dist\",{recursive:true});",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\"); fs.rmSync(\"node_modules/.cache\",{recursive:true});",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\"); fs.rmSync(\"~/.cache/example-package\",{recursive:true});",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\"); fs.rmdirSync(\"/home/example\",{recursive:false, note:\"recursive:true\"});",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\");const p=fs.mkdtempSync(\"/tmp/example-\");fs.rmSync(p,{recursive:true});",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "// fs.rmSync(\"/\",{recursive:true});\nconsole.log(\"rm -rf /\");",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rm -rf \"$HOME/Documents\"",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rm -rf /",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rm -rf C:/",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "shred \"$HOME/Documents/note.txt\"",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "del /s /q \"%USERPROFILE%/Documents\"",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rd /s /q \"%USERPROFILE%/Documents\"",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "Remove-Item -Recurse \"$env:USERPROFILE/Documents\"",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "find /home/example/Documents -type f -delete",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "find /home/example -name .git -exec rm -rf {} \\;",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "p=\"$HOME/Documents\"; rm -rf \"$p\"",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rm -rf build dist",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rm -rf node_modules/.cache",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rm -rf \"$HOME/.cache/example-package\"",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "echo \"rm -rf /\"",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "# rm -rf /",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rm -rf tests/fixtures",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "rm -rf '$HOME/Documents'",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import subprocess\nsubprocess.run(\"rm -rf /home/example/Documents\", shell=True)",
+    "found": true
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "require(\"child_process\").execSync(\"rm -rf /home/example/Documents\");",
+    "found": true
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "find /home/example -name .git -exec echo rm {} \\;",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "find /home/example -exec rm -rf build \\;",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "p=/; rm -rf \"$path\"",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const {rmdirSync:clean}=require(\"fs\");clean(\"/home/example\",{recursive:false});",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "const fs=require(\"fs\");fs.rmdirSync(\"/home/example\",{recursive:true, recursive:false});",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "# subprocess.run(\"rm -rf /home/example\", shell=True)",
+    "found": false
+  },
+  {
+    "lang": "js",
+    "command": false,
+    "text": "// execSync(\"rm -rf /home/example\");",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "DOC = 'subprocess.run(\"rm -rf /home/example\")'",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "from pathlib import Path\nimport shutil\nfor p in Path(\"tests/fixtures\").rglob(\".git\"):\n shutil.rmtree(p.parent)",
+    "found": false
+  },
+  {
+    "lang": "sh",
+    "command": true,
+    "text": "find tests/fixtures -name .git -exec rm -rf {} \\;",
+    "found": false
+  },
+  {
+    "lang": "py",
+    "command": false,
+    "text": "import shutil\nshutil.rmtree(\"C\u20ac-fixture\")",
+    "found": false
+  }
+]

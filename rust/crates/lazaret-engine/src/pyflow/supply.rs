@@ -22,9 +22,9 @@ use super::eval::{key, Analyzer};
 use super::*;
 use crate::flow::LiteralTest;
 use crate::jsflow::supply::{
-    bit_index, cred_store, decoded_at, downloads, harvest_of, host_prefix, interp_name, kind_bit, record_written, received_cat,
+    bit_index, cred_store, shown_what, decoded_at, downloads, harvest_of, host_prefix, interp_name, kind_bit, record_written, received_cat,
     first_drop, is_flag, run_parts, script_interp, text_key, value_key, written_at, Answer, DropRun, Part, Written, DESERIALIZE, ENV_NAME, EVAL_FLAGS, EXEC_CMD, HARVEST, INTERPRETERS,
-    KIND_NAMES, K_ADDRESS, K_BYTES, K_CARVED, K_CREDENTIALS, K_CRED_FILE, K_ENV, K_FILE, K_DECODED, K_IDENTITY, K_PATH,
+    KIND_NAMES, K_ADDRESS, K_BYTES, K_CARVED, K_CREDENTIALS, K_CRED_FILE, K_ENV, K_FILE, K_DECODED, K_IDENTITY, K_OWN, K_PATH,
     K_RECEIVED, K_WFILE, K_WHOLE_ENV, LOAD_NAME, NOT_LOCAL, OBJ_CLIENT, OBJ_CONN, OBJ_ENV, READ_PATH, RUN_CODE, SEND_ADDR,
     SEND_DATA, STRONG_IN_ADDRESS,
 };
@@ -79,8 +79,73 @@ fn eq(a: &[u32], b: &str) -> bool {
     pystr::eq(a, b)
 }
 
-fn is_one(name: &[u32], set: &[&str]) -> bool {
-    set.iter().any(|s| eq(name, s))
+/// A set of names a callee's or a method's name is tested against: a
+/// table (below), or a list written where it is asked.
+trait NameSet {
+    fn holds(&self, name: &[u32]) -> bool;
+}
+
+impl NameSet for [&str] {
+    fn holds(&self, name: &[u32]) -> bool {
+        self.iter().any(|s| eq(name, s))
+    }
+}
+
+impl<const N: usize> NameSet for [&str; N] {
+    fn holds(&self, name: &[u32]) -> bool {
+        self[..].holds(name)
+    }
+}
+
+/// A table of names, with the lengths and first characters its names have:
+/// the models ask about every call, and most names are none of a table's,
+/// which these two answer without a comparison. (A table's names are
+/// ASCII, so a name's length in characters is a table name's in bytes.)
+struct Table {
+    names: &'static [&'static str],
+    /// bit n: a name of n characters (63: 63 or more)
+    lens: u64,
+    /// bit c: a name that starts with ASCII c
+    firsts: u128,
+}
+
+impl Table {
+    const fn new(names: &'static [&'static str]) -> Table {
+        let mut lens = 0u64;
+        let mut firsts = 0u128;
+        let mut i = 0;
+        while i < names.len() {
+            let b = names[i].as_bytes();
+            assert!(!b.is_empty(), "a table's names are not empty");
+            let mut j = 0;
+            while j < b.len() {
+                assert!(b[j] < 0x80, "a table's names are ASCII");
+                j += 1;
+            }
+            lens |= 1u64 << if b.len() >= 63 { 63 } else { b.len() };
+            firsts |= 1u128 << b[0];
+            i += 1;
+        }
+        Table { names, lens, firsts }
+    }
+}
+
+impl NameSet for Table {
+    #[inline]
+    fn holds(&self, name: &[u32]) -> bool {
+        let n = name.len().min(63);
+        if self.lens & (1u64 << n) == 0 {
+            return false;
+        }
+        match name.first() {
+            Some(&c) if c < 0x80 && self.firsts & (1u128 << c) != 0 => self.names.holds(name),
+            _ => false,
+        }
+    }
+}
+
+fn is_one<S: NameSet + ?Sized>(name: &[u32], set: &S) -> bool {
+    set.holds(name)
 }
 
 fn last(name: &[u32]) -> &[u32] {
@@ -112,11 +177,24 @@ pub struct Supply {
     stored: RefCell<Option<HashSet<PyStr>>>,
     /// a name's alias of a callee (`s = os.system`): the names it resolves to
     alias_memo: RefCell<HashMap<(FnId, PyStr), Vec<PyStr>>>,
+    /// (P-1) a callee's names in a function (sc_names), and the work their reading charges once the aliases it reads
+    /// are known: what each later reading of the function gives and charges for them
+    names_memo: RefCell<crate::quickhash::QuickMap<(FnId, NodeId), (Rc<Vec<PyStr>>, u64)>>,
+    /// (P-1) aliases being read (sc_alias_names, not from its memo), and the work sc_names_at charged outside them
+    alias_active: std::cell::Cell<u32>,
+    steady: std::cell::Cell<u64>,
     /// each function's assignments of a name and its loops' targets
     fn_index: RefCell<HashMap<FnId, Rc<FnIndex>>>,
+    /// (P-1) each function's own nodes (`own_nodes` of its body), walked once for its index and its `global` and
+    /// `nonlocal` declarations
+    own: RefCell<crate::quickhash::QuickMap<FnId, Rc<Vec<NodeId>>>>,
     /// the files the script writes code or a program to (a run of one is
     /// a dropper's)
     pub written: RefCell<Vec<Written>>,
+    /// where the script reads itself back (`own_starts`), sorted
+    pub own_starts: Vec<u32>,
+    listing_guard: RefCell<Option<bool>>,
+    listing_index: RefCell<Option<Rc<super::listing::Index>>>,
 }
 
 /// A function's own assignments: what `name = value` gives each name, and
@@ -125,6 +203,7 @@ pub struct Supply {
 struct FnIndex {
     assigns: HashMap<PyStr, Vec<NodeId>>,
     loops: HashMap<PyStr, NodeId>,
+    delete_loops: HashMap<PyStr, (NodeId,u32,u32)>,
 }
 
 impl Supply {
@@ -132,7 +211,8 @@ impl Supply {
         let lit = LiteralTest::new(&pack, text);
         let whole = pack.text("_LD_WHOLE_ENV");
         Supply {
-            pack,
+            listing_guard: RefCell::new(None),
+            listing_index: RefCell::new(None),
             text: text.to_vec(),
             lit,
             outside: RefCell::new(HashSet::new()),
@@ -143,8 +223,14 @@ impl Supply {
             env_store: RefCell::new(HashMap::new()),
             stored: RefCell::new(None),
             alias_memo: RefCell::new(HashMap::new()),
+            names_memo: RefCell::new(Default::default()),
+            alias_active: std::cell::Cell::new(0),
+            steady: std::cell::Cell::new(0),
             fn_index: RefCell::new(HashMap::new()),
+            own: RefCell::new(Default::default()),
             written: RefCell::new(Vec::new()),
+            own_starts: own_starts(&pack, text),
+            pack,
         }
     }
 
@@ -157,6 +243,39 @@ impl Supply {
         let hi = (hi as usize).min(self.text.len()).max(lo);
         &self.text[lo..hi]
     }
+}
+
+/// Where a Python text reads itself back (N-19): the starts of `_SELF_READ_RE`'s matches (a read of its own file,
+/// its docstring, its loader's source), `_SIBLING_DATA_RE`'s (a read of a data file shipped with it) and
+/// `_SIBLING_PATH_RE`'s (such a file's path), sorted: the text follower's forms, which the model gives `K_OWN` at the
+/// call whose callee starts one, or the name (`__doc__`, `__file__`) that does.
+fn own_starts(p: &Pack, text: &[u32]) -> Vec<u32> {
+    if !["__file__", "__doc__", "__loader__"].iter().any(|w| pystr::contains(text, w)) {
+        return Vec::new();
+    }
+    let mut out: Vec<u32> = Vec::new();
+    for name in ["_SELF_READ_RE", "_SIBLING_DATA_RE", "_SIBLING_PATH_RE"] {
+        out.extend(p.re(name).finditer(text).map(|m| m.start() as u32));
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// A value without one kind of source (`jsflow::supply::sc_without`'s, for a [`Taint`]).
+fn taint_without(v: Taint, bit: u16) -> Taint {
+    let sc = match v.sc.as_ref() {
+        Some(sc) if sc.kinds & bit != 0 => sc.clone(),
+        _ => return v,
+    };
+    let kinds = sc.kinds & !bit;
+    let sc = if kinds == 0 {
+        None
+    } else {
+        let idx = bit_index(bit);
+        Some(Rc::new(Sc { kinds, firsts: sc.firsts.iter().filter(|f| f.0 != idx).cloned().collect() }))
+    };
+    Taint { sc, ..v }
 }
 
 /// The send a call is: which of its positional arguments are addresses
@@ -179,132 +298,135 @@ const LOOKUP: Spec = Spec { addresses: -1, composed: true, process: false };
 const PROCESS: Spec = Spec { addresses: 0, composed: false, process: true };
 
 /// HTTP calls that send their data: the address first.
-const POSTS: &[&str] = &[
+const POSTS: &Table = &Table::new(&[
     "requests.post", "requests.put", "requests.patch", "requests.api.post", "requests.api.put", "requests.api.patch",
     "httpx.post", "httpx.put", "httpx.patch", "urllib.request.urlopen", "urllib.request.Request", "urllib2.urlopen",
     "urllib2.Request", "six.moves.urllib.request.urlopen", "six.moves.urllib.request.Request", "urllib.urlopen",
-];
+]);
 /// HTTP calls given a method, then an address.
-const REQUESTS: &[&str] =
-    &["requests.request", "requests.api.request", "httpx.request", "httpx.stream", "aiohttp.request", "urllib3.request"];
+const REQUESTS: &Table =
+    &Table::new(&["requests.request", "requests.api.request", "httpx.request", "httpx.stream", "aiohttp.request", "urllib3.request"]);
 /// HTTP calls that send only what their address holds.
-const GETS: &[&str] = &[
+const GETS: &Table = &Table::new(&[
     "requests.get", "requests.head", "requests.delete", "requests.options", "requests.api.get", "httpx.get",
     "httpx.head", "httpx.delete", "httpx.options",
-];
+]);
 /// Calls that resolve a name (a DNS lookup sends what the name holds).
-const LOOKUPS: &[&str] = &[
+const LOOKUPS: &Table = &Table::new(&[
     "socket.gethostbyname", "socket.gethostbyname_ex", "socket.getaddrinfo", "dns.resolver.resolve",
     "dns.resolver.query",
-];
+]);
 /// Calls whose value is a connection: what it is written is sent, what it
 /// reads is received.
-const CONNECTIONS: &[&str] = &[
+const CONNECTIONS: &Table = &Table::new(&[
     "socket.socket", "socket.create_connection", "socket.fromfd", "ssl.wrap_socket", "http.client.HTTPConnection",
     "http.client.HTTPSConnection", "httplib.HTTPConnection", "httplib.HTTPSConnection", "telnetlib.Telnet",
     "websocket.create_connection", "websocket.WebSocket", "asyncio.open_connection",
-];
+]);
 /// A connection's methods that send.
-const CONN_WRITES: &[&str] = &["send", "sendall", "sendto", "write", "writelines", "request"];
+const CONN_WRITES: &Table = &Table::new(&["send", "sendall", "sendto", "write", "writelines", "request"]);
 /// A connection's methods that receive.
-const CONN_READS: &[&str] = &["recv", "recvfrom", "recv_into", "read", "readline", "readlines", "getresponse", "readexactly"];
+const CONN_READS: &Table = &Table::new(&["recv", "recvfrom", "recv_into", "read", "readline", "readlines", "getresponse", "readexactly"]);
 /// Methods that give a connection back (a socket wrapped in TLS, its file).
-const CONN_CHAIN: &[&str] = &["wrap_socket", "makefile", "dup", "accept"];
+const CONN_CHAIN: &Table = &Table::new(&["wrap_socket", "makefile", "dup", "accept"]);
 /// Calls whose value is an HTTP client: its calls send and receive.
-const CLIENTS: &[&str] = &[
+const CLIENTS: &Table = &Table::new(&[
     "requests.Session", "requests.session", "requests.sessions.Session", "httpx.Client", "httpx.AsyncClient",
     "aiohttp.ClientSession", "urllib3.PoolManager", "urllib3.ProxyManager", "urllib3.HTTPConnectionPool",
     "urllib3.HTTPSConnectionPool", "urllib.request.build_opener", "urllib2.build_opener", "cloudscraper.create_scraper",
-];
-const CLIENT_POSTS: &[&str] = &["post", "put", "patch", "open"];
-const CLIENT_REQUESTS: &[&str] = &["request", "urlopen", "stream"];
-const CLIENT_GETS: &[&str] = &["get", "head", "delete", "options"];
+]);
+const CLIENT_POSTS: &Table = &Table::new(&["post", "put", "patch", "open"]);
+const CLIENT_REQUESTS: &Table = &Table::new(&["request", "urlopen", "stream"]);
+const CLIENT_GETS: &Table = &Table::new(&["get", "head", "delete", "options"]);
 /// HTTP calls that receive (their value is the response), from the
 /// script's own address.
-const RECEIVERS: &[&str] = &[
+const RECEIVERS: &Table = &Table::new(&[
     "requests.get", "requests.post", "requests.put", "requests.patch", "requests.delete", "requests.head",
     "requests.options", "requests.request", "requests.api.get", "requests.api.post", "requests.api.request", "httpx.get",
     "httpx.post", "httpx.put", "httpx.patch", "httpx.delete", "httpx.head", "httpx.options", "httpx.request",
     "httpx.stream", "urllib.request.urlopen", "urllib2.urlopen", "six.moves.urllib.request.urlopen", "aiohttp.request",
     "urllib3.request", "urllib.urlopen",
-];
+]);
 /// The calls that fetch (the instance's metadata, the public IP address).
-const FETCHERS: &[&str] = &["requests.get", "httpx.get", "urllib.request.urlopen", "urllib2.urlopen", "urllib.urlopen"];
+const FETCHERS: &Table = &Table::new(&["requests.get", "httpx.get", "urllib.request.urlopen", "urllib2.urlopen", "urllib.urlopen"]);
 /// The calls that make a request object.
-const REQUEST_OBJECTS: &[&str] =
-    &["urllib.request.Request", "urllib2.Request", "six.moves.urllib.request.Request", "requests.Request"];
+const REQUEST_OBJECTS: &Table =
+    &Table::new(&["urllib.request.Request", "urllib2.Request", "six.moves.urllib.request.Request", "requests.Request"]);
 /// Calls that run a command line and give what it prints.
-const CAPTURES: &[&str] = &[
+const CAPTURES: &Table = &Table::new(&[
     "subprocess.check_output", "subprocess.getoutput", "subprocess.getstatusoutput", "subprocess.run",
     "subprocess.Popen", "os.popen", "commands.getoutput", "commands.getstatusoutput", "asyncio.create_subprocess_shell",
     "asyncio.create_subprocess_exec",
-];
+]);
 /// Calls that start a process (a network program given data sends it).
-const PROCESSES: &[&str] = &[
+const PROCESSES: &Table = &Table::new(&[
     "subprocess.check_output", "subprocess.getoutput", "subprocess.getstatusoutput", "subprocess.run",
     "subprocess.Popen", "subprocess.call", "subprocess.check_call", "os.popen", "os.system", "commands.getoutput",
     "commands.getstatusoutput", "asyncio.create_subprocess_shell", "asyncio.create_subprocess_exec",
-];
+]);
 /// Calls that run a command line through a shell (its text is code).
-const SHELLS: &[&str] = &[
+const SHELLS: &Table = &Table::new(&[
     "os.system", "os.popen", "subprocess.getoutput", "subprocess.getstatusoutput", "commands.getoutput",
     "commands.getstatusoutput", "asyncio.create_subprocess_shell", "pty.spawn",
-];
+]);
 /// Calls that start a process from an argument list (shell=True makes the
 /// first a shell's command line).
-const SPAWNS: &[&str] =
-    &["subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen"];
+const SPAWNS: &Table =
+    &Table::new(&["subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen"]);
 /// Calls that run a program named by their first argument.
-const PROGRAM_RUNS: &[&str] = &[
+const PROGRAM_RUNS: &Table = &Table::new(&[
     "os.startfile", "os.execv", "os.execve", "os.execl", "os.execle", "os.execlp", "os.execlpe", "os.execvp", "os.execvpe",
     "os.posix_spawn", "os.posix_spawnp", "asyncio.create_subprocess_exec",
-];
+]);
 /// Calls that run a program named by their second argument (the first is a mode).
-const MODE_RUNS: &[&str] =
-    &["os.spawnv", "os.spawnve", "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe", "os.spawnvp", "os.spawnvpe"];
+const MODE_RUNS: &Table =
+    &Table::new(&["os.spawnv", "os.spawnve", "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe", "os.spawnvp", "os.spawnvpe"]);
 /// Calls that open a file by its path (their second argument the mode).
-const OPENERS: &[&str] = &["open", "io.open", "codecs.open", "builtins.open"];
+const OPENERS: &Table = &Table::new(&["open", "io.open", "codecs.open", "builtins.open"]);
 /// Calls that give back the path they are given, as a string or a path.
-const PATH_WRAPPERS: &[&str] = &[
+const PATH_WRAPPERS: &Table = &Table::new(&[
     "str", "os.fspath", "os.path.abspath", "os.path.realpath", "os.path.normpath", "os.path.expanduser", "pathlib.Path",
-];
+]);
 /// The path types (`Path(p)` is p).
-const PATH_TYPES: &[&str] = &["Path", "PurePath", "PosixPath", "WindowsPath"];
+const PATH_TYPES: &Table = &Table::new(&["Path", "PurePath", "PosixPath", "WindowsPath"]);
 /// Calls that run code (`_DL_RUNNER`'s Python).
-const RUNNERS: &[&str] = &["exec", "eval", "builtins.exec", "builtins.eval", "execfile", "__builtins__.exec", "__builtins__.eval"];
+const RUNNERS: &Table = &Table::new(&["exec", "eval", "builtins.exec", "builtins.eval", "execfile", "__builtins__.exec", "__builtins__.eval"]);
+/// Parsers of a command line given its usage text (`ArgumentParser(description=__doc__)`, `docopt(__doc__)`): what
+/// they give is the command line's, never the text's (N-19).
+const USAGE_PARSERS: &Table = &Table::new(&["argparse.ArgumentParser", "optparse.OptionParser", "docopt.docopt"]);
 /// Calls that load a module by name.
-const IMPORTERS: &[&str] = &["importlib.import_module", "__import__", "builtins.__import__", "importlib.__import__"];
+const IMPORTERS: &Table = &Table::new(&["importlib.import_module", "__import__", "builtins.__import__", "importlib.__import__"]);
 /// Deserializers that run code in what they read (`_DL_DESERIAL`).
-const DESERIALIZERS: &[&str] = &[
+const DESERIALIZERS: &Table = &Table::new(&[
     "pickle.loads", "pickle.load", "pickle.Unpickler", "cPickle.loads", "cPickle.load", "_pickle.loads", "_pickle.load",
     "dill.loads", "dill.load", "cloudpickle.loads", "cloudpickle.load", "marshal.loads", "marshal.load",
     "jsonpickle.decode", "yaml.unsafe_load", "yaml.load",
-];
+]);
 /// A thread's or an executor's call of a function (its arguments: what the
 /// function is given).
-const STARTERS: &[&str] = &["threading.Thread", "multiprocessing.Process", "threading.Timer"];
+const STARTERS: &Table = &Table::new(&["threading.Thread", "multiprocessing.Process", "threading.Timer"]);
 /// Calls whose value is a number or a flag, not the data they are given (a
 /// length, a test, a checksum). A digest, a character's code or a number
 /// written out still carry it: `md5(host).hexdigest()` is the machine's id,
 /// `[ord(c) for c in host]` its name (KEEPS).
-const NUMERIC: &[&str] = &["len", "bool", "hash", "id", "abs", "round", "sum", "isinstance"];
+const NUMERIC: &Table = &Table::new(&["len", "bool", "hash", "id", "abs", "round", "sum", "isinstance"]);
 /// Calls the pass reads as clean whose value still identifies what they are given.
-const KEEPS: &[&str] = &["hexdigest", "digest", "ord"];
+const KEEPS: &Table = &Table::new(&["hexdigest", "digest", "ord"]);
 /// A container's methods that put what they are given into it.
-const COLLECTS: &[&str] = &["append", "extend", "add", "update", "insert", "setdefault", "appendleft", "put"];
+const COLLECTS: &Table = &Table::new(&["append", "extend", "add", "update", "insert", "setdefault", "appendleft", "put"]);
 /// Calls that decode what they are given (`_DECODER_NAMES` with their
 /// modules): what they return is decoded data; run as code, it is code the
 /// script decodes.
-const DECODERS: &[&str] = &[
+const DECODERS: &Table = &Table::new(&[
     "base64.b64decode", "base64.standard_b64decode", "base64.urlsafe_b64decode", "base64.b32decode",
     "base64.b32hexdecode", "base64.b16decode", "base64.a85decode", "base64.b85decode", "base64.z85decode",
     "base64.decodebytes", "base64.decodestring", "binascii.unhexlify", "binascii.a2b_base64", "binascii.a2b_hex",
     "binascii.a2b_uu", "bytes.fromhex", "bytearray.fromhex", "codecs.decode", "zlib.decompress", "gzip.decompress",
     "bz2.decompress", "lzma.decompress", "marshal.loads",
-];
+]);
 /// Methods that decode: a decryption (`Fernet(k).decrypt(d)`), a
 /// decompressor's, `fromhex`.
-const DECODER_METHODS: &[&str] = &["decrypt", "decompress", "fromhex"];
+const DECODER_METHODS: &Table = &Table::new(&["decrypt", "decompress", "fromhex"]);
 
 /// The modules a bare name usually comes from: a snippet that calls
 /// `urlopen(u)` without its import is urllib's, and so is one that has it
@@ -334,6 +456,27 @@ const BARE: &[(&str, &str)] = &[
 /// `__builtins__.__dict__.exec` and `builtins.exec` are `exec`'s,
 /// `globals.x` (`globals()['x']`) is x.
 fn normalize_name(name: &[u32]) -> PyStr {
+    // (the common case, nothing to take out: a part named __dict__, a
+    // namespace's head, builtins' module before a name; the name as it is)
+    let mut parts_n = 0usize;
+    let mut first: &[u32] = &[];
+    let mut dict = false;
+    for (k, part) in name.split(|&c| c == 0x2E).enumerate() {
+        if k == 0 {
+            first = part;
+        }
+        if eq(part, "__dict__") {
+            dict = true;
+            break;
+        }
+        parts_n += 1;
+    }
+    if !dict
+        && !(parts_n > 1 && (eq(first, "globals") || eq(first, "vars") || eq(first, "locals")))
+        && !(parts_n == 2 && (eq(first, "__builtins__") || eq(first, "builtins")))
+    {
+        return name.to_vec();
+    }
     let mut parts: Vec<&[u32]> = name.split(|&c| c == 0x2E).filter(|p| !eq(p, "__dict__")).collect();
     if parts.len() > 1 && (eq(parts[0], "globals") || eq(parts[0], "vars") || eq(parts[0], "locals")) {
         parts.remove(0);
@@ -352,19 +495,20 @@ fn normalize_name(name: &[u32]) -> PyStr {
 }
 
 /// Is a callee's name one of a table's?
-fn any_of(names: &[PyStr], set: &[&str]) -> bool {
-    names.iter().any(|n| is_one(n, set))
+fn any_of<S: NameSet + ?Sized>(names: &[PyStr], set: &S) -> bool {
+    names.iter().any(|n| set.holds(n))
 }
 
-/// [`any_of`] for the hooks every call passes through: a table's names are
-/// ASCII, so a name of another length is not compared.
-fn any_of_ascii(names: &[PyStr], set: &[&str]) -> bool {
-    names.iter().any(|n| is_one_ascii(n, set))
+/// [`any_of`] for the hooks every call passes through (a table's names are
+/// ASCII, so a name of another length is never one of them: [`eq`] says so
+/// at once).
+fn any_of_ascii<S: NameSet + ?Sized>(names: &[PyStr], set: &S) -> bool {
+    any_of(names, set)
 }
 
 /// [`is_one`] for an ASCII table (see [`any_of_ascii`]).
-fn is_one_ascii(name: &[u32], set: &[&str]) -> bool {
-    set.iter().any(|s| s.len() == name.len() && eq(name, s))
+fn is_one_ascii<S: NameSet + ?Sized>(name: &[u32], set: &S) -> bool {
+    set.holds(name)
 }
 
 /// The send a callee's names make, if any.
@@ -423,6 +567,7 @@ impl<'p> Analyzer<'p> {
     /// One variable of the environment, by its name (and what the script
     /// stored in it).
     fn sc_env_var(&self, name: &[u32], at: u32) -> Taint {
+        self.p.note_env();
         let stored = self.sup().env_store.borrow().get(name).cloned();
         let v = self.sc_env_var_read(name, at);
         match stored {
@@ -465,8 +610,23 @@ impl<'p> Analyzer<'p> {
     /// The names a callee resolves to: its dotted text with an import alias
     /// at its head replaced (`requests.post`, `urllib.request.urlopen` for
     /// `from urllib.request import urlopen as u; u(…)`), then as written.
-    pub(super) fn sc_names(&mut self, func: NodeId) -> Vec<PyStr> {
-        self.sc_names_at(func, 0)
+    ///
+    /// The names a callee resolves to in a function are its text's, its function's and the module's, read once
+    /// (P-1): after the first reading, which also reads the aliases it meets (each read once: `alias_memo`), each
+    /// reading gives the same names and charges what sc_names_at charges with those aliases known, so a function's
+    /// later readings take them from `names_memo` and charge the same.
+    pub(super) fn sc_names(&mut self, func: NodeId) -> Rc<Vec<PyStr>> {
+        let k = (self.f, func);
+        let sup = self.sup();
+        if let Some((names, work)) = sup.names_memo.borrow().get(&k) {
+            self.p.work += *work;
+            return names.clone();
+        }
+        let before = sup.steady.replace(0);
+        let names = Rc::new(self.sc_names_at(func, 0));
+        let work = sup.steady.replace(before);
+        sup.names_memo.borrow_mut().insert(k, (names.clone(), work));
+        names
     }
 
     fn sc_names_at(&mut self, func: NodeId, depth: u32) -> Vec<PyStr> {
@@ -503,7 +663,12 @@ impl<'p> Analyzer<'p> {
         }
         let (d, links) = dotted_links(self.t(), func);
         let canon = self.p.canonical(self.m, &d);
+        let before = self.p.work;
         self.p.charge(links + (d.len() + canon.len()) as u64);
+        let sup = self.sup();
+        if sup.alias_active.get() == 0 {
+            sup.steady.set(sup.steady.get() + (self.p.work - before));
+        }
         let mut out = Vec::with_capacity(2);
         if !canon.is_empty() {
             out.push(normalize_name(&canon));
@@ -532,18 +697,38 @@ impl<'p> Analyzer<'p> {
         out
     }
 
+    /// Function `f`'s own nodes, its body's (walked once: P-1).
+    fn sc_own_nodes(&self, f: FnId) -> Rc<Vec<NodeId>> {
+        if let Some(nodes) = self.sup().own.borrow().get(&f) {
+            return nodes.clone();
+        }
+        let fnode = self.p.fns[f as usize].node;
+        let nodes = Rc::new(own_nodes(self.t(), body_of(self.t(), fnode)));
+        self.sup().own.borrow_mut().insert(f, nodes.clone());
+        nodes
+    }
+
     /// Function `f`'s index of its own assignments (built when first asked).
     fn sc_index(&mut self, f: FnId) -> Rc<FnIndex> {
         if let Some(ix) = self.sup().fn_index.borrow().get(&f) {
             return ix.clone();
         }
-        let fnode = self.p.fns[f as usize].node;
-        let body: Vec<u32> = body_of(self.t(), fnode).to_vec();
-        let nodes = own_nodes(self.t(), &body);
+        let nodes = self.sc_own_nodes(f);
+        let w0 = self.p.first_begin();
         self.p.charge(nodes.len() as u64);
+        self.p.first_end(w0);
         let mut ix = FnIndex::default();
         let t = self.t();
-        for x in nodes {
+        for &x in nodes.iter() {
+            if matches!(t.kind(x),Kind::For|Kind::AsyncFor) && t.kind(a_(t,x))==Kind::Name {
+                ix.delete_loops.insert(t.str(a_(t,a_(t,x))).to_vec(),(b_(t,x),t.node(x).start,t.node(x).end));
+            }
+            if matches!(t.kind(x),Kind::ListComp|Kind::SetComp|Kind::GeneratorExp|Kind::DictComp) {
+                let gens=t.list(if t.kind(x)==Kind::DictComp {c_(t,x)} else {b_(t,x)});
+                for &g in gens {if t.kind(a_(t,g))==Kind::Name {
+                    ix.delete_loops.insert(t.str(a_(t,a_(t,g))).to_vec(),(b_(t,g),t.node(x).start,t.node(x).end));
+                }}
+            }
             match t.kind(x) {
                 Kind::Assign => {
                     let targets = t.list(a_(t, x));
@@ -608,6 +793,9 @@ impl<'p> Analyzer<'p> {
             return hit.clone();
         }
         self.sup().alias_memo.borrow_mut().insert(memo_key.clone(), Vec::new());
+        let sup = self.sup();
+        sup.alias_active.set(sup.alias_active.get() + 1);
+        let w0 = self.p.first_begin();
         let mut values: Vec<NodeId> = Vec::new();
         let fns = {
             let mut v = vec![self.f];
@@ -634,6 +822,8 @@ impl<'p> Analyzer<'p> {
             }
         }
         self.sup().alias_memo.borrow_mut().insert(memo_key, out.clone());
+        self.p.first_end(w0);
+        sup.alias_active.set(sup.alias_active.get() - 1);
         out
     }
 
@@ -643,6 +833,15 @@ impl<'p> Analyzer<'p> {
             return None;
         }
         let text = self.p.name_text(name).to_vec();
+        // (the script read back: its docstring, or its file in a data file's path: `own_starts`)
+        if eq(&text, "__doc__") || eq(&text, "__file__") {
+            let at = self.start(e);
+            if !self.sc_own_in(at, at + 1) {
+                return None;
+            }
+            let what = if eq(&text, "__doc__") { "its docstring" } else { "a file shipped with it" };
+            return Some(self.sc_source(K_OWN, u(what), at, 0));
+        }
         if !eq(&text, "environ") && !eq(&text, "environb") {
             return None;
         }
@@ -652,6 +851,35 @@ impl<'p> Analyzer<'p> {
             return Some(self.sc_source(K_WHOLE_ENV, whole, self.start(e), OBJ_ENV));
         }
         None
+    }
+
+    /// supply mode: does a read of the script itself start in `[lo, hi)` (`own_starts`)?
+    fn sc_own_in(&self, lo: u32, hi: u32) -> bool {
+        let sup = self.sup();
+        let k = sup.own_starts.partition_point(|&s| s < lo);
+        k < sup.own_starts.len() && sup.own_starts[k] < hi
+    }
+
+    /// supply mode, a call's value (N-19): what the script reads back from itself when an own read starts in the
+    /// callee (`open(__file__)`, `Path(__file__).read_text()`, `__loader__.get_source(…)`, a data file's read: its
+    /// value and every call it is the callee's receiver of); none out of a parser of a usage text (its command line).
+    pub(super) fn sc_own_call(&mut self, call: NodeId, v: Taint) -> Taint {
+        let (func, lo) = {
+            let t = self.t();
+            (a_(t, call), t.node(call).start)
+        };
+        if self.sup().own_starts.is_empty() {
+            return v;
+        }
+        let hi = self.t().node(func).end;
+        if self.sc_own_in(lo, hi) {
+            return v.union(&self.sc_source(K_OWN, u("its own file"), lo, 0));
+        }
+        let names = self.sc_names(func);
+        if any_of(&names, USAGE_PARSERS) {
+            return taint_without(v, K_OWN);
+        }
+        v
     }
 
     /// supply mode: a variable of a function around this one (a closure's).
@@ -666,6 +894,7 @@ impl<'p> Analyzer<'p> {
             if hops > 16 {
                 break;
             }
+            self.p.note_closure(f);
             if let Some(v) = self.p.closure.get(&f).and_then(|vars| vars.get(&name)) {
                 return Some(v.clone());
             }
@@ -699,7 +928,7 @@ impl<'p> Analyzer<'p> {
         if sup.p().re("_LD_FS_ROOT_RE").match_(span).is_none() && sup.p().re("_LD_CRED_FILE_RE").match_(span).is_none() {
             return Taint::empty();
         }
-        self.sc_source(K_PATH, pystr::upto(&value, 60).to_vec(), lo, 0)
+        self.sc_source(K_PATH, shown_what(sup.p(), &value), lo, 0)
     }
 
     /// supply mode: an attribute: os.environ (the whole environment, the
@@ -723,7 +952,7 @@ impl<'p> Analyzer<'p> {
     /// environment by its name, else None.
     pub(super) fn sc_subscript(&mut self, e: NodeId, base: &Taint, k: &Taint) -> Option<Taint> {
         if base.marks & OBJ_ENV == 0 {
-            return None;
+            return self.sc_env_entry(e, base);
         }
         let slice = b_(self.t(), e);
         let at = self.start(e);
@@ -740,21 +969,134 @@ impl<'p> Analyzer<'p> {
         Some(Taint::empty())
     }
 
+    /// supply mode: an entry of a value that holds the environment and
+    /// nothing else, by a constant name (`self._environ[HOST_VAR]` where the
+    /// object was given `os.environ`, `proxies['http']` of a dict filled from
+    /// it): that one variable, as `os.environ[name]` reads it, not the whole
+    /// environment. kubernetes' in-cluster config and future's urllib
+    /// backport build a URL from such entries. None: not such a value or key.
+    fn sc_env_entry(&mut self, e: NodeId, base: &Taint) -> Option<Taint> {
+        let kinds = base.sc.as_ref()?.kinds;
+        if kinds & K_WHOLE_ENV == 0 || kinds & !(K_WHOLE_ENV | K_ENV | K_PATH | K_IDENTITY) != 0 {
+            return None;
+        }
+        let slice = b_(self.t(), e);
+        let names = self.sc_key_strs(slice)?;
+        if names.is_empty() {
+            return None;
+        }
+        let at = self.start(e);
+        let mut out = Taint::empty();
+        for name in names {
+            out = out.union(&self.sc_env_var(&name, at));
+        }
+        Some(out)
+    }
+
+    /// The constant strings a subscript's key may be: a literal, or a name
+    /// the function, or a function or module around it, gives constants.
+    fn sc_key_strs(&mut self, slice: NodeId) -> Option<Vec<PyStr>> {
+        if let Some(s) = self.sc_const_str(slice) {
+            return Some(vec![s]);
+        }
+        if self.t().kind(slice) != Kind::Name {
+            return None;
+        }
+        if let Some(found) = self.sc_const_strs(slice, 0) {
+            return Some(found);
+        }
+        // (a name the module gives a constant: `SERVICE_HOST_ENV_NAME = "…"`)
+        let name = self.t().str(a_(self.t(), slice)).to_vec();
+        let saved = self.f;
+        let mut scopes: Vec<FnId> = Vec::new();
+        let mut at = self.p.fns[saved as usize].parent;
+        while let Some(f) = at {
+            if scopes.len() > 8 {
+                break;
+            }
+            scopes.push(f);
+            at = self.p.fns[f as usize].parent;
+        }
+        let body = self.p.mods[self.p.fns[saved as usize].module as usize].body_fn;
+        if body != saved && !scopes.contains(&body) {
+            scopes.push(body);
+        }
+        let mut found = None;
+        for f in scopes {
+            self.f = f;
+            let ix = self.sc_index(f);
+            if ix.assigns.contains_key(&name) {
+                found = self.sc_const_strs_of(&name, 0);
+                break;
+            }
+        }
+        self.f = saved;
+        found
+    }
+
     /// supply mode: does a comprehension over the environment's variables
     /// select some of them (`{k: v for k, v in os.environ.items() if
     /// k.startswith('X_')}`): not the whole of it, unless the test excludes
-    /// some or names secrets (the text follower's _LD_ENV_SELECT_RE)?
-    pub(super) fn sc_selects_env(&self, it: &Taint, ifs: &[NodeId]) -> bool {
+    /// some or names secrets (the text follower's _LD_ENV_SELECT_RE)? What
+    /// the names a test reads are given in the function or around it counts
+    /// as its text, as the JavaScript model reads it (B-6: `PATTERNS =
+    /// ['TOKEN', 'SECRET']` then `if any(p in k for p in PATTERNS)`).
+    pub(super) fn sc_selects_env(&mut self, it: &Taint, ifs: &[NodeId]) -> bool {
         if ifs.is_empty() || !it.sc.as_ref().is_some_and(|s| s.kinds & K_WHOLE_ENV != 0) {
             return false;
         }
         let sup = self.sup();
         let p = sup.p();
-        ifs.iter().all(|&c| {
+        let names_secrets = |text: &[u32]| p.re("_SH_SECRET_VAR_RE").search(text).is_some();
+        let mut names: Vec<PyStr> = Vec::new();
+        for &c in ifs {
             let n = self.t().node(c);
             let cond = sup.span(n.start, n.end);
-            p.re("_LD_EXCLUDES_RE").search(cond).is_none() && p.re("_SH_SECRET_VAR_RE").search(cond).is_none()
-        })
+            if p.re("_LD_EXCLUDES_RE").search(cond).is_some() || names_secrets(cond) {
+                return false;
+            }
+            for k in own_nodes(self.t(), &[c]) {
+                if self.t().kind(k) == Kind::Name && names.len() < 8 {
+                    let name = self.t().str(a_(self.t(), k)).to_vec();
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        // (the values the names are given: in the function, or the nearest function or module around it that gives them)
+        let saved = self.f;
+        let mut scopes: Vec<FnId> = vec![saved];
+        let mut at = self.p.fns[saved as usize].parent;
+        while let Some(f) = at {
+            if scopes.len() > 8 {
+                break;
+            }
+            scopes.push(f);
+            at = self.p.fns[f as usize].parent;
+        }
+        let body = self.p.mods[self.p.fns[saved as usize].module as usize].body_fn;
+        if !scopes.contains(&body) {
+            scopes.push(body);
+        }
+        let mut secret = false;
+        'names: for name in &names {
+            for &f in &scopes {
+                let ix = self.sc_index(f);
+                if let Some(values) = ix.assigns.get(name) {
+                    for &v in values.iter().take(8) {
+                        let n = self.t().node(v);
+                        if names_secrets(sup.span(n.start, n.end.min(n.start + 4000))) {
+                            secret = true;
+                            break 'names;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        self.f = saved;
+        !secret
     }
 
     /// supply mode: a lambda: what its body sends or runs (its parameters
@@ -866,6 +1208,10 @@ impl<'p> Analyzer<'p> {
                         self.findings.push(Out::Received { at, cat: name });
                     }
                 }
+                // (code the script reads back from itself, run: N-19)
+                if cat == RUN_CODE && sc.kinds & K_OWN != 0 {
+                    self.findings.push(Out::Own { at });
+                }
                 // (code the script decodes, run)
                 if cat == RUN_CODE {
                     if let Some(from) = decoded_at(&sc) {
@@ -903,6 +1249,40 @@ impl<'p> Analyzer<'p> {
             && t.node(step).op == pt::USUB
             && t.kind(a_(t, step)) == Kind::Constant
             && eq(t.str(a_(t, a_(t, step))), "1")
+    }
+
+    /// supply mode: is `n` a sequence of items and no text: a list, tuple,
+    /// set or dict display or comprehension, a call of `list`, `tuple`,
+    /// `sorted` or `range`, or a name the function gives only those
+    /// (`ids = []` … `ids.append(x)`)? Its reversal (`ids[::-1]`) reorders
+    /// items and decodes nothing: sympy's `lambdify` and IPython's completer
+    /// reverse lists of namespaces and of names.
+    pub(super) fn sc_items_not_text(&mut self, n: NodeId, depth: u32) -> bool {
+        if depth > 3 || n == NONE {
+            return false;
+        }
+        let t = self.t();
+        match t.kind(n) {
+            Kind::List | Kind::Tuple | Kind::Set | Kind::Dict | Kind::ListComp | Kind::SetComp | Kind::DictComp
+            | Kind::GeneratorExp => true,
+            Kind::Call => {
+                let f = a_(t, n);
+                t.kind(f) == Kind::Name && is_one(t.str(a_(t, f)), &["list", "tuple", "sorted", "range"])
+            }
+            Kind::Name => {
+                let name = t.str(a_(t, n)).to_vec();
+                let ix = self.sc_index(self.f);
+                if ix.loops.contains_key(&name) {
+                    return false;
+                }
+                let values = match ix.assigns.get(&name) {
+                    Some(v) if !v.is_empty() && v.len() < 9 => v.clone(),
+                    _ => return false,
+                };
+                values.iter().all(|&v| self.sc_items_not_text(v, depth + 1))
+            }
+            _ => false,
+        }
     }
 
     /// The finding for local data `sc` at a send.
@@ -1018,7 +1398,9 @@ impl<'p> Analyzer<'p> {
                 if let Some(hit) = self.sup().const_memo.borrow().get(&memo_key) {
                     return hit.clone();
                 }
+                let w0 = self.p.first_begin();
                 let got = self.sc_const_strs_of(&name, depth);
+                self.p.first_end(w0);
                 self.sup().const_memo.borrow_mut().insert(memo_key, got.clone());
                 got
             }
@@ -1243,6 +1625,7 @@ impl<'p> Analyzer<'p> {
                         self.sc_path_keys_at(obj, depth + 1, keys);
                     }
                 }
+
             }
             Kind::JoinedStr => {
                 let values: Vec<NodeId> = {
@@ -1694,11 +2077,11 @@ impl<'p> Analyzer<'p> {
         if self.t().kind(arg) == Kind::Name {
             if let Some(v) = sup.outside_values.borrow().get(pystr::strip(&text)) {
                 if cred_store(p, v) {
-                    return pystr::upto(v, 60).to_vec();
+                    return shown_what(p, v);
                 }
             }
         }
-        pystr::upto(&what, 60).to_vec()
+        shown_what(p, &what)
     }
 
     /// A call that reads local data: its value, if it is one.
@@ -1801,6 +2184,10 @@ impl<'p> Analyzer<'p> {
                     return Some(self.sc_source(K_FILE, what, at, 0));
                 }
             }
+            // (a file shipped with it: what it holds is the script's own)
+            if recv.sc.as_ref().is_some_and(|s| s.kinds & K_OWN != 0) {
+                return Some(self.sc_source(K_OWN, u("a file shipped with it"), at, 0));
+            }
             if first.is_none() || !is_one(&lastname, &["open", "glob"]) {
                 return None;
             }
@@ -1823,13 +2210,17 @@ impl<'p> Analyzer<'p> {
             }
             if path_made {
                 // (a path given a path: still that path; anything else, not local data)
-                return Some(pos.first().filter(|v| v.sc.as_ref().is_some_and(|s| s.kinds & K_PATH != 0)).map(|v| v.plain()).unwrap_or_else(Taint::empty));
+                return Some(pos.first().filter(|v| v.sc.as_ref().is_some_and(|s| s.kinds & (K_PATH | K_OWN) != 0)).map(|v| v.plain()).unwrap_or_else(Taint::empty));
             }
             // (a path outside the package given it: a name, a parameter)
             if let Some(sc) = pos.first().and_then(|v| v.sc.clone()) {
                 if let Some((_, what, _)) = sc.firsts.iter().find(|(k, _, _)| (1u16 << k) == K_PATH) {
                     return Some(self.sc_source(K_FILE, pystr::upto(what, 60).to_vec(), at, 0));
                 }
+            }
+            // (a file shipped with it: what it holds is the script's own)
+            if pos.first().and_then(|v| v.sc.as_ref()).is_some_and(|s| s.kinds & K_OWN != 0) {
+                return Some(self.sc_source(K_OWN, u("a file shipped with it"), at, 0));
             }
             // (a parameter: the script's own reader, for its callers)
             if let Some(v) = pos.first() {
@@ -2067,6 +2458,7 @@ impl<'p> Analyzer<'p> {
         };
         for &(g, skip) in targets {
             let bound = super::eval::bind(&self.p.fns[g as usize], pos, starred, kws, dstar, skip);
+            self.p.note_fn(g);
             let pts = self.p.fns[g as usize].param_to_sink.clone();
             // (the index of a parameter among the call's positional arguments)
             let all_pos: Vec<NameId> = {
@@ -2104,6 +2496,10 @@ impl<'p> Analyzer<'p> {
                                         if let Some(name) = received_cat(c) {
                                             self.findings.push(Out::Received { at: loc.1, cat: name });
                                         }
+                                    }
+                                    // (code the script reads back from itself, run by the callee)
+                                    if c == RUN_CODE && sc.kinds & K_OWN != 0 {
+                                        self.findings.push(Out::Own { at: loc.1 });
                                     }
                                     // (code the script decodes, run by the callee)
                                     if c == RUN_CODE {
@@ -2179,6 +2575,7 @@ impl<'p> Analyzer<'p> {
                 }
             }
             // its value: what it returns
+            self.p.note_fn(g);
             let gf = &self.p.fns[g as usize];
             if let Some(rs) = &gf.ret_source {
                 out = out.union(&Taint { via: Some(g), ..rs.as_source() });
@@ -2214,6 +2611,206 @@ impl<'p> Analyzer<'p> {
     /// supply mode: a call (sources, sends, connections, clients, runners,
     /// the script's own functions). Its value.
     #[allow(clippy::too_many_arguments)]
+    fn sc_listing_safe(&mut self) -> bool {
+        if let Some(ok)=*self.sup().listing_guard.borrow() {return ok}
+        let t=self.t();let mut ok=true;
+        for n in 0..t.nodes.len() as NodeId {
+            if t.kind(n)==Kind::Attribute && t.node(n).op==pt::STORE && is_one(t.str(b_(t,n)), &["name","path","listdir","scandir","iterdir","join","home","expanduser"]) {ok=false;break}
+            if t.kind(n)==Kind::Call {
+                let f=a_(t,n);
+                if t.kind(f)==Kind::Name && is_one(t.str(a_(t,f)), &["setattr","exec","eval"]) {ok=false;break}
+                if t.kind(f)==Kind::Attribute && is_one(t.str(b_(t,f)), &["symlink","symlink_to"]) {ok=false;break}
+            }
+        }
+        *self.sup().listing_guard.borrow_mut()=Some(ok);ok
+    }
+
+    fn sc_listing_index(&mut self)->Rc<super::listing::Index> {
+        let sup=self.sup();
+        if let Some(ix)=sup.listing_index.borrow().as_ref() {return ix.clone()}
+        let ix=Rc::new(super::listing::Index::build(self.p,self.m));
+        let w0=self.p.first_begin();self.p.charge(self.t().nodes.len() as u64 * 4);self.p.first_end(w0);
+        *sup.listing_index.borrow_mut()=Some(ix.clone());ix
+    }
+
+    fn sc_delete_listed(&mut self,n:NodeId,depth:usize,work:&mut usize) -> Option<crate::model::deletion::Listed> {
+        use crate::model::deletion::{Listed,ListKind};
+        if n==NONE || depth>24 || *work==0 || !self.sc_listing_safe() {return None} *work-=1;
+        if !self.sc_listing_index().complete {return None}
+        match self.t().kind(n) {
+            Kind::Name => {
+                let bindings=self.sc_listing_index();let binding=bindings.at(self.t(),n)?;
+                let (f,name)=&binding;
+                if bindings.defs.get(&binding)?.writes!=1 {return None}
+                {
+                    let ix=self.sc_index(*f);
+                    let result=if let Some(&(v,lo,hi))=ix.delete_loops.get(name) {
+                        let at=self.t().node(n).start;
+                        let iter=self.t().node(v);
+                        if at<lo || at>=hi || (at>=iter.start && at<iter.end) {return None}
+                        self.sc_delete_listed(v,depth+1,work)?.item()?
+                    } else if let Some(v)=ix.assigns.get(name) {
+                        if v.len()!=1 {return None} self.sc_delete_listed(v[0],depth+1,work)?
+                    } else {return None};
+                    if result.kind!=ListKind::Name && (bindings.escaped.contains(&binding) || bindings.aliased.contains(&binding)) {return None}
+                    Some(result)
+                }
+            }
+            Kind::Subscript => self.sc_delete_listed(a_(self.t(),n),depth+1,work)?.item(),
+            Kind::Attribute => self.sc_delete_listed(a_(self.t(),n),depth+1,work)?.member(self.t().str(b_(self.t(),n))),
+            Kind::Call => {
+                let func=a_(self.t(),n);let args=self.t().list(b_(self.t(),n)).to_vec();
+                let native=self.sc_listing_index().native(self.t(),func,0);
+                if native.as_ref().is_some_and(|s|is_one(s,&["os.listdir","os.scandir"])) {
+                    if args.len()!=1 || !self.t().list(c_(self.t(),n)).is_empty() {return None}
+                    if !self.sc_listing_index().directory(self.t(),args[0],0,work) {return None}
+                    let dir=self.sc_delete_path_inner(args[0],0,work,false);
+                    if dir.s.is_none() {return None}
+                    return Some(Listed{dir,kind:if native.as_ref().is_some_and(|s|eq(s,"os.scandir")) {ListKind::Scans} else {ListKind::Names}})
+                }
+                if native.as_ref().is_some_and(|s|is_one(s,&["filter","builtins.filter"])) && args.len()==2 {
+                    let v=self.sc_delete_listed(args[1],depth+1,work)?;
+                    if !v.kind.collection() {return None}
+                    // Only an inert predicate: no function call that could mutate
+                    // the entry. Names remain immutable strings in other filters.
+                    if v.kind!=ListKind::Names {
+                        let pred=args[0];
+                        if self.t().kind(pred)!=Kind::Lambda {return None}
+                        let mut nodes=vec![pred];let mut count=0;
+                        while let Some(x)=nodes.pop() {count+=1;if count>128 {return None}
+                            if matches!(self.t().kind(x),Kind::Call|Kind::NamedExpr) {return None}
+                            self.t().each_child(x,|c|nodes.push(c));
+                        }
+                    }
+                    return Some(v)
+                }
+                if native.as_ref().is_some_and(|s|eq(s,"pathlib.Path().iterdir")) && args.is_empty() {
+                    let obj=a_(self.t(),func);
+                    if !self.sc_listing_index().directory(self.t(),obj,0,work) {return None}
+                    let dir=self.sc_delete_path_inner(obj,0,work,false);
+                    if dir.s.is_some() {return Some(Listed{dir,kind:ListKind::Paths})}
+                }
+                None
+            }
+            _=>None,
+        }
+    }
+
+    /// Resolve deletion paths on the tree, following bounded local bindings (never the host filesystem).
+    fn sc_delete_path(&mut self, n: NodeId, depth: usize) -> crate::model::val::Val {
+        self.sc_delete_path_inner(n, depth, &mut 256,true)
+    }
+    fn sc_delete_join_part(&mut self,dir:&crate::model::val::Val,n:NodeId,depth:usize,work:&mut usize,listings:bool) -> crate::model::val::Val {
+        use crate::model::{deletion, val::Val};
+        if let Some(v)=if listings { self.sc_delete_listed(n,0,&mut 256) } else {None} {
+            if v.kind==deletion::ListKind::Name && deletion::exempt_folder(&v.dir) && deletion::same_folder(dir,&v.dir) {return Val::text(u("<listed-entry>"))}
+        }
+        self.sc_delete_path_inner(n,depth,work,listings)
+    }
+    fn sc_delete_join_args(&mut self,api:crate::model::paths::Api,initial:Option<NodeId>,args:&[NodeId],depth:usize,work:&mut usize,listings:bool)->crate::model::val::Val {
+        use crate::model::{paths,deletion,val::Val};
+        let mut parts=Vec::new();let mut prefix=true;
+        for n in initial.into_iter().chain(args.iter().take(32).copied()) {
+            let listed=if listings && prefix {self.sc_delete_listed(n,0,&mut 256)} else {None};
+            let part=if let Some(v)=listed.filter(|v|v.kind==deletion::ListKind::Name && deletion::exempt_folder(&v.dir)) {
+                let dir=paths::apply(api,&parts);
+                if deletion::same_folder(&dir,&v.dir) {Val::text(u("<listed-entry>"))}
+                else {self.sc_delete_path_inner(n,depth+1,work,listings)}
+            } else {self.sc_delete_path_inner(n,depth+1,work,listings)};
+            if prefix {prefix=self.sc_listing_index().directory(self.t(),n,0,&mut 256)}
+            parts.push(part);
+        }
+        paths::apply(api,&parts)
+    }
+    fn sc_delete_path_inner(&mut self, n: NodeId, depth: usize, work: &mut usize, listings: bool) -> crate::model::val::Val {
+        use crate::model::{val::Val, paths::{self,Api,Flavor}, deletion};
+        if n == NONE || depth > 8 || *work == 0 { return Val::unknown() }
+        *work -= 1;
+        if let Some(s) = self.sc_const_str(n) { return Val::text(s) }
+        if let Some(v)=if listings { self.sc_delete_listed(n,0,&mut 256) } else {None} {
+            if v.kind==deletion::ListKind::FullPath {let part=if deletion::exempt_folder(&v.dir) {Val::text(u("<listed-entry>"))} else {Val::unknown()};return paths::apply(Api::PythonJoin(Flavor::Native),&[v.dir,part])}
+        }
+        match self.t().kind(n) {
+            Kind::Name => {
+                // Use the same scoped definition at the listing and at the join.
+                // Only this scoped reading can support directory provenance.
+                let ix=self.sc_listing_index();
+                if let Some(d)=ix.at(self.t(),n).and_then(|k|ix.defs.get(&k)) {
+                    if d.writes==1 {
+                        if let Some(v)=d.value {return self.sc_delete_path_inner(v,depth+1,work,listings)}
+                    }
+                }
+                // Failed must-resolve provenance only removes the exemption;
+                // keep the old may-resolve sink reading for an unknown binding.
+                let name=self.t().str(a_(self.t(),n)).to_vec();
+                let body=self.p.mods[self.m as usize].body_fn;
+                for f in [self.f,body] {
+                    let ix=self.sc_index(f);
+                    if let Some(&it)=ix.loops.get(&name) {return self.sc_delete_path_inner(it,depth+1,work,listings)}
+                    if let Some(v)=ix.assigns.get(&name) {
+                        if v.len()==1 {return self.sc_delete_path_inner(v[0],depth+1,work,listings)}
+                        return Val::unknown()
+                    }
+                }
+            }
+            Kind::JoinedStr => {
+                let nodes = self.t().list(a_(self.t(), n)).to_vec();
+                let mut v = Val::text(Vec::new());
+                for n in nodes.into_iter().take(32) {
+                    let n = if self.t().kind(n) == Kind::FormattedValue { a_(self.t(), n) } else { n };
+                    v = Val::concat(&v, &self.sc_delete_path_inner(n, depth + 1, work,listings));
+                }
+                return v;
+            }
+            Kind::BinOp => {
+                let (a,b,op)=(a_(self.t(),n),b_(self.t(),n),self.t().node(n).op);
+                if op==pt::ADD || op==pt::DIV {
+                    let a=self.sc_delete_path_inner(a,depth + 1, work,listings);
+                    let prefix=self.sc_listing_index().directory(self.t(),a_(self.t(),n),0,&mut 256);
+                    let b=if op==pt::DIV {self.sc_delete_join_part(&a,b,depth+1,work,listings && prefix)} else {self.sc_delete_path_inner(b,depth+1,work,listings)};
+                    return if op==pt::DIV {paths::apply(Api::PythonJoin(Flavor::Native),&[a,b])} else {Val::concat(&a,&b)};
+                }
+            }
+            Kind::Subscript => {
+                let obj=a_(self.t(),n); let key=b_(self.t(),n);
+                if self.node_text(obj).ends_with(&u("environ")) {
+                    if let Some(key)=self.sc_const_str(key) {if let Some(home)=deletion::profile_env(&key) {return Val::home(u(home))}}
+                }
+            }
+            Kind::Attribute => {
+                if eq(self.t().str(b_(self.t(),n)),"parent") {let v=self.sc_delete_path_inner(a_(self.t(),n),depth + 1, work,listings);return deletion::parent(&v)}
+            }
+            Kind::Call => {
+                let func=a_(self.t(),n); let args=self.t().list(b_(self.t(),n)).to_vec();
+                let names=self.sc_names(func);
+                if any_of(&names,&["pathlib.Path.home","Path.home"]) {return Val::home(u("~"))}
+                if any_of(&names,&["os.getenv","os.environ.get"]) {
+                    if let Some(key)=args.first().and_then(|&n|self.sc_const_str(n)) {if let Some(home)=deletion::profile_env(&key) {return Val::home(u(home))}}
+                }
+                if any_of(&names,&["os.path.join","posixpath.join","ntpath.join","pathlib.Path","Path"]) {
+                    let flavor=if any_of(&names,&["posixpath.join"]) {Flavor::Posix} else if any_of(&names,&["ntpath.join"]) {Flavor::Windows} else {Flavor::Native};
+                    return self.sc_delete_join_args(Api::PythonJoin(flavor),None,&args,depth,work,listings);
+                }
+                if any_of(&names,&["os.path.expanduser","os.path.abspath","os.path.normpath","str"]) {
+                    let mut v=args.first().map(|&a|self.sc_delete_path_inner(a,depth+1,work,listings)).unwrap_or_default();
+                    if any_of(&names,&["os.path.expanduser"]) && v.s.as_ref().is_some_and(|s|s.first()==Some(&('~' as u32))) {v.add_kinds(&Val::home(u("~")));}
+                    return v;
+                }
+                if any_of(&names,&["os.path.dirname"]) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work,listings)).unwrap_or_default();return deletion::parent(&v)}
+                if any_of(&names,&["glob.glob","glob.iglob"]) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work,listings)).unwrap_or_default();return deletion::glob_path(&v)}
+                if self.t().kind(func)==Kind::Attribute {
+                    let obj=a_(self.t(),func);let method=self.t().str(b_(self.t(),func)).to_vec();
+                    if is_one(&method,&["resolve","absolute","expanduser","as_posix"]) {return self.sc_delete_path_inner(obj,depth + 1, work,listings)}
+                    if eq(&method,"joinpath") {return self.sc_delete_join_args(Api::PythonJoin(Flavor::Native),Some(obj),&args,depth,work,listings);}
+                    if eq(&method,"rglob") && args.first().and_then(|&a|self.sc_const_str(a)).is_some_and(|s|eq(&s,".git")) {let root=self.sc_delete_path_inner(obj,depth + 1, work,listings);return deletion::repositories(&root)}
+                    if eq(&method,"glob") {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work,listings)).unwrap_or_default();return deletion::glob_path(&v)}
+                }
+            }
+            _ => {}
+        }
+        Val::unknown()
+    }
+
     pub(super) fn sc_call(
         &mut self,
         call: NodeId,
@@ -2239,6 +2836,16 @@ impl<'p> Analyzer<'p> {
             let t = self.t();
             t.list(b_(t, call)).to_vec()
         };
+        if self.emit {
+            let target = if any_of(&names, &["shutil.rmtree", "os.remove", "os.unlink", "pathlib.Path.unlink"]) {
+                arg_nodes.first().copied().or_else(|| self.sc_keyword(call,"path"))
+            } else if named("unlink") || named("rmdir") { Some(a_(self.t(),func)) } else { None };
+            if let Some(n)=target {
+                let path=self.sc_delete_path(n,0);
+                self.findings.push(Out::Delete {at,path:path.text_or_unknown()});
+                if let Some(w)=path.path_win {self.findings.push(Out::Delete {at,path:(*w).clone()});}
+            }
+        }
         // received code: code run, a module's name loaded, data deserialized
         if let Some(r) = self.sc_runs(call, &names) {
             let shell = any_of(&names, SHELLS) || any_of(&names, SPAWNS);
@@ -2545,6 +3152,8 @@ impl<'p> Analyzer<'p> {
         if store.get(&name) != Some(&new) {
             store.insert(name, new);
             self.sc_dirty = true;
+            drop(store);
+            self.p.mark_env();
         }
     }
 
@@ -2586,6 +3195,7 @@ impl<'p> Analyzer<'p> {
                 .map(|(k, v)| (*k as NameId, v.as_source()))
                 .collect();
             let vars = self.p.closure.entry(f).or_default();
+            let mut marked = false;
             for (name, t) in entries {
                 let new = match vars.get(&name) {
                     None => t,
@@ -2594,7 +3204,11 @@ impl<'p> Analyzer<'p> {
                 if vars.get(&name) != Some(&new) {
                     vars.insert(name, new);
                     changed = true;
+                    marked = true;
                 }
+            }
+            if marked {
+                self.p.mark_closure(f);
             }
         }
         // `nonlocal x`, and a container of the function around this one that
@@ -2620,6 +3234,7 @@ impl<'p> Analyzer<'p> {
             if vars.get(&n) != Some(&new) {
                 vars.insert(n, new);
                 changed = true;
+                self.p.mark_back(f);
             }
         }
         // `global x`: x is the module's; so is a container of the module's
@@ -2636,6 +3251,7 @@ impl<'p> Analyzer<'p> {
                 .iter()
                 .filter_map(|&n| self.env.get(&key(n)).filter(|v| v.source || v.marks != 0).map(|v| (n, v.as_source())))
                 .collect();
+            let mut marked: Vec<NameId> = Vec::new();
             let globals = &mut self.p.mods[m as usize].globals;
             for (name, t) in entries {
                 let new = match globals.get(&name) {
@@ -2645,7 +3261,11 @@ impl<'p> Analyzer<'p> {
                 if globals.get(&name) != Some(&new) {
                     globals.insert(name, new);
                     changed = true;
+                    marked.push(name);
                 }
+            }
+            for name in marked {
+                self.p.mark_global(m, name);
             }
         }
         changed
@@ -2658,9 +3278,7 @@ impl<'p> Analyzer<'p> {
         }
         let mut out: Vec<NameId> = Vec::new();
         if !self.p.fns[self.f as usize].pseudo {
-            let fnode = self.p.fns[self.f as usize].node;
-            let body: Vec<u32> = body_of(self.t(), fnode).to_vec();
-            for n in own_nodes(self.t(), &body) {
+            for &n in self.sc_own_nodes(self.f).iter() {
                 if self.t().kind(n) == Kind::Global {
                     let sids: Vec<u32> = {
                         let t = self.t();
@@ -2732,9 +3350,7 @@ impl<'p> Analyzer<'p> {
         }
         let mut out: Vec<NameId> = Vec::new();
         if !self.p.fns[self.f as usize].pseudo {
-            let fnode = self.p.fns[self.f as usize].node;
-            let body: Vec<u32> = body_of(self.t(), fnode).to_vec();
-            for n in own_nodes(self.t(), &body) {
+            for &n in self.sc_own_nodes(self.f).iter() {
                 if self.t().kind(n) == Kind::Nonlocal {
                     let sids: Vec<u32> = {
                         let t = self.t();
@@ -2810,6 +3426,7 @@ impl<'p> Analyzer<'p> {
         }
         self.env = saved;
         if let Some(c) = cls {
+            let mut marked = false;
             let cls = &mut self.p.classes[c as usize];
             for (k, v) in attrs {
                 let new = match cls.attr_taint.get(&k) {
@@ -2819,7 +3436,11 @@ impl<'p> Analyzer<'p> {
                 if cls.attr_taint.get(&k) != Some(&new) {
                     cls.attr_taint.insert(k, new);
                     self.sc_dirty = true;
+                    marked = true;
                 }
+            }
+            if marked {
+                self.p.mark_class(c);
             }
         }
         Ok(())
@@ -3006,6 +3627,7 @@ fn outside_names(tree: &Tree, sup: &Supply) -> (HashSet<PyStr>, HashMap<PyStr, P
 /// 1-based line and the category), if any.
 #[derive(Clone, Debug)]
 pub struct Facts {
+    pub deletions: Vec<(usize, PyStr)>,
     pub sent: Answer,
     pub received: Option<(usize, &'static str)>,
     /// code the script decodes, run: (the run's offset, the decoding's), in
@@ -3014,29 +3636,77 @@ pub struct Facts {
     /// the first file the script writes, then runs, holding code or a
     /// program it decodes, carves out of another file or downloads
     pub dropped: Option<DropRun>,
+    /// the first code it reads back from itself (its file, its docstring, a
+    /// data file shipped with it) and runs: the run's offset (N-19)
+    pub own: Option<usize>,
 }
 
-/// The largest text the tree reads (larger: the text followers).
+/// The largest text the tree reads for `dep_decode_flow`'s confirmation (scanfile.rs: larger, the text's candidates
+/// stand).
 pub const MAX_TEXT: usize = 2_000_000;
 
+/// The largest text the supply-chain tree reads (BIG-BUNDLE-TAIL, as JavaScript's `SUPPLY_MAX_FILE`): larger, or past
+/// the pass's budgets, the text followers answer.
+pub const SUPPLY_MAX_TEXT: usize = 16_000_000;
+
 thread_local! {
-    /// The last text read and what the tree said (None: it could not say).
-    static LAST: RefCell<Option<(Vec<u32>, Option<Rc<Facts>>)>> = const { RefCell::new(None) };
+    /// The last text read and what the tree said (Err: it could not say; why, in words, when the pass stopped at its
+    /// budget: unread_why).
+    static LAST: RefCell<Option<(std::sync::Arc<[u32]>, Result<Rc<Facts>, Option<PyStr>>)>> = const { RefCell::new(None) };
+}
+
+/// EVAL-LITERAL: the last text's reading, kept aside while the strings it hands an eval call are read as texts of their
+/// own (signs::eval_literal_reasons), and given back when the guard is dropped (as jsflow::supply::keep_last).
+pub(crate) struct KeepLast(Option<(std::sync::Arc<[u32]>, Result<Rc<Facts>, Option<PyStr>>)>);
+
+pub(crate) fn keep_last() -> KeepLast {
+    KeepLast(LAST.with(|l| l.borrow_mut().take()))
+}
+
+impl Drop for KeepLast {
+    fn drop(&mut self) {
+        let kept = self.0.take();
+        LAST.with(|l| *l.borrow_mut() = kept);
+    }
+}
+
+/// BIG-BUNDLE-TAIL (the review of Oct 20, HIGH 3): why the tree did not read a Python text it was given, in words,
+/// when the pass stopped at its budget (its note's words: a file past its budget, a reading past its steps, the
+/// iteration cap). None when the tree read it, when the text is past the scans' largest file (SC-TRUNCATED by its
+/// size), or when the parser refused it (as CPython does: its nesting bounds are CPython's).
+pub fn unread_why(text: &[u32]) -> Option<String> {
+    facts_or_why(text).err().flatten().map(|w| pystr::to_string(&w))
 }
 
 /// The tree's facts about a Python text, or None when it could not say (a
-/// text the parser doesn't read, over 2 MB, or past the pass's budgets):
-/// the text detectors answer then.
+/// text the parser doesn't read, over SUPPLY_MAX_TEXT, or past the pass's
+/// budgets): the text detectors answer then.
 pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
-    if text.len() > MAX_TEXT {
-        return None;
+    facts_or_why(text).ok()
+}
+
+/// facts(), or why there are none (Some: the pass's budget, in words).
+fn facts_or_why(text: &[u32]) -> Result<Rc<Facts>, Option<PyStr>> {
+    if text.len() > SUPPLY_MAX_TEXT {
+        return Err(None);
     }
-    if let Some(hit) = LAST.with(|l| l.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, f)| f.clone())) {
+    if let Some(hit) = LAST.with(|l| l.borrow().as_ref().filter(|(t, _)| &t[..] == text).map(|(_, f)| f.clone())) {
         return hit;
     }
-    let owned = text.to_vec();
-    let got = crate::api::on_own_stack(move || facts_here(&owned)).map(Rc::new);
-    LAST.with(|l| *l.borrow_mut() = Some((text.to_vec(), got.clone())));
+    // (one copy of the text, the reading's and the cache's, the last text's let go first: jsflow's facts_or_why)
+    LAST.with(|l| *l.borrow_mut() = None);
+    let owned: std::sync::Arc<[u32]> = std::sync::Arc::from(text);
+    let kept = owned.clone();
+    // (its tokens made here, where the call's gate keeps them for the decoded view's lexer; the copy's searches ask
+    // the call's gate: P-1)
+    let lexed = crate::pyparse::lexer::shared(text);
+    let gate = crate::textgate::share(text);
+    let got = crate::api::on_own_stack(move || {
+        let _gate = gate.and_then(|g| crate::textgate::adopt(&owned, g));
+        facts_here(&owned, Some(lexed))
+    })
+    .map(Rc::new);
+    LAST.with(|l| *l.borrow_mut() = Some((kept, got.clone())));
     got
 }
 
@@ -3060,32 +3730,44 @@ pub fn decoded_runs(text: &[u32]) -> Option<Vec<(usize, usize)>> {
     facts(text).map(|f| f.decoded.clone())
 }
 
+/// Code a Python text reads back from itself and runs, read on its tree: Some(the first run's offset, or None), or
+/// None when the tree could not say (N-19: in place of the text follower's `runs_own_source_at`).
+pub fn own_run(text: &[u32]) -> Option<Option<usize>> {
+    facts(text).map(|f| f.own)
+}
+
 /// A file a Python text writes, then runs (a dropper's), read on its tree:
 /// Some(the first, or None), or None when the tree could not say.
 pub fn dropped_run(text: &[u32]) -> Option<Option<DropRun>> {
     facts(text).map(|f| f.dropped.clone())
 }
 
-fn facts_here(text: &[u32]) -> Option<Facts> {
+fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::lexer::Lexed, crate::pyparse::lexer::LexError>>>) -> Result<Facts, Option<PyStr>> {
     let pack = crate::pack::current();
     let path = u("script.py");
-    let tree = crate::pyparse::parse(text).ok()?;
+    let tree = match lexed {
+        Some(l) => crate::pyparse::parse_shared(text, l),
+        None => crate::pyparse::parse(text),
+    }
+    .map_err(|_| None)?;
     let sup = Rc::new(Supply::new(pack, text));
     let (outside, values) = outside_names(&tree, &sup);
     *sup.outside.borrow_mut() = outside;
     *sup.outside_values.borrow_mut() = values;
-    drop(tree);
     let mut cfg = Config::new(&[], &[], &[], &[]);
     cfg.supply = Some(sup.clone());
-    let findings = super::driver::analyze(&[(path, Some(text.to_vec()))], cfg);
-    if findings.iter().any(|n| matches!(n, Out::Note { .. })) {
-        return None;
+    let findings = super::driver::analyze_with(&[(path, Some(text.to_vec()))], vec![Some(tree)], cfg);
+    if let Some(Out::Note { msg, .. }) = findings.iter().find(|n| matches!(n, Out::Note { .. })) {
+        // (the note's words, the module's name aside)
+        return Err(Some(pystr::replace(msg, &u(" in 'script.py'"), &[])));
     }
     // the strongest send: data over what only an address holds, a harvest
     // over other data, then the first; the first received code
     let mut best: Option<((bool, bool, u32), &'static str, PyStr)> = None;
     let mut first: Option<(u32, &'static str)> = None;
     let mut decoded: Vec<(usize, usize)> = Vec::new();
+    let mut own: Option<usize> = None;
+    let mut deletions = Vec::new();
     let dropped = first_drop(text, &findings);
     for f in findings {
         match f {
@@ -3100,7 +3782,9 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
                     first = Some((at, cat));
                 }
             }
+            Out::Delete { at, path } => deletions.push((at as usize, path)),
             Out::Decoded { at, from } => decoded.push((at as usize, from as usize)),
+            Out::Own { at } => own = Some(own.map_or(at as usize, |o: usize| o.min(at as usize))),
             _ => {}
         }
     }
@@ -3114,7 +3798,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Some(Facts { sent, received, decoded, dropped })
+    Ok(Facts { deletions, sent, received, decoded, dropped, own })
 }
 
 #[cfg(test)]
@@ -3125,7 +3809,7 @@ mod tests {
 
     fn read(src: &str) -> Facts {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        facts_here(&text).unwrap_or_else(|| panic!("not read: {}", src))
+        facts_here(&text, None).unwrap_or_else(|_| panic!("not read: {}", src))
     }
 
     fn sent(src: &str) -> Option<(&'static str, String, bool)> {
@@ -3166,6 +3850,26 @@ mod tests {
         assert_eq!(sent(&selected), None);
         let by_name = format!("{}opts = {{k: v for k, v in os.environ.items() if 'TOKEN' in k}}\n{}", head, post("opts"));
         assert_eq!(sent(&by_name), found("environment", "the whole environment"));
+        // B-6: the secret words in a list the test names, the module's or the function's (as JavaScript's model reads them)
+        let named = format!(
+            "{}PATTERNS = ['TOKEN', 'SECRET']\nopts = {{k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}}\n{}",
+            head,
+            post("opts")
+        );
+        assert_eq!(sent(&named), found("environment", "the whole environment"));
+        let local = format!(
+            "{}def go():\n    words = ('KEY', 'PASSWORD')\n    opts = [v for k, v in os.environ.items() if any(w in k for w in words)]\n    {}go()\n",
+            head,
+            post("opts")
+        );
+        assert_eq!(sent(&local), found("environment", "the whole environment"));
+        // a named list of prefixes selects (vite's `VITE_`)
+        let prefixes = format!(
+            "{}PREFIXES = ('VITE_', 'APP_')\nopts = {{k: v for k, v in os.environ.items() if k.startswith(PREFIXES)}}\n{}",
+            head,
+            post("opts")
+        );
+        assert_eq!(sent(&prefixes), None);
         assert_eq!(sent("import os, subprocess\nsubprocess.run(['curl', 'https://x.invalid'], env=dict(os.environ))\n"), None);
         // a local name environ is not the environment
         assert_eq!(sent(&format!("import requests\nenviron = {{}}\n{}", post("str(environ)"))), None);
@@ -3521,5 +4225,84 @@ mod tests {
         // not a write: tarfile's and a browser's open
         let src = "import tarfile, webbrowser, base64, subprocess\nt = tarfile.open('out.tar.gz')\nt.write(base64.b64decode(B))\nsubprocess.run(['tar'])\n";
         assert_eq!(dropped(src), None);
+    }
+
+    #[test]
+    fn what_popular_packages_do() {
+        // a list's reversal reorders its items and decodes nothing (sympy's
+        // lambdify, IPython's completer); a string's decodes
+        let items = "import sys\nparts = [sys.argv[1], sys.argv[2]]\nexec(''.join(parts[::-1]))\n";
+        assert_eq!(decoded(items), vec![]);
+        let made = "import sys\nnames = []\nfor a in sys.argv:\n    names.append(a)\nexec(''.join(names[::-1]))\n";
+        assert_eq!(decoded(made), vec![]);
+        let text = "import sys\ns = sys.argv[1]\nexec(s[::-1])\n";
+        assert_eq!(decoded(text), vec![(3, 3)]);
+        // an object given os.environ, read by a constant name, a module's
+        // or a literal: that variable, as os.environ[name] reads it
+        // (kubernetes' in-cluster config, future's urllib backport)
+        let config = "import os\nSERVICE_HOST_ENV_NAME = \"KUBERNETES_SERVICE_HOST\"\nSERVICE_PORT_ENV_NAME = \"KUBERNETES_SERVICE_PORT\"\n\
+                      def _join_host_port(host, port):\n    template = \"%s:%s\"\n    return template % (host, port)\n\
+                      class Loader(object):\n    def __init__(self, token_filename, environ=os.environ):\n        self._environ = environ\n\
+                      \x20   def _load_config(self):\n        self.host = (\"https://\" + _join_host_port(self._environ[SERVICE_HOST_ENV_NAME], self._environ[SERVICE_PORT_ENV_NAME]))\n";
+        assert_eq!(sent(config), None);
+        assert_eq!(sent("import os\ndef load(environ=os.environ):\n    host = \"https://\" + environ[\"KUBERNETES_SERVICE_HOST\"]\n    return host\n"), None);
+        let named = format!("import os, requests\nH = \"NPM_TOKEN\"\ndef load(environ=os.environ):\n    {}load()\n", post("environ[H]"));
+        assert_eq!(sent(&named), found("environment", "NPM_TOKEN"));
+        let whole = format!("import os, requests\ndef load(environ=os.environ):\n    {}load()\n", post("str(environ)"));
+        assert_eq!(sent(&whole), found("environment", "the whole environment"));
+    }
+
+    /// The line of a text's first run of code it reads back from itself (N-19), if any.
+    fn own(src: &str) -> Option<usize> {
+        read(src).own.map(|at| src.chars().take(at).filter(|&c| c == '\n').count() + 1)
+    }
+
+    #[test]
+    fn own_code_run() {
+        // its own file, its docstring, its loader's source; a data file shipped with it, read or named
+        assert_eq!(own("exec(open(__file__).read().split('#PAYLOAD')[1])\n"), Some(1));
+        assert_eq!(own("'''cHJpbnQoMSk='''\nimport base64\nexec(base64.b64decode(__doc__))\n"), Some(3));
+        assert_eq!(own("'''eJw='''\nimport base64, zlib\ncode = zlib.decompress(base64.b64decode(__doc__))\nexec(code)\n"), Some(4));
+        assert_eq!(own("from pathlib import Path\nexec(Path(__file__).read_text().split('#')[-1])\n"), Some(2));
+        assert_eq!(own("exec(__loader__.get_source(__name__).split('##')[1])\n"), Some(1));
+        assert_eq!(own("import os\nexec(open(os.path.join(os.path.dirname(__file__), 'logo.png'), 'rb').read()[1024:])\n"), Some(2));
+        let named = "import os\np = os.path.join(os.path.dirname(__file__), 'data.bin')\nwith open(p) as f:\n    exec(f.read())\n";
+        assert_eq!(own(named), Some(4));
+        let parent = "from pathlib import Path\nd = Path(__file__).parent / 'blob.dat'\nexec(d.read_bytes()[64:])\n";
+        assert_eq!(own(parent), Some(3));
+        // through a function, a shell, an interpreter's -c
+        assert_eq!(own("def run(src):\n    exec(src)\n\nrun(open(__file__).read()[100:])\n"), Some(2));
+        assert_eq!(own("import os\nos.system(open(os.path.join(os.path.dirname(__file__), 'cmd.txt')).read())\n"), Some(2));
+        assert_eq!(own("import subprocess, sys\nsubprocess.run([sys.executable, '-c', open(__file__).read()[500:]])\n"), Some(2));
+    }
+
+    #[test]
+    fn own_not_code_run() {
+        // rumdl 0.2.78's maintainer script (N-19): a usage text from the docstring, and gh run with arguments
+        let rumdl = concat!(
+            "\"\"\"Update the used-by table.\n\nRe-verify every repo the table already lists.\n\"\"\"\n",
+            "import argparse, subprocess\n\n",
+            "def run_gh(args, timeout=60):\n",
+            "    result = subprocess.run([\"gh\", *args], capture_output=True, text=True, timeout=timeout, check=False)\n",
+            "    return result.returncode, result.stdout, result.stderr\n\n",
+            "def main():\n",
+            "    parser = argparse.ArgumentParser(description=__doc__.split(\"\\n\")[1])\n",
+            "    parser.add_argument(\"--repo\")\n",
+            "    args = parser.parse_args()\n",
+            "    run_gh([\"api\", f\"repos/{args.repo}\"])\n\n",
+            "if __name__ == \"__main__\":\n    main()\n",
+        );
+        assert_eq!(own(rumdl), None);
+        // a command line parsed from the usage text, given to a shell
+        assert_eq!(own("'''Usage: tool <cmd>'''\nfrom docopt import docopt\nimport os\nargs = docopt(__doc__)\nos.system('git ' + args['<cmd>'])\n"), None);
+        let build = "'''Build.'''\nimport argparse, os\nparser = argparse.ArgumentParser(description=__doc__)\nparser.add_argument('target')\nargs = parser.parse_args()\nos.system('make ' + args.target)\n";
+        assert_eq!(own(build), None);
+        // its docstring printed; its version file run (a module, not a data file)
+        assert_eq!(own("'''Tool.'''\nimport sys\nprint(__doc__)\nsys.exit(__doc__)\n"), None);
+        assert_eq!(own("import os\nexec(open(os.path.join(os.path.dirname(__file__), 'version.py')).read())\n"), None);
+        // a function's parameter is not the module's variable of that name
+        assert_eq!(own("src = open(__file__).read()\nprint(len(src))\n\ndef f(src):\n    exec(src)\n\nf('print(1)')\n"), None);
+        // a program run with it as input or arguments runs that program
+        assert_eq!(own("import subprocess\nsubprocess.run(['wc', '-l'], input=open(__file__).read(), text=True)\n"), None);
     }
 }

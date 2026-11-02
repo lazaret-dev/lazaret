@@ -13,7 +13,8 @@ private-key headers with and without key material, JWTs, hex and name
 escapes, look-alike and invisible characters, char codes, base64 blobs,
 off-screen code, high-entropy literals, obfuscator names, self-publishing,
 decode flows, comments and literals of each language, and the Unicode the
-match text normalizes. Not a test: a plain module of shared data.
+match text normalizes; go_rs_corpus(), the same for Go and Rust files. Not
+a test: a plain module of shared data.
 
 Credentials here are fakes built by concatenation (a whole literal would
 trip secret scanners, GitHub's push protection among them).
@@ -35,7 +36,12 @@ PEM_END = "-----END RSA " + "PRIVATE KEY-----"
 PEM_BODY = "MIIEow" + "IBAAKCAQEAx3k9Qm2Zp7Lw4Yb8Nc1Rt5Vs6Ug0Hj2Kd3Fe4" + "Ab" * 8
 ENTROPY = ["Zx8Qw3Er5Ty7Ui9Op1As2Df", "q9W2e8R3t7Y4u6I5o0P1a2S3d4F5g6H7", "Ab3+De5/Gh7=Jk9Lm1No3Pq5",
            "4f8a1c9e2b7d3a6f0c5e8b2d9a7f1c3e", "hunter2hunter2"]
-B64 = "QUJD" * 55
+# base64 data: 220 characters of a run that is no single class and no short period, which SC-B64 reports (G-5
+# passes over "QUJD" * 55, a period of four letters, which this was)
+B64 = __import__("base64").b64encode(bytes((i * 7919) % 256 for i in range(165))).decode()
+# runs of base64 characters that are not base64 data (G-5): hex, hex after 0x, a name table, digits, a short period
+PLAIN = ["fd0c71ecb7ed16a9" * 14, "0x" + "E0A67598CD1B763B" * 13, "SundayMondayTuesdayWednesdayThursdayFriday" * 5,
+         "1336927655" * 22, "01234567890ABCDEFGHIJK" * 10]
 LONG_PAD = "x" * 150
 
 
@@ -98,6 +104,8 @@ CURATED = [
                     "String.fromCharCode(...bytes);\n"),
     ("b64.js", f"const blob = \"{B64}\";\n//# sourceMappingURL=data:application/json;base64,\"{B64}\"\n"),
     ("b64.py", f"BLOB = '{B64}'\n"),
+    ("b64_plain.js", "".join(f"const p{i} = \"{run}\";\n" for i, run in enumerate(PLAIN))
+                     + f"const both = [\"{PLAIN[2]}\", \"{B64}\"];\n"),
     ("offscreen.js", "module.exports = 1;" + " " * 200 + "require('child_process').exec(atob(p));\n"
                      "const s = 'x" + " " * 200 + "y';\n"),
     ("offscreen.py", "import os" + " " * 180 + ";os.system('id')\nx = 1" + "\t" * 170 + "; print(x)\n"),
@@ -186,6 +194,81 @@ def corpus(seed=20260930, scale=1):
         text = "".join("".join(rnd.choice(pieces) for _ in range(rnd.randint(0, 10))) + rnd.choice(["\n", "\n", "\r\n", "\r"])
                        for _ in range(lines))
         cases.append((_path(rnd), text))
+    return cases
+
+
+# Go and Rust (S-4: a project's .go and .rs files): the rules that list the
+# two languages (S-SECRET, S-TOKEN, S-BIDI, Q-TODO), the families every text
+# gets, and what each language's lexer makes a comment or a literal
+RLO = "\u202e"
+GO_RS_CURATED = [
+    ("secrets.go", f"package main\n\nimport \"os\"\n\nvar password = \"hunter22hunter\"\n"
+                   f"const apiKey = \"{ENTROPY[0]}\"\npw := os.Getenv(\"PASSWORD\")\n"
+                   "// password = \"in a comment\"\nsecret := \"colon-equals\"\n"
+                   "cfg := Config{Password: \"hunter22hunter\", APIKey: \"example\"}\n"),
+    ("secrets.rs", "let password = \"hunter22hunter\";\npub const API_KEY: &str = \"typed-constant\";\n"
+                   "/* outer /* nested */ let password = \"in a comment\"; */\n"
+                   "let pw = std::env::var(\"PASSWORD\");\n/// password = \"in a doc comment\"\n"
+                   f"let secret = \"{ENTROPY[1]}\";\n"),
+    ("tokens.go", f"var aws = \"{AWS}\"\n// {GHP}\nvar k = `{PEM_BEGIN}\n{PEM_BODY}\n{PEM_END}`\n"
+                  f"var header = \"{PEM_BEGIN}\"\nvar jwt = \"{JWT}\"\nr := '\"'; s := \"{SLACK}\"\n"),
+    ("tokens.rs", f"let raw = r#\"{AWS}\"#;\nlet b = b\"{GHP}\";\n// {STRIPE}\n"
+                  f"const K: &str = \"{PEM_BEGIN}\n{PEM_BODY}\n{PEM_END}\";\n"
+                  f"fn f<'a>(x: &'a str) -> &'a str {{ x }} // {GOOGLE}\nlet c = 'x'; let t = \"{JWT}\";\n"
+                  f"let r = r##\"a \"# {AWS}\"##;\n/* outer /* {GHP} */ still */\n"),
+    ("bidi.go", f"s := \"user{RLO}nimda\"\nt := \"\\u202e\"\n// {RLO} in a comment\n"),
+    ("bidi.rs", f"let s = \"user{RLO}nimda\";\nlet t = \"\\u{{202e}}\";\n/* {RLO} */\n"),
+    ("hidden.go", "p := \"\ufe00\ufe01\ufe02\ufe03\"\nexec.Command(decode(p)).Run()\n"),
+    ("hidden.rs", "let s = \"\U000e0041\U000e0042\U000e0043\";\nlet ok = \"\u2764\ufe0f\";\n"),
+    ("hex.go", f"var a = \"{_hex('eval(atob(payload))')}\"\nvar b = \"{_hex('hello world, all readable')}\"\n"),
+    ("hex.rs", f"let a = \"{_hex('hello world, all readable')}\";\nlet n = \"\\x65\\x76al\";\n"),
+    ("b64.go", f"var blob = \"{B64}\"\nvar raw = `{B64}`\n"),
+    ("b64.rs", f"const BLOB: &str = \"{B64}\";\nlet raw = r\"{B64}\";\n"),
+    ("b64_plain.go", "".join(f"var p{i} = \"{run}\"\n" for i, run in enumerate(PLAIN))
+                     + f"var both = []string{{\"{PLAIN[0]}\", \"{B64}\"}}\n"),
+    ("markers.go", f"var a = \"{AWS}\" // lazaret-ignore: S-TOKEN\n// nosec\nvar b = \"{GHP}\"\n"
+                   f"var c = \"// nosec\"; var d = \"{AWS}\"\n/* lazaret-ignore */ var e = \"{AWS}\"\n"),
+    ("markers.rs", f"let a = \"{AWS}\"; // lazaret-ignore: S-TOKEN\n/// nosec\nlet b = \"{GHP}\";\n"
+                   f"let c = \"// nosec\"; let d = \"{AWS}\";\n"),
+    ("todo.go", "// TODO: rotate\nvar s = \"FIXME in a string\"\n/* XXX\n   HACK */\n"),
+    ("todo.rs", "//! FIXME: docs\nlet s = \"TODO\";\n/*\n * HACK\n */\n"),
+    ("long.go", "var table = []int{" + ", ".join(str(i) for i in range(120)) + f"}} // {AWS}\n"),
+    ("long.rs", "const T: [u8; 120] = [" + ", ".join(str(i % 250) for i in range(120)) + "];\n"),
+    ("crlf.go", f"var a = \"{AWS}\"\r\n/* a\r\n comment */\r\nvar password = \"hunter22hunter\"\r\n"),
+    ("cr.rs", f"let t = \"{JWT}\";\r// {GHP}\rlet password = \"hunter22hunter\";\r"),
+    ("shebang.rs", f"#!/usr/bin/env rust-script\n#![allow(unused)]\nfn main() {{ let k = \"{AWS}\"; }}\n"),
+    ("quotes.go", f"s := \"*/\"; /* \"{AWS}\" */\nr := '`'; t := `\"{GHP}\"`\n"),
+    ("unclosed.go", f"var a = \"{AWS}\nvar b = `{GHP}\n"),
+    ("unclosed.rs", f"let a = \"{AWS}\n/* {GHP}\n"),
+    # N-20: in dependency mode (scan_file) a Rust file's test items are left out; a project's own are read
+    ("test_items.rs", f"pub const K: &str = \"{B64}\";\n#[cfg(test)]\nmod tests {{\n    const V: &str = \"{B64}\";\n"
+                      f"    #[test]\n    fn t() {{ let k = \"{AWS}\"; }}\n}}\n"),
+]
+# pieces of Go and Rust, for their random stream
+GO_RS_CODE = ["func ", "fn ", "let ", "let mut ", "var ", "const ", "pub ", "impl ", "struct ", "type ", " := ", " = ",
+              "{", "}", "(", ")", ";", ", ", "&'a ", "'a", "'x'", "b'x'", "'\\''", "'\\n'", "r#\"", "\"#", "r##\"",
+              "\"##", "`", "r\"", "b\"", "c\"", "#[derive(Debug)]", "#![allow(x)]", "go func() {", "defer ",
+              "os.Getenv(", "std::env::var(", "unsafe {", "println!(", "fmt.Println(", "exec.Command(", "x", "y", " "]
+GO_RS_STRUCTURE = ["\n", "\n", "\n", "\r\n", "\r", "// ", "/* ", " */", "/// ", "//! ", "/** ", "\"", "\\\"",
+                   "\\\\", "\\x65", "\\u{202e}", "\\u202e", "#!"]
+GO_RS_PATHS = [("x.go", 1), ("x.rs", 1)]
+
+
+def go_rs_corpus(seed=20261004, scale=1):
+    """(path, text) cases for Go and Rust: GO_RS_CURATED (each in the other
+    language too), then random files of their pieces and the families'."""
+    rnd = random.Random(seed)
+    cases = []
+    for name, text in GO_RS_CURATED:
+        cases.append((name, text))
+        cases.append(("again.rs" if name.endswith(".go") else "again.go", text))
+    for _ in range(1500 * scale):
+        pieces = rnd.choice([GO_RS_CODE + SECRET + GO_RS_STRUCTURE, GO_RS_CODE + TEXT + UNI + GO_RS_STRUCTURE,
+                             BLOB + GO_RS_CODE + GO_RS_STRUCTURE, GO_RS_CODE + SECRET + UNI + BLOB + GO_RS_STRUCTURE])
+        lines = rnd.randint(1, 12)
+        text = "".join("".join(rnd.choice(pieces) for _ in range(rnd.randint(0, 10))) + rnd.choice(["\n", "\n", "\r\n", "\r"])
+                       for _ in range(lines))
+        cases.append((rnd.choice([p for p, w in GO_RS_PATHS for _ in range(w)]), text))
     return cases
 
 

@@ -167,6 +167,9 @@ pub struct FirstChars {
 
 impl FirstChars {
     /// A scan worth running: one whose characters are rare in source text.
+    /// Each place it stops at costs a try (the anchored DFA's or the
+    /// backtracker's), some dozens of the DFA's steps: past one character
+    /// in twenty-five the DFA's own pass over the text is cheaper.
     pub fn new(set: &CharSet) -> Option<FirstChars> {
         let mask = set.ascii_mask();
         let mut ascii = [false; 128];
@@ -177,7 +180,7 @@ impl FirstChars {
                 density += freq(c as u32);
             }
         }
-        if density > 120 {
+        if density > 40 {
             return None;
         }
         let other = set.intersect(&CharSet::range(128, u32::MAX));

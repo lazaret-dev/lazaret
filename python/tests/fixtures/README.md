@@ -7,7 +7,12 @@ to detect, but it must not do anything harmful:
 
 - Network references point at reserved, non-routable addresses (`192.0.2.0/24`,
   or a `.invalid` host) and never at real services.
-- Credentials are dummies.
+- Credentials are dummies, and no line holds a provider's format whole (an AWS
+  key id, a Slack, GitHub, Stripe, npm, OpenAI, Anthropic or Google key): a
+  test or a fixture that needs one writes it in pieces, or with one character
+  escaped (`\x41` for an `A`), so the value is the same and secret scanners,
+  GitHub's push protection among them, do not read it as a key.
+  `tests/architecture/test_fixture_credentials.py` checks the whole repository.
 - Nothing here is ever installed or executed. Tests read these files; they never
   `pip install`, `npm install`, or run them.
 

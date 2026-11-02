@@ -4,11 +4,8 @@ literals of every kind, comments, regex literals and divisions, escapes and
 look-alike names, scanned by core and by the npm engine (its native engine,
 as WebAssembly, and its comment layout, the engine's lexers'), whose
 SC-HOMOGLYPH findings must agree (the lexers' literal spans and names_code /
-namesCode). The dashboard keeps its own comment lexer until it runs the
-engine (it reads a template's `${…}` and an f-string's fields as text, and
-some of this corpus's regex literals and divisions otherwise), so it is
-held to the CLI on the fixtures and the curated inputs of
-tests/scanner/test_review_dashboard_parity.py instead. The name corpus here
+namesCode). The dashboard runs the npm package's scan on the engine since
+BR-7 step 5 (until then it kept its own comment lexer). The name corpus here
 (curated lines and a seeded random corpus of names built from ASCII letters,
 every look-alike letter of the table, letters that are not look-alikes
 (Cyrillic, Greek alpha / nu / rho), NFKC compatibility forms (fullwidth,
@@ -122,7 +119,7 @@ NPM_FILES = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const { scanFile } = await import(pathToFileURL(process.argv[1]).href);
-const files = JSON.parse(readFileSync(0, "utf8"));
+const files = JSON.parse(readFileSync(0).toString("utf8"));
 process.stdout.write(JSON.stringify(files.map(([path, lang, content]) => scanFile({ path, content, lang })
   .filter((i) => i.rule === "SC-HOMOGLYPH").map((i) => [i.sev, i.line, i.msg]))));
 """
@@ -147,6 +144,37 @@ class WholeFileParityTests(unittest.TestCase):
         self.assertGreater(sum(1 for w in want if w), 150)
         self.assertGreater(sum(1 for w in want if not w), 100)
 
+
+# FP-HOMOGLYPH-ORDINAL, the review of Oct 27 (H1): valid JavaScript comparisons a JSX reading took for an element,
+# with their controls, in every extension the review read; written with escapes (\u00aa ª, \u00ba º)
+ORDINAL_FILES = {
+    "of": ('const of=1,b=2;\nof <b> ev\u00aal("1");\n', [["CRITICAL", 2]]),
+    "property": ('const obj={return:1},b=2;\nobj.return <b> ev\u00aal("1");\n', [["CRITICAL", 2]]),
+    "control": ('const a=1,b=2;\na <b> ev\u00aal("1");\n', [["CRITICAL", 2]]),
+    "label": ("export const L = () => <p>N\u00ba 1, 1\u00ba lugar, 2\u00aa vez</p>;\n", []),
+    "of-ordinal": ("const of=1,b=2;\nof <b> N\u00ba;\n", [["MAJOR", 2]]),
+    "label-then-of": ("export const L = () => <p>N\u00ba 1</p>;\nconst of=1,b=2;\nof <b> N\u00ba;\n", [["MAJOR", 3]]),
+    "evil-in-text": ("export const G = () => <p>ev\u00aal</p>;\n", [["CRITICAL", 1]]),
+}
+
+
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
+class OrdinalReviewParityTests(unittest.TestCase):
+    maxDiff = None
+
+    def test_core_and_the_npm_engine_agree_on_the_reviews_shapes(self):
+        files = [(f"{name}/x.{ext}", "js", text) for name, (text, _want) in ORDINAL_FILES.items()
+                 for ext in ("js", "mjs", "cjs", "jsx", "tsx")]
+        want = [[[i["sev"], i["line"]] for i in core.scan_file(path, content, lang) if i["rule"] == "SC-HOMOGLYPH"]
+                for path, lang, content in files]
+        p = subprocess.run([NPM_READY, "--input-type=module", "-e", NPM_FILES,
+                            os.path.join(_support.REPO_ROOT, "js", "src", "index.js")],
+                           input=json.dumps(files), capture_output=True, encoding="utf-8", timeout=60)
+        if p.returncode:
+            raise AssertionError(p.stderr[-2000:])
+        npm = [[x[:2] for x in found] for found in json.loads(p.stdout)]
+        self.assertEqual(npm, want)
+        self.assertEqual(want, [ORDINAL_FILES[path.split("/")[0]][1] for path, _lang, _text in files])
 
 if __name__ == "__main__":
     unittest.main()

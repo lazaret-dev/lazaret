@@ -214,7 +214,8 @@ class M17Encoding(unittest.TestCase):
         self.assertTrue(enc, "no Q-ENCODING finding for a UTF-16 source")
 
     def test_detect_encoding_bom(self):
-        de = lazaret.detect_encoding
+        def de(head):       # the sniff, as decode_source reports it (the engine's detect_encoding: decode/)
+            return lazaret.decode_source(head)[1]
         # FIX-SPEC 4: an explicit byte order (the generic "utf-16" codec's
         # BOM-less decoder raised UnicodeError and killed the scan)
         self.assertEqual(de(b"\xff\xfep\x00")["encoding"], "utf-16-le")

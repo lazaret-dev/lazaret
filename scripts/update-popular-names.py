@@ -3,7 +3,7 @@
 registry's look-alike check (SC-TYPOSQUAT, registry/lookalike.py) compares a
 release's name and dependencies with.
 
-Two sources, each read from a local copy (nothing is downloaded here):
+Each list is read from a local copy (nothing is downloaded here):
 
   npm   npm-high-impact (MIT, Titus Wormer), https://github.com/wooorm/npm-high-impact
         — the package's lib/ directory: top-download.js (by downloads) and
@@ -12,18 +12,70 @@ Two sources, each read from a local copy (nothing is downloaded here):
   PyPI  Top PyPI Packages (CC BY 4.0, Hugo van Kemenade),
         https://github.com/hugovk/top-pypi-packages — top-pypi-packages.min.json
         (30 days of downloads; its fields last_update and rows[].project).
+  Go    No registry publishes downloads (proxy.golang.org, pkg.go.dev and
+        deps.dev give no list), so the well-known modules are two curated
+        lists: awesome-go (MIT, Thiago Avelino),
+        https://github.com/avelino/awesome-go — its README.md, of which the
+        first link of each entry is read, outside its Resources and Editor
+        Plugins (a GitHub, GitLab, Bitbucket, Codeberg, Gitee or sr.ht
+        repository, or a pkg.go.dev path); and the Go modules Debian
+        packages, from the Go-Import-Path field of Ubuntu 24.04's source
+        package indices (UBUNTU_SOURCES), which carry Debian's Go packages:
+        module paths only.
+  crates  crates.io's API, /api/v1/crates?sort=recent-downloads (the last
+        90 days' downloads; the targets) and ?sort=downloads (all of them;
+        known names only): the pages scripts/fetch-top-crates.py saves
+        (the API is the only ranked list crates.io publishes; its crawler
+        policy's one request a second is kept there). Crate names only.
+        Given Ubuntu's source package indices too, the crates Debian
+        packages (its rust-* source packages) are known names as well:
+        real crates, vetted by Debian, that the check must not flag.
+  vscode  VS Code extensions' identifiers (publisher.name): the Visual
+        Studio Marketplace's gallery query sorted by installs and Open VSX's
+        search sorted by downloads, the pages scripts/fetch-top-extensions.py
+        saves (marketplace-0001.json, …, openvsx-0001.json, …). Identifiers
+        only, lower-cased.
 
-For each registry the file keeps the TARGETS, the first 5,000 names by
+For npm, PyPI and crates the file keeps the TARGETS, the first 5,000 names by
 downloads, and the KNOWN names: those of the whole list (17,000-odd for npm,
 15,000 for PyPI) that are one change from a target — real packages the
 check must not flag. A name of the list that is no target's look-alike can
-never be flagged, so it need not be kept. PyPI names are PEP 503-normalized.
+never be flagged, so it need not be kept. PyPI names are PEP 503-normalized,
+crate names lower-cased with "_" as "-" (one crate to crates.io): the 20,000
+by recent downloads and the 20,000 by all downloads (all the API pages
+through) read, and Debian's.
+For Go every module of the two lists is a target, as lookalike.go_path()
+writes it (lower-cased, without a major version), sorted. For VS Code the
+targets are the first VSCODE_TARGETS of each registry, taken in turn (the
+Marketplace's first, then Open VSX's, then the second of each, …); known
+names are the other identifiers of the pages one change from a target, and
+known publishers the other publishers of the pages that look like a
+target's publisher (lookalike.publisher_lookalike), never flagged.
 
-Usage: python3 scripts/update-popular-names.py NPM_LIB_DIR TOP_PYPI_JSON [--check]
---check compares with the file in the tree instead of writing it (exit 1 on
-any difference). Standard library only.
+  GitHub  the repositories new GitHub repositories are compared with (GH-NEW-REPOS, lookalike.github_tables):
+        where the npm and PyPI targets keep their code (npm's `repository` field; PyPI's project URLs and home
+        page) and, when fetched with a token, GitHub's most-starred repositories, with their descriptions (the copy
+        test's): the files scripts/fetch-github-targets.py writes (npm.jsonl, pypi.jsonl, stars.jsonl). Owner and
+        repository names only, lower-cased, and the most-starred repositories' descriptions. The "go" targets on
+        github.com are compared too, from the "go" section.
+  owners  who owns the npm, PyPI and crates targets (SC-PUBLISHER-LOOKALIKE, RA-9, lookalike.owner_lookalike): npm's
+        /<name>/latest `maintainers`, PyPI's /pypi/<name>/json `ownership` (its roles' users, its organization),
+        crates.io's /api/v1/crates/<name>/owners (users' and teams' logins): the files scripts/fetch-target-owners.py
+        writes (npm.jsonl, pypi.jsonl, crates.jsonl). Account names only, lower-cased, sorted and space-separated
+        (one line a package: no name has a space), at most MAX_OWNERS a package, for the targets only; no e-mail
+        address or other text of the answers. A list whose file is not
+        given has no owners. Without --owners the section is kept, to the targets the file has.
+
+Usage: python3 scripts/update-popular-names.py [NPM_LIB_DIR TOP_PYPI_JSON]
+           [--crates PAGES_DIR [UBUNTU_SOURCES...]] [--vscode PAGES_DIR] [--github FILES_DIR] [--owners FILES_DIR]
+           [--go AWESOME_GO_README UBUNTU_SOURCES...] [--check]
+A list not given is kept as it is in the file. An Ubuntu index may be
+xz-compressed. --check compares with the file in the tree instead of
+writing it (exit 1 on any difference). Standard library only.
 """
+import hashlib
 import json
+import lzma
 import pathlib
 import re
 import sys
@@ -35,7 +87,16 @@ from lazaret.scanner.core import configure_stdio  # noqa: E402
 
 OUT = ROOT / "python" / "src" / "lazaret" / "registry" / "popular_names.json"
 TARGETS = 5000
+#: the targets of VS Code extensions, from each registry
+VSCODE_TARGETS = 1000
 _JS_STRING_RE = re.compile(r"""^\s*'((?:[^'\\]|\\.)*)',?\s*$""", re.M)
+#: The indices the Go list was made from (the release pocket: they do not change).
+UBUNTU_SOURCES = ("Ubuntu 24.04 LTS (noble), http://archive.ubuntu.com/ubuntu/dists/noble/{main,universe}/source/"
+                  "Sources.xz")
+AWESOME_GO_COPYRIGHT = "Copyright (c) 2014 Thiago Avelino"
+_ENTRY_LINK_RE = re.compile(r"^\s*[-*]\s+\[[^\]]*\]\((https?://[^)\s]+)\)")
+_GO_FORGE_LINKS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "gitee.com", "git.sr.ht")
+_SOURCES_SPLIT_RE = re.compile(r"[,\s]+")
 MIT_NOTICE = (
     "Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated "
     "documentation files (the 'Software'), to deal in the Software without restriction, including without "
@@ -70,7 +131,16 @@ def section(eco, ranked, everything):
     return targets, known
 
 
-def build(npm_lib, top_pypi):
+ABOUT = ("Names for the registry's look-alike check (SC-TYPOSQUAT, lazaret/registry/lookalike.py): the "
+         f"{TARGETS:,} most-downloaded packages of npm, of PyPI and of crates.io (targets), and the other popular ones "
+         "that are one change from a target (known); the Go modules awesome-go lists and Debian packages (targets); "
+         "the most-installed VS Code extensions of the Visual Studio Marketplace and Open VSX (targets, known names "
+         "and known publishers); the GitHub repositories of the npm and PyPI targets and the most-starred ones "
+         "(targets, the most-starred ones' descriptions); the accounts that own npm's, PyPI's and crates.io's targets "
+         "(owners, SC-PUBLISHER-LOOKALIKE). Written by scripts/update-popular-names.py.")
+
+
+def npm_pypi_sections(npm_lib, top_pypi):
     npm_lib = pathlib.Path(npm_lib)
     version = json.loads((npm_lib.parent / "package.json").read_text(encoding="utf-8")).get("version", "?")
     npm_targets, npm_known = section("npm", js_names(npm_lib / "top-download.js"),
@@ -79,9 +149,6 @@ def build(npm_lib, top_pypi):
     pypi = [lookalike.normalize("pypi", r["project"]) for r in doc["rows"]]
     pypi_targets, pypi_known = section("pypi", pypi, pypi)
     return {
-        "_about": ("Names for the registry's look-alike check (SC-TYPOSQUAT, lazaret/registry/lookalike.py): the "
-                   f"{TARGETS:,} most-downloaded packages of each registry (targets), and the other popular ones "
-                   "that are one change from a target (known). Written by scripts/update-popular-names.py."),
         "npm": {
             "source": f"npm-high-impact {version} (lib/top-download.js, lib/top.js), "
                       "https://github.com/wooorm/npm-high-impact",
@@ -97,16 +164,431 @@ def build(npm_lib, top_pypi):
     }
 
 
+def debian_crates(text):
+    """The crates a source package index's rust-* packages carry (Debian's crates, named as Debian names them:
+    lower-cased, "_" as "-")."""
+    out = []
+    for line in text.split("\n"):
+        if line.startswith("Package: rust-"):
+            out.append(line[len("Package: rust-"):].strip())
+    return out
+
+
+def _crate_pages(paths, digest):
+    names = []
+    for page in paths:
+        raw = page.read_bytes()
+        digest.update(raw)
+        names += [lookalike.normalize("crates", c["name"]) for c in json.loads(raw)["crates"]
+                  if isinstance(c, dict) and isinstance(c.get("name"), str)]
+    return names
+
+
+def crates_section(pages_dir, sources=()):
+    """The crates list from fetch-top-crates.py's pages (recent-0001.json, …, in order: by recent downloads, the
+    targets; alltime-0001.json, …: known names), and the crates Debian packages (`sources`: Ubuntu's source package
+    indices) as known names."""
+    pages = sorted(pathlib.Path(pages_dir).glob("recent-*.json"), key=lambda p: p.as_posix())
+    alltime = sorted(pathlib.Path(pages_dir).glob("alltime-*.json"), key=lambda p: p.as_posix())
+    if not pages:
+        raise SystemExit(f"no recent-*.json in {pages_dir}")
+    digest = hashlib.sha256()
+    names = _crate_pages(pages, digest)
+    older = _crate_pages(alltime, digest)
+    debian, sums = [], []
+    for src in sources:
+        raw, text = _read_index(src)
+        sums.append(hashlib.sha256(raw).hexdigest()[:16])
+        debian += [lookalike.normalize("crates", n) for n in debian_crates(text)]
+    targets, known = section("crates", names, names + older + debian)
+    debian_text = (f", and the rust-* source packages of {UBUNTU_SOURCES} (sha256 {', '.join(s + '…' for s in sums)}), "
+                   "which carry the crates Debian packages" if sources else "")
+    return {"crates": {
+        "source": (f"crates.io's API, https://crates.io/api/v1/crates?sort=recent-downloads (downloads of the last "
+                   f"90 days) and ?sort=downloads, {len(pages)} and {len(alltime)} pages of 100 saved by "
+                   f"scripts/fetch-top-crates.py (sha256 {digest.hexdigest()[:16]}…){debian_text}"),
+        "license": "crate names, which are facts about the crates; no text of the API's answers or the indices is kept",
+        "changes": (f"crate names only, lower-cased with '_' as '-': the first {TARGETS:,} by recent downloads, and "
+                    f"those of the {len(unique(names)):,}, of the {len(unique(older)):,} by all downloads"
+                    + (f" and of Debian's {len(unique(debian)):,}" if sources else "")
+                    + " that are one change from one of them"),
+        "targets": targets, "known": known}}
+
+
+def link_path(url):
+    """The module path an awesome-go entry's link names, else None: a
+    repository's (its owner and name; a GitLab project's groups) on one of
+    _GO_FORGE_LINKS, or a pkg.go.dev page's."""
+    rest = re.sub(r"^https?://(?:www\.)?", "", url).split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    rest = rest[:-4] if rest.endswith(".git") else rest
+    parts = rest.split("/")
+    host = parts[0].lower()
+    if host == "pkg.go.dev":
+        return "/".join(parts[1:]) if len(parts) > 1 and "." in parts[1] else None
+    if host not in _GO_FORGE_LINKS or len(parts) < 3:
+        return None
+    if host == "gitlab.com":                                # groups/subgroups/project; "/-/" starts GitLab's pages
+        names = parts[1:parts.index("-")] if "-" in parts else parts[1:]
+        return host + "/" + "/".join(names) if len(names) >= 2 else None
+    return "/".join([host] + parts[1:3])
+
+
+def awesome_go_paths(text):
+    """The module paths awesome-go's README names: the first link of each
+    entry, in its sections up to its Resources but its Contents and its
+    Editor Plugins (plugins for editors, not modules)."""
+    out, section = [], None
+    for line in text.split("\n"):
+        if line.startswith("# Resources"):
+            break
+        if line.startswith("## "):
+            section = line[3:].strip()
+            continue
+        m = _ENTRY_LINK_RE.match(line) if section not in (None, "Contents", "Editor Plugins") else None
+        path = link_path(m.group(1)) if m else None
+        if path:
+            out.append(path)
+    return out
+
+
+def ubuntu_go_paths(text):
+    """The Go-Import-Path values of a source package index (Sources): each
+    package's, separated by commas or spaces, a field continued on the
+    lines that start with a space."""
+    out = []
+    for para in text.split("\n\n"):
+        value, inside = None, False
+        for line in para.split("\n"):
+            if line[:1] in (" ", "\t"):
+                if inside:
+                    value += " " + line.strip()
+                continue
+            inside = line.startswith("Go-Import-Path:")
+            if inside:
+                value = line.split(":", 1)[1]
+        if value:
+            out.extend(v for v in _SOURCES_SPLIT_RE.split(value) if v)
+    return out
+
+
+def _read_index(path):
+    raw = pathlib.Path(path).read_bytes()
+    return raw, (lzma.decompress(raw) if raw[:6] == b"\xfd7zXZ\x00" else raw).decode("utf-8", "replace")
+
+
+def go_section(readme, sources):
+    readme_raw = pathlib.Path(readme).read_bytes()
+    paths = awesome_go_paths(readme_raw.decode("utf-8"))
+    sums = []
+    for src in sources:
+        raw, text = _read_index(src)
+        sums.append(hashlib.sha256(raw).hexdigest()[:16])
+        paths += ubuntu_go_paths(text)
+    targets = sorted({p for p in map(lookalike.go_path, paths) if p})
+    return {"go": {
+        "source": (f"awesome-go's README.md, https://github.com/avelino/awesome-go (sha256 "
+                   f"{hashlib.sha256(readme_raw).hexdigest()[:16]}…), and the Go-Import-Path fields of "
+                   f"{UBUNTU_SOURCES} (sha256 {', '.join(s + '…' for s in sums)}), which carry Debian's Go packages"),
+        "license": ("awesome-go: MIT (the copyright and notice below). The Ubuntu indices: module paths, which are "
+                    "facts about the packages; no text of them is kept"),
+        "copyright": AWESOME_GO_COPYRIGHT,
+        "notice": MIT_NOTICE,
+        "changes": ("module paths only: the first link of each awesome-go entry outside its Resources and Editor "
+                    "Plugins (a repository's owner and name, a pkg.go.dev page's path) and each Go-Import-Path; "
+                    "lower-cased and without a major version (/v2), sorted"),
+        "targets": targets}}
+
+
+_GITHUB_REPO_RE = re.compile(r"github\.com[/:]([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})",
+                             re.IGNORECASE)
+#: path segments under github.com that are no owner
+_GITHUB_NOT_OWNERS = frozenset({"sponsors", "orgs", "apps", "marketplace", "features", "topics", "settings", "users",
+                                "about", "pricing", "collections", "login", "explore", "site", "enterprise"})
+#: PyPI's project_urls labels that name the code, in the order they are taken (the first that has a repository)
+_PYPI_CODE_LABELS = ("source", "source code", "repository", "code", "github", "homepage", "home", "home page")
+_NPM_HOSTS = ("gitlab:", "bitbucket:", "gist:")
+
+
+def github_repo(text):
+    """The GitHub repository a URL names, `owner/repo` lower-cased, else None."""
+    if not isinstance(text, str):
+        return None
+    m = _GITHUB_REPO_RE.search(text)
+    if not m or m.group(1).lower() in _GITHUB_NOT_OWNERS:
+        return None
+    repo = re.sub(r"\.git$", "", m.group(2)).rstrip(".")
+    return f"{m.group(1)}/{repo}".lower() if repo and repo not in (".", "..") else None
+
+
+def npm_github_repo(field):
+    """npm's `repository` field (a URL, npm's owner/repo shorthand, github:owner/repo, or {url}) -> owner/repo."""
+    url = field.get("url") if isinstance(field, dict) else field
+    if not isinstance(url, str) or url.startswith(_NPM_HOSTS):
+        return None
+    if url.startswith("github:"):
+        url = "github.com/" + url[len("github:"):]
+    elif re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", url):
+        url = "github.com/" + url
+    return github_repo(url)
+
+
+def pypi_github_repo(row):
+    """A PyPI project's code repository: its first project URL whose label names the code (_PYPI_CODE_LABELS), then
+    any project URL, then its home page."""
+    urls = row.get("project_urls") if isinstance(row.get("project_urls"), dict) else {}
+    labelled = {str(k).strip().lower(): v for k, v in urls.items()}
+    for label in _PYPI_CODE_LABELS:
+        found = github_repo(labelled.get(label))
+        if found:
+            return found
+    for v in urls.values():
+        found = github_repo(v)
+        if found:
+            return found
+    return github_repo(row.get("home_page"))
+
+
+def _jsonl(path):
+    p = pathlib.Path(path)
+    if not p.exists():
+        return [], None
+    raw = p.read_bytes()
+    return [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()], hashlib.sha256(raw).hexdigest()
+
+
+def github_section(files_dir):
+    """The "github" section from scripts/fetch-github-targets.py's files: the targets ranked by their package's
+    rank (npm's before PyPI's at one rank, the most-starred after both), each once; the most-starred ones'
+    descriptions."""
+    d = pathlib.Path(files_dir)
+    ranked, sums = _github_ranked(d)
+    if not sums:
+        raise SystemExit(f"--github: no npm.jsonl, pypi.jsonl or stars.jsonl in {d}")
+    targets, descriptions = _github_targets(ranked)
+    return {"github": {
+        "source": ("where npm's and PyPI's targets keep their code (the npm registry's /<name>/latest `repository`; "
+                   "PyPI's /pypi/<name>/json project URLs and home page) and GitHub's most-starred repositories "
+                   "(/search/repositories, when fetched), as scripts/fetch-github-targets.py wrote them ("
+                   + ", ".join(sums) + ")"),
+        "license": ("repository names, which are facts about the packages; the most-starred repositories' "
+                    "descriptions as GitHub gives them, kept for the copy test"),
+        "changes": ("owner/repo only, lower-cased, each once, ranked by its package's rank; descriptions with their "
+                    "white space folded"),
+        "targets": targets, "descriptions": dict(sorted(descriptions.items()))}}
+
+
+_GITHUB_FILES = (("npm.jsonl", lambda r: npm_github_repo(r.get("repository")), 0),
+                 ("pypi.jsonl", pypi_github_repo, 1),
+                 ("stars.jsonl", lambda r: github_repo("github.com/" + str(r.get("full_name") or "")), 2))
+
+
+def _github_ranked(d):
+    """-> ([(rank, list order, owner/repo, row)] of the rows that name a repository, the files' digests)."""
+    ranked, sums = [], []
+    for name, pick, order in _GITHUB_FILES:
+        rows, digest = _jsonl(d / name)
+        if digest:
+            sums.append(f"{name} {digest[:16]}…")
+        good = [row for row in rows if isinstance(row, dict) and "error" not in row]
+        ranked += [(row.get("rank", 0), order, repo, row) for row in good for repo in [pick(row)] if repo]
+    return ranked, sums
+
+
+def _github_targets(ranked):
+    """-> (the repositories in rank order, each once; the most-starred ones' descriptions, white space folded)."""
+    targets, seen, descriptions = [], set(), {}
+    for _rank, order, repo, row in sorted(ranked, key=lambda x: (x[0], x[1], x[2])):
+        if repo not in seen:
+            seen.add(repo)
+            targets.append(repo)
+        text = row.get("description")
+        if order == 2 and isinstance(text, str) and text.strip():
+            descriptions.setdefault(repo, " ".join(text.split()))
+    return targets, descriptions
+
+
+def _extension_ids(text, pages, registry, digest):
+    """The identifiers (publisher.name, lower-cased) of one registry's pages, in order."""
+    out = []
+    for page in pages:
+        raw = page.read_bytes()
+        digest.update(raw)
+        doc = json.loads(raw)
+        if registry == "marketplace":
+            results = doc.get("results") if isinstance(doc, dict) else None
+            exts = (results[0].get("extensions") or []) if isinstance(results, list) and results else []
+            pairs = ((e.get("publisher", {}).get("publisherName") if isinstance(e.get("publisher"), dict) else None,
+                      e.get("extensionName")) for e in exts if isinstance(e, dict))
+        else:
+            pairs = ((e.get("namespace"), e.get("name")) for e in (doc.get("extensions") or []) if isinstance(e, dict))
+        for publisher, name in pairs:
+            ident = f"{publisher}.{name}" if isinstance(publisher, str) and isinstance(name, str) else ""
+            if text.fullmatch(ident):
+                out.append(lookalike.normalize("vscode", ident))
+    return out
+
+
+def vscode_section(pages_dir):
+    """The VS Code extensions' list from fetch-top-extensions.py's pages: the first VSCODE_TARGETS of each registry
+    taken in turn (targets), the pages' other identifiers one change from a target (known), and their publishers
+    that look like a target's publisher (known publishers)."""
+    folder = pathlib.Path(pages_dir)
+    market = sorted(folder.glob("marketplace-*.json"), key=lambda p: p.as_posix())
+    openvsx = sorted(folder.glob("openvsx-*.json"), key=lambda p: p.as_posix())
+    if not market and not openvsx:
+        raise SystemExit(f"no marketplace-*.json or openvsx-*.json in {pages_dir}")
+    ident = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*")
+    digest = hashlib.sha256()
+    m = unique(_extension_ids(ident, market, "marketplace", digest))
+    o = unique(_extension_ids(ident, openvsx, "openvsx", digest))
+    turns = []
+    for i in range(max(len(m), len(o))):
+        turns += [x[i] for x in (m[:VSCODE_TARGETS], o[:VSCODE_TARGETS]) if i < len(x)]
+    targets = unique(turns)
+    data = lookalike.vscode_tables(targets, ())
+    everything = set(m) | set(o)
+    known = sorted(n for n in everything - set(targets) if lookalike.lookalike("vscode", n, data) is not None)
+    publishers = {n.split(".", 1)[0] for n in everything} - set(data[3])
+    data = lookalike.vscode_tables(targets, known)
+    known_publishers = sorted(p for p in publishers if lookalike.publisher_lookalike(p, data) is not None)
+    return {"vscode": {
+        "source": (f"the Visual Studio Marketplace's gallery query, https://marketplace.visualstudio.com/_apis/public/"
+                   f"gallery/extensionquery (sorted by installs), {len(market)} pages of 100, and Open VSX's API, "
+                   f"https://open-vsx.org/api/-/search?sortBy=downloadCount, {len(openvsx)} pages of 100, saved by "
+                   f"scripts/fetch-top-extensions.py (sha256 {digest.hexdigest()[:16]}…)"),
+        "license": "extension identifiers, which are facts about the extensions; no text of the registries' answers "
+                   "is kept",
+        "changes": (f"identifiers only (publisher.name), lower-cased: the first {VSCODE_TARGETS:,} of each registry, "
+                    f"taken in turn, and those of the {len(everything):,} one change from one of them; the publishers "
+                    "of those that look like a target's publisher"),
+        "targets": targets, "known": known, "known_publishers": known_publishers}}
+
+
+#: the lists whose targets' owners are kept, and the most owners kept of one package (npm's `arg` has 164 maintainers)
+OWNER_LISTS = ("npm", "pypi", "crates")
+MAX_OWNERS = 64
+#: an account's name as the registries write them, lower-cased (a crates.io team's is github:org:team); anything else,
+#: an e-mail address among them, is never kept
+_ACCOUNT_RE = re.compile(r"[a-z0-9._:-]{1,100}")
+
+
+def _owner_names(values):
+    names = {lookalike.normalize_owner(v) for v in values if isinstance(v, str)}
+    return sorted(n for n in names if _ACCOUNT_RE.fullmatch(n))[:MAX_OWNERS]
+
+
+def _owners_kept(by_name, targets):
+    """{target: its owners, space-separated} of `by_name` ({name: [owners] or "owner owner"}) for the targets only,
+    each as _owner_names keeps them, sorted by name: one line a package in the file."""
+    kept = ((n, _owner_names(o.split() if isinstance(o, str) else o))
+            for n, o in sorted(by_name.items()) if n in targets)
+    return {n: " ".join(o) for n, o in kept if o}
+
+
+def owners_section(files_dir, current, sections):
+    """The "owners" section: for the npm, PyPI and crates targets of `sections` (the file being written), their owners
+    from scripts/fetch-target-owners.py's files in `files_dir` (npm.jsonl, pypi.jsonl, crates.jsonl; a row with an error
+    is left out, and a list whose file is not there has none); with no `files_dir`, `current` (the file's section) kept
+    to the targets."""
+    targets = {eco: set(sections[eco]["targets"]) for eco in OWNER_LISTS}
+    if files_dir is None:
+        out = {k: v for k, v in current.items() if k not in OWNER_LISTS}
+        return {"owners": {**out, **{eco: _owners_kept(current.get(eco) or {}, targets[eco]) for eco in OWNER_LISTS}}}
+    d, sums, lists = pathlib.Path(files_dir), [], {}
+    for eco in OWNER_LISTS:
+        rows, digest = _jsonl(d / f"{eco}.jsonl")
+        if digest:
+            sums.append(f"{eco}.jsonl {digest[:16]}…")
+        found = {lookalike.normalize(eco, r["name"]): r["owners"] for r in rows if isinstance(r, dict)
+                 and isinstance(r.get("name"), str) and isinstance(r.get("owners"), list)}
+        lists[eco] = _owners_kept(found, targets[eco])
+    if not sums:
+        raise SystemExit(f"--owners: no npm.jsonl, pypi.jsonl or crates.jsonl in {d}")
+    counts = ", ".join(f"{label} {len(lists[eco]):,} of its {len(targets[eco]):,}"
+                       for eco, label in (("npm", "npm"), ("pypi", "PyPI"), ("crates", "crates")))
+    return {"owners": {
+        "source": ("who owns npm's, PyPI's and crates.io's targets: the npm registry's /<name>/latest `maintainers`, "
+                   "PyPI's /pypi/<name>/json `ownership` (its roles' users and its organization) and crates.io's "
+                   "/api/v1/crates/<name>/owners (users' and teams' logins), as scripts/fetch-target-owners.py wrote "
+                   "them (" + ", ".join(sums) + ")"),
+        "license": "account names, which are facts about the packages; no e-mail address or other text of the "
+                   "registries' answers is kept",
+        "changes": (f"account names only, lower-cased, sorted, space-separated, at most {MAX_OWNERS} a package, for "
+                    "the targets "
+                    f"whose owners were fetched ({counts})"),
+        **lists}}
+
+
+def build(current, npm_lib=None, top_pypi=None, go=None, crates=None, vscode=None, github=None, owners=None):
+    """The file: `current` (the file's data) with the lists given rebuilt."""
+    out = {"_about": ABOUT}
+    if npm_lib is not None:
+        out.update(npm_pypi_sections(npm_lib, top_pypi))
+    else:
+        out.update({eco: current[eco] for eco in ("npm", "pypi")})
+    out.update(crates_section(*crates) if crates is not None else {"crates": current["crates"]})
+    out.update(go_section(*go) if go is not None else {"go": current["go"]})
+    out.update(vscode_section(vscode) if vscode is not None else {"vscode": current["vscode"]})
+    if github is not None:
+        out.update(github_section(github))
+    elif "github" in current:
+        out["github"] = current["github"]
+    if owners is not None or "owners" in current:
+        out.update(owners_section(owners, current.get("owners") or {}, out))
+    return out
+
+
 def main(argv):
     configure_stdio()
     args = [a for a in argv if a != "--check"]
-    if len(args) != 2:
-        print(__doc__.split("\n\n")[-2], file=sys.stderr)
+    crates = None
+    if "--crates" in args:
+        at = args.index("--crates")
+        end = next((k for k in range(at + 1, len(args)) if args[k].startswith("--")), len(args))
+        if end == at + 1:
+            print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
+            return 2
+        crates, args = (args[at + 1], args[at + 2:end]), args[:at] + args[end:]
+    github = None
+    if "--github" in args:
+        at = args.index("--github")
+        if at + 1 >= len(args) or args[at + 1].startswith("--"):
+            print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
+            return 2
+        github, args = args[at + 1], args[:at] + args[at + 2:]
+    owners = None
+    if "--owners" in args:
+        at = args.index("--owners")
+        if at + 1 >= len(args) or args[at + 1].startswith("--"):
+            print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
+            return 2
+        owners, args = args[at + 1], args[:at] + args[at + 2:]
+    vscode = None
+    if "--vscode" in args:
+        at = args.index("--vscode")
+        if at + 1 >= len(args) or args[at + 1].startswith("--"):
+            print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
+            return 2
+        vscode, args = args[at + 1], args[:at] + args[at + 2:]
+    go = None
+    if "--go" in args:
+        at = args.index("--go")
+        args, files = args[:at], args[at + 1:]
+        go = (files[0], files[1:]) if len(files) >= 2 else ()          # (the README, then the indices)
+    if len(args) not in ((0, 2) if go is not None or crates is not None or vscode is not None or github is not None
+                         or owners is not None else (2,)) or go == ():
+        print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
         return 2
-    text = json.dumps(build(*args), indent=1, ensure_ascii=False) + "\n"
+    current = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else {}
+    if ((not args and ("npm" not in current or "pypi" not in current)) or (go is None and "go" not in current)
+            or (crates is None and "crates" not in current) or (vscode is None and "vscode" not in current)):
+        print(f"{OUT.relative_to(ROOT)} has no list to keep: give every source", file=sys.stderr)
+        return 2
+    text = json.dumps(build(current, *args, go=go, crates=crates, vscode=vscode, github=github, owners=owners),
+                      indent=1, ensure_ascii=False) + "\n"
     if "--check" in argv:
-        current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
-        if current != text:
+        now = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
+        if now != text:
             print(f"{OUT.relative_to(ROOT)} differs from what the sources give", file=sys.stderr)
             return 1
         print("popular_names.json is current")
@@ -114,7 +596,14 @@ def main(argv):
     OUT.write_text(text, encoding="utf-8")
     data = json.loads(text)
     print(f"wrote {OUT.relative_to(ROOT)}: npm {len(data['npm']['targets'])} targets, {len(data['npm']['known'])} "
-          f"known; PyPI {len(data['pypi']['targets'])} targets, {len(data['pypi']['known'])} known")
+          f"known; PyPI {len(data['pypi']['targets'])} targets, {len(data['pypi']['known'])} known; crates "
+          f"{len(data['crates']['targets'])} targets, {len(data['crates']['known'])} known; Go "
+          f"{len(data['go']['targets'])} modules; VS Code {len(data['vscode']['targets'])} targets, "
+          f"{len(data['vscode']['known'])} known, {len(data['vscode']['known_publishers'])} known publishers"
+          + (f"; GitHub {len(data['github']['targets'])} repositories, {len(data['github']['descriptions'])} "
+             f"descriptions" if "github" in data else "")
+          + ("; owners of " + ", ".join(f"{len(data['owners'][eco])} {eco} targets" for eco in OWNER_LISTS)
+             if "owners" in data else ""))
     return 0
 
 

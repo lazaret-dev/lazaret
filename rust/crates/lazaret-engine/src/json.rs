@@ -256,20 +256,46 @@ impl<'a> Parser<'a> {
             }
         }
     }
+    /// A number as RFC 8259 writes it (`-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`): no leading zero, no bare dot,
+    /// no NaN or Infinity (Python's json reads those, and its dumps writes them for a float that is one; nothing Lazaret
+    /// hands the engine holds one).
     fn number(&mut self) -> Result<Value, Error> {
         let start = self.i;
+        let digit = |c: Option<u32>| c.map_or(false, |c| (0x30..=0x39).contains(&c));
         let mut float = false;
         if self.peek() == Some(0x2D) {
             self.i += 1;
         }
-        while let Some(c) = self.peek() {
-            match c {
-                0x30..=0x39 => self.i += 1,
-                0x2E | 0x65 | 0x45 | 0x2B | 0x2D => {
-                    float = true;
+        match self.peek() {
+            Some(0x30) => self.i += 1,
+            c if digit(c) => {
+                while digit(self.peek()) {
                     self.i += 1;
                 }
-                _ => break,
+            }
+            _ => return self.err("bad number"),
+        }
+        if self.peek() == Some(0x2E) {
+            float = true;
+            self.i += 1;
+            if !digit(self.peek()) {
+                return self.err("bad number");
+            }
+            while digit(self.peek()) {
+                self.i += 1;
+            }
+        }
+        if matches!(self.peek(), Some(0x65) | Some(0x45)) {
+            float = true;
+            self.i += 1;
+            if matches!(self.peek(), Some(0x2B) | Some(0x2D)) {
+                self.i += 1;
+            }
+            if !digit(self.peek()) {
+                return self.err("bad number");
+            }
+            while digit(self.peek()) {
+                self.i += 1;
             }
         }
         let text: String = self.s[start..self.i].iter().filter_map(|&c| char::from_u32(c)).collect();
@@ -370,5 +396,16 @@ mod tests {
         assert_eq!(parse_str(&write(&v)).unwrap(), v);
         assert!(parse_str("[1,]").is_err());
         assert!(parse_str(&"[".repeat(600)).is_err());
+    }
+
+    #[test]
+    fn numbers_are_rfc_8259s() {
+        for good in ["0", "-0", "12", "-12", "1.5", "0.25", "1e5", "1E+5", "-2.5e-3", "9223372036854775807", "1e400"] {
+            assert!(parse_str(good).is_ok(), "{good}");
+        }
+        assert_eq!(parse_str("9223372036854775808").unwrap(), Value::Float(9223372036854775808.0));
+        for bad in ["01", "-01", "1.", ".5", "1.e5", "1e", "1e+", "-", "+1", "NaN", "Infinity", "-Infinity", "1.5.2", "0x10"] {
+            assert!(parse_str(bad).is_err(), "{bad}");
+        }
     }
 }

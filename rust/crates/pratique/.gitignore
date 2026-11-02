@@ -1,0 +1,5 @@
+# The library's test fixtures as they are upstream: public certificates (*.pem) and real npm tarballs (*.tgz),
+# which its tests read. The repository's rule against committing those names does not apply in this folder:
+# scripts/sync_pratique.py refuses a source with a private key or a credential file.
+!*.pem
+!*.tgz
