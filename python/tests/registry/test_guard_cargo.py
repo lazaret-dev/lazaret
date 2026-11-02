@@ -909,8 +909,8 @@ class BuildCommandTests(FlowCase):
         self.assertEqual(code, 1, out)
         self.assertFalse(os.path.exists(self.lock))
 
-    def test_every_command_that_builds_is_wrapped(self):
-        for sub in sorted(guard.CARGO_BUILDS):
+    def assert_commands_that_build_are_wrapped(self, commands):
+        for sub in commands:
             with self.subTest(sub):
                 if os.path.exists(self.log):
                     os.remove(self.log)
@@ -918,6 +918,24 @@ class BuildCommandTests(FlowCase):
                 code, out = self.run_guard("cargo", sub)
                 self.assertEqual(code, 0, out)
                 self.assertEqual(self.commands(), [["update", "--workspace"], [sub, "--locked"]])
+
+    def assert_command_group_is_wrapped(self, group, groups=4):
+        commands = sorted(guard.CARGO_BUILDS)
+        start = len(commands) * group // groups
+        end = len(commands) * (group + 1) // groups
+        self.assert_commands_that_build_are_wrapped(commands[start:end])
+
+    def test_every_command_that_builds_is_wrapped_first_quarter(self):
+        self.assert_command_group_is_wrapped(0)
+
+    def test_every_command_that_builds_is_wrapped_second_quarter(self):
+        self.assert_command_group_is_wrapped(1)
+
+    def test_every_command_that_builds_is_wrapped_third_quarter(self):
+        self.assert_command_group_is_wrapped(2)
+
+    def test_every_command_that_builds_is_wrapped_fourth_quarter(self):
+        self.assert_command_group_is_wrapped(3)
 
     def test_what_comes_after_two_dashes_is_the_programs_own(self):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]]}

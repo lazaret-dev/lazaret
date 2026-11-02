@@ -382,6 +382,9 @@ class RegistryCase(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="lazaret-guard-npm-")
         cls.env = base_env(cls.tmp)
         cls.env["npm_config_registry"] = cls.registry.url
+        # pnpm 12 reads its own registry environment variable rather than
+        # npm_config_registry; keep both tools on this test's fake registry.
+        cls.env["pnpm_config_registry"] = cls.registry.url
 
     @classmethod
     def tearDownClass(cls):
