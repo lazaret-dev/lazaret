@@ -166,7 +166,11 @@ class WindowsLinkTargets(unittest.TestCase):
 
 
 class DeepTree(unittest.TestCase):
-    DEPTH = 1100
+    # Keep the original os.walk RecursionError regression on POSIX, where a
+    # 1,100-level fixture is cheap.  Creating and removing that many nested
+    # paths is prohibitively slow on Windows; one level beyond the product's
+    # cap exercises the same truncation and incomplete-report behavior there.
+    DEPTH = 1100 if os.name == "posix" else core.MAX_WALK_DEPTH + 1
 
     def test_deep_tree_is_walked_iteratively(self):
         root = tempfile.mkdtemp(prefix="lz-review-deep-")
