@@ -23,18 +23,22 @@ jobs:
       - run: sh scripts/check-versions.sh
 
   # Unit, adversarial, compatibility, architecture and build tests, on the
-  # native engine: since the Rust-first refactor it is the Python package's
-  # only engine, so each job builds it (the runner's Rust; the build needs no
-  # registry: Cargo.lock lists only the workspace) and proves it loads before
-  # the suite runs, since the engine's own tests skip without it. Tests that
-  # need Postgres skip themselves here (LAZARET_TEST_PG_DSN is unset).
+  # native engine. Python 3.12 is the cross-platform reference interpreter;
+  # Linux also runs the supported range's 3.10 and 3.14 boundaries. This keeps
+  # OS coverage and interpreter-boundary coverage without multiplying every
+  # interpreter by every OS. Tests that need Postgres skip themselves here
+  # (LAZARET_TEST_PG_DSN is unset).
   python-unit:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - { os: ubuntu-latest, python: "3.10" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.14" }
+          - { os: macos-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,6 +56,27 @@ jobs:
           export LAZARET_NATIVE_LIB
           PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
           python -m unittest discover -s tests -t . -v
+
+  # Intermediate supported interpreters get a cheap source-compatibility and
+  # import check. Their neighboring boundary/reference versions run the full
+  # native suite above, so these lanes need not rebuild the Rust engine.
+  python-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - working-directory: python
+        run: |
+          python -m compileall -q src tests
+          PYTHONPATH=src python -c "import lazaret; print('lazaret', lazaret.__version__)"
 
   # Live Postgres. The password only exists inside this job's throwaway
   # container, so it is not a secret.
