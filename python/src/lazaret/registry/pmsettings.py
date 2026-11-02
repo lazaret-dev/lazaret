@@ -500,7 +500,17 @@ def npm_tool_settings(tool, exe, env, cwd, root):
         for k, v in npmrc_settings([os.path.join(xdg, "pnpm", "rc")], env).items():
             settings.setdefault(k, v)
     settings.update(npm_env_settings(env, ("npm_config_", "pnpm_config_") if tool == "pnpm" else ("npm_config_",)))
-    settings.update({k: v for k, v in listed.items() if isinstance(k, str)})
+    # pnpm 12's display-oriented config listing can return a protected value
+    # for a credential that was expanded from a trusted user auth file.  Keep
+    # the value we parsed from the file or environment; still accept listed
+    # credentials when that is the only place pnpm reports them.
+    for key, value in listed.items():
+        if not isinstance(key, str):
+            continue
+        if key.startswith("//") or key in ("_authToken", "_auth", "username", "_password"):
+            settings.setdefault(key, value)
+        else:
+            settings[key] = value
     return settings
 
 
