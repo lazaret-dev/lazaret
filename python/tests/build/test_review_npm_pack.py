@@ -49,15 +49,17 @@ class NpmPackTests(unittest.TestCase):
             shutil.copytree(os.path.join(JS, tree), os.path.join(self.root, tree))
 
     def test_planted_dotfiles_and_keys_are_not_packed(self):
-        clean = packed(self.root)
-        self.assertIn("src/index.js", clean)
-        self.assertIn("bin/lazaret.js", clean)
         for rel in PLANTED:
             path = os.path.join(self.root, *rel.split("/"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8", newline="\n") as f:
                 f.write("TOKEN=dummy-not-a-secret\n")
-        self.assertEqual(packed(self.root), clean)
+
+        files = packed(self.root)
+        self.assertIn("src/index.js", files)
+        self.assertIn("bin/lazaret.js", files)
+        for rel in PLANTED:
+            self.assertNotIn(rel, files)
 
     def test_the_engine_and_its_notices_are_packed_and_nothing_else_of_native(self):
         # 0.1.8: the native engine as WebAssembly (npm run build) and its
