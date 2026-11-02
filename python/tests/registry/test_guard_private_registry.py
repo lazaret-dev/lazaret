@@ -56,7 +56,7 @@ class PrivateRegistryTests(unittest.TestCase):
     def test_npm(self):
         self.check(self.npmrc_project(), self.env, "npm", "install", "good-pkg")
 
-    @unittest.skipUnless(shutil.which("pnpm"), "pnpm is not installed")
+    @unittest.skipUnless(gs.pnpm_ready(), "pnpm is not installed and runnable")
     def test_pnpm(self):
         self.check(self.npmrc_project(), self.env, "pnpm", "add", "good-pkg")
 

@@ -5,13 +5,12 @@ test_guard_npm.py; MAC-TESTS.)
 The tools run with scripts off (npm_config_ignore_scripts), so no package code runs, blocked or not."""
 
 import os
-import shutil
 import unittest
 
 from tests.registry import _guard_support as gs
 
 
-@unittest.skipUnless(shutil.which("pnpm"), "pnpm is not installed")
+@unittest.skipUnless(gs.pnpm_ready(), "pnpm is not installed and runnable")
 class PnpmGuardTests(gs.RegistryCase):
     def test_a_clean_package_is_installed(self):
         d = gs.project(self.tmp)

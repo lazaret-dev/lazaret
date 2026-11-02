@@ -334,6 +334,21 @@ def base_env(tmp):
     return env
 
 
+@functools.cache
+def pnpm_ready():
+    """Whether pnpm is installed, rather than only an unprepared Corepack shim."""
+    exe = shutil.which("pnpm")
+    if not exe:
+        return False
+    env = dict(os.environ, COREPACK_ENABLE_NETWORK="0")
+    try:
+        ready = subprocess.run([exe, "--version"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return ready.returncode == 0
+
+
 def run_guard(args, cwd, env, timeout=40):
     """python -m lazaret.registry.guard <args> -> (exit code, output)."""
     proc = subprocess.run([sys.executable, "-m", "lazaret.registry.guard", *args], cwd=cwd, env=env,
