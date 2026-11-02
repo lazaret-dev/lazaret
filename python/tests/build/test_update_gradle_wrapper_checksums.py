@@ -138,9 +138,11 @@ class Refresh(unittest.TestCase):
 
     def refused(self, pages, *args):
         with Pack() as p:
-            before = open(p.path, "rb").read()
+            with open(p.path, "rb") as f:
+                before = f.read()
             self.assertEqual(upd.main(["--pack", p.path, "--prune", *args], opener=FakeOpener(pages)), 1)
-            self.assertEqual(open(p.path, "rb").read(), before)
+            with open(p.path, "rb") as f:
+                self.assertEqual(f.read(), before)
 
     def test_a_jar_that_does_not_hash_to_its_checksum(self):
         pages = gradle({"99.0": jar("a")})
