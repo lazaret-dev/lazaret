@@ -827,7 +827,13 @@ class TransportTests(unittest.TestCase):
         cls.seen, cls.together = seen, together
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)
-        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class Server(http.server.ThreadingHTTPServer):
+            # socketserver's default backlog is five. This test deliberately
+            # connects WIDTH clients before any can finish, so macOS can reset
+            # the clients beyond that backlog before their handler starts.
+            request_queue_size = WIDTH
+
+        cls.server = Server(("127.0.0.1", 0), Handler)
         cls.server.daemon_threads = True
         cls.server.socket = context.wrap_socket(cls.server.socket, server_side=True)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
