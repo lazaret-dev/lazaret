@@ -68,9 +68,9 @@ test("linear time on hostile lines", () => {
   for (const text of ["(".repeat(200_000), "'".repeat(200_000), "a,".repeat(200_000), "f'{".repeat(100_000),
     "=>".repeat(200_000) + " {", "a.".repeat(200_000) + "get(type=int)", " ".repeat(100_000) + "if '..' in x:"]) {
     for (const lang of ["py", "js"]) {
-      const t0 = Date.now();
+      const t0 = performance.now();
       scanFile({ path: `x.${lang}`, content: ["q = input()", "os.system(" + text, "x = " + text, text].join("\n"), lang });
-      assert.ok(Date.now() - t0 < 10_000, `${text.slice(0, 12)} ${lang}`);
+      assert.ok(performance.now() - t0 < 10_000, `${text.slice(0, 12)} ${lang}`);
     }
   }
 });

@@ -173,6 +173,8 @@ class ParityTests(unittest.TestCase):
         else:
             self.assertEqual(page["files"], sorted(rel for rel, _ in files))
         self.assertEqual(cli.get("warnings", []), [])
+        # (the page names a file as a browser does, '/'-separated; the CLI as its disk does, os.sep-separated)
+        page = dash.as_the_cli_names_them(page, [rel for rel, _ in files])
         page, cli = dash.comparable(page, dash.PAGE_ONLY), dash.comparable(cli, dash.CLI_ONLY)
         self.assertEqual(sorted(page), sorted(cli))
         for key in page:

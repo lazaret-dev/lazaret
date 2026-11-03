@@ -94,15 +94,15 @@ test("linear time on hostile texts", () => {
     ("open(" + "x".repeat(300)).repeat(20_000), "'.claude', ".repeat(500_000), ".vscode/tasks.json x\n".repeat(250_000),
     "toJSON(secrets) ".repeat(300_000)];
   for (const text of cases) {
-    const t0 = Date.now();
+    const t0 = performance.now();
     persistenceReasons(text);
-    assert.ok(Date.now() - t0 < 10_000, text.slice(0, 30));
+    assert.ok(performance.now() - t0 < 10_000, text.slice(0, 30));
   }
-  const t0 = Date.now();
+  const t0 = performance.now();
   findings("on: issues\njobs:\n  a:\n    runs-on: self-hosted\n    steps:\n      - run: " + "${{ ".repeat(400_000) + "\n");
   entries("vscode-tasks", "VS Code", '{"tasks": [' +
     '{"label": "a", "dependsOn": "a", "runOptions": {"runOn": "folderOpen"}, "command": "x"},'.repeat(15_000) + "]}");
-  assert.ok(Date.now() - t0 < 10_000);
+  assert.ok(performance.now() - t0 < 10_000);
 });
 
 test("a JSON reader that keeps lines", () => {

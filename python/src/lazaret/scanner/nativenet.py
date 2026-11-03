@@ -13,7 +13,8 @@ Python's transport is used instead:
 
 * where the native library is missing or older than the network layer (no `lazaret_net_request`);
 * when `LAZARET_NETWORK=python` asks for it;
-* for a proxy reached over TLS (`https://` in the proxy's URL), which pratique does not speak;
+* for a proxy reached over TLS (`https://` in the proxy's URL), which pratique does not speak and Python refuses
+  before connecting;
 * for a byte budget past what the native transport carries (`MAX_BODY`, 2 GiB), which only a setting asks for now
   (`LAZARET_MAX_DOWNLOAD_BYTES`, `--max-download-bytes`);
 * where no trust anchors can be found for it (below).
@@ -58,6 +59,7 @@ import json
 import os
 import ssl
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import NamedTuple
@@ -133,6 +135,34 @@ class HTTPSHandler(urllib.request.HTTPSHandler):
         if self._context is None:
             self._context = tls_context()
         return self.do_open(http.client.HTTPSConnection, req, context=self._context)
+
+
+class ProxyHandler(urllib.request.ProxyHandler):
+    """urllib's proxy selection with one fail-closed boundary: it cannot make a TLS connection *to* an
+    ``https://`` proxy, so refuse that configuration before urllib puts proxy credentials on the request or opens a
+    socket. A bypass still means a direct connection, and the ordinary ``http://`` CONNECT-proxy path is unchanged."""
+
+    def proxy_open(self, req, proxy, request_type):
+        shown = proxy.strip() if isinstance(proxy, str) else proxy
+        # urllib treats a malformed ``https:user:password@proxy`` (without ``//``) as a
+        # scheme-less proxy authority, then sends its credential on a cleartext CONNECT. Refuse
+        # every spelling that declares the unsupported scheme before asking urllib to parse it;
+        # this also keeps a malformed proxy and its credential out of _parse_proxy's ValueError.
+        if isinstance(shown, str) and shown.lower().startswith("https:"):
+            if req.host and urllib.request.proxy_bypass(req.host):
+                return None
+            raise urllib.error.URLError("HTTPS proxies are not supported")
+        scheme, _user, _password, _hostport = urllib.request._parse_proxy(shown)
+        if scheme is not None and scheme.lower() == "https":
+            if req.host and urllib.request.proxy_bypass(req.host):
+                return None
+            raise urllib.error.URLError("HTTPS proxies are not supported")
+        return super().proxy_open(req, proxy, request_type)
+
+
+def build_opener(*handlers, proxies=None):
+    """A urllib opener with Lazaret's proxy boundary installed in place of urllib's default ProxyHandler."""
+    return urllib.request.build_opener(ProxyHandler(proxies), *handlers)
 
 
 class Reply(NamedTuple):

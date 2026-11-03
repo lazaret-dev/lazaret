@@ -103,6 +103,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    # verify_all tests ten providers concurrently; socketserver's default
+    # backlog of five loses part of that burst on macOS before TLS starts.
+    request_queue_size = 32
     context = None
 
     def get_request(self):
@@ -162,6 +165,7 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
 class _ProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 32
 
     def handle_error(self, request, client_address):
         pass

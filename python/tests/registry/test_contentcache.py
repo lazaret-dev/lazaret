@@ -44,6 +44,35 @@ class Counter:
         return self.answer() if callable(self.answer) else self.answer
 
 
+class WatchedDone(threading.Event):
+    """A flight's `done` that says when threads have ACTUALLY come to wait on it: `wait` counts the arrival (under
+    the condition, so `until_waiting` is woken, not polled) before it blocks. What the tests wait on in place of a
+    fixed sleep: a follower that has called `done.wait` has passed the memo's lookup and is a follower."""
+
+    def __init__(self):
+        super().__init__()
+        self.waiting, self._arrivals = 0, threading.Condition()
+
+    def wait(self, timeout=None):
+        with self._arrivals:
+            self.waiting += 1
+            self._arrivals.notify_all()
+        return super().wait(timeout)
+
+    def until_waiting(self, n):
+        """True once `n` threads have come to wait here (False if they have not within `TIMEOUT`)."""
+        with self._arrivals:
+            return self._arrivals.wait_for(lambda: self.waiting >= n, TIMEOUT)
+
+
+def watch(memo, k):
+    """Put a `WatchedDone` on the flight the leader of `k` has in the table (call it once the leader is inside its
+    computation, and before the gate opens: nobody can be holding the old `done` then) -> the new `done`."""
+    flight = memo._flights[k]
+    flight.done = WatchedDone()
+    return flight.done
+
+
 class KeyTests(unittest.TestCase):
     def test_a_key_is_the_same_for_the_same_question(self):
         self.assertEqual(key(), key())
@@ -222,11 +251,9 @@ class SingleFlightTests(unittest.TestCase):
         self.addCleanup(pool.shutdown, True)
         futures = [pool.submit(memo.get_or_compute, k, work, **kw)]
         self.assertTrue(work.started.wait(TIMEOUT))
+        done = watch(memo, k)                                                 # (the leader is in `work`: its flight is up)
         futures += [pool.submit(memo.get_or_compute, k, work, **kw) for _ in range(n - 1)]
-        deadline = time.time() + TIMEOUT
-        while time.time() < deadline and memo.stats()["kinds"].get("scan", {}).get("misses", 0) + len(memo._flights) == 0:
-            time.sleep(0.005)
-        time.sleep(0.15)                                                      # (the others are at the flight by now)
+        self.assertTrue(done.until_waiting(n - 1))                            # (the others are at the flight: each said so)
         work.gate.set()
         return [f.result(TIMEOUT) for f in futures]
 
@@ -265,8 +292,9 @@ class SingleFlightTests(unittest.TestCase):
         self.addCleanup(pool.shutdown, True)
         futures = [pool.submit(memo.get_or_compute, key(), work)]
         self.assertTrue(work.started.wait(TIMEOUT))
+        done = watch(memo, key())
         futures += [pool.submit(memo.get_or_compute, key(), work) for _ in range(3)]
-        time.sleep(0.15)
+        self.assertTrue(done.until_waiting(3))                                # (all three are at the flight)
         gate.set()
         for f in futures:
             with self.assertRaisesRegex(ValueError, "engine said no"):
@@ -277,10 +305,11 @@ class SingleFlightTests(unittest.TestCase):
     def test_an_answer_not_for_keeping_is_not_handed_to_the_threads_that_waited(self):
         memo = cc.Memo()
         gate = threading.Event()
-        order = []
+        order, started = [], threading.Event()
 
         def slow_partial():
             order.append("first")
+            started.set()
             gate.wait(TIMEOUT)
             return cc.Uncacheable(["cut by the first thread's budget"])
 
@@ -290,10 +319,10 @@ class SingleFlightTests(unittest.TestCase):
         pool = concurrent.futures.ThreadPoolExecutor(2)
         self.addCleanup(pool.shutdown, True)
         first = pool.submit(memo.get_or_compute, key(), slow_partial)
-        while not order:
-            time.sleep(0.005)
+        self.assertTrue(started.wait(TIMEOUT))
+        done = watch(memo, key())
         second = pool.submit(memo.get_or_compute, key(), own)
-        time.sleep(0.15)
+        self.assertTrue(done.until_waiting(1))                                # (the second is at the first's flight)
         gate.set()
         self.assertEqual(first.result(TIMEOUT), ["cut by the first thread's budget"])
         self.assertEqual(second.result(TIMEOUT), ["worked out in full"])
@@ -319,8 +348,9 @@ class SingleFlightTests(unittest.TestCase):
         self.assertTrue(started.wait(TIMEOUT))
         pool = concurrent.futures.ThreadPoolExecutor(1)
         self.addCleanup(pool.shutdown, True)
+        done = watch(memo, key())
         follower = pool.submit(memo.get_or_compute, key(), lambda: ["done by the follower"])
-        time.sleep(0.15)
+        self.assertTrue(done.until_waiting(1))                                # (the follower is at the leader's flight)
         gate.set()
         leader.join(TIMEOUT)
         self.assertEqual(follower.result(TIMEOUT), ["done by the follower"])
@@ -458,8 +488,9 @@ class BatchTests(unittest.TestCase):
         leader = pool.submit(memo.get_or_compute, a, slow)
         self.assertTrue(slow.started.wait(TIMEOUT))
         asked = []
+        done = watch(memo, a)
         batch = pool.submit(memo.get_or_compute_many, [a, b], lambda ks: asked.append(list(ks)) or [["B"] for _ in ks])
-        time.sleep(0.2)
+        self.assertTrue(done.until_waiting(1))                                 # (the batch has asked for b and now awaits a)
         self.assertEqual(asked, [[b]])                                         # (b is computed while a is awaited)
         gate.set()
         self.assertEqual(batch.result(TIMEOUT), [["slow a"], ["B"]])
@@ -480,8 +511,9 @@ class BatchTests(unittest.TestCase):
         leader = pool.submit(memo.get_or_compute, a, partial)
         self.assertTrue(started.wait(TIMEOUT))
         asked = []
+        done = watch(memo, a)
         batch = pool.submit(memo.get_or_compute_many, [a, b], lambda ks: asked.append(list(ks)) or [["mine"] for _ in ks])
-        time.sleep(0.2)
+        self.assertTrue(done.until_waiting(1))                                 # (the batch has asked for b and now awaits a)
         gate.set()
         self.assertEqual(batch.result(TIMEOUT), [["mine"], ["mine"]])
         self.assertEqual(asked, [[b], [a]])
@@ -674,8 +706,9 @@ class BookkeepingTests(unittest.TestCase):
         self.addCleanup(pool.shutdown, True)
         leader = pool.submit(memo.get_or_compute, a, slow)
         self.assertTrue(slow.started.wait(TIMEOUT))
+        done = watch(memo, a)
         batch = pool.submit(memo.get_or_compute_many, [a], lambda ks: self.fail("asked"))
-        time.sleep(0.2)
+        self.assertTrue(done.until_waiting(1))                                 # (the batch is at a's flight)
         gate.set()
         self.assertEqual(batch.result(TIMEOUT), [["slow"]])
         leader.result(TIMEOUT)
@@ -715,8 +748,9 @@ class BookkeepingTests(unittest.TestCase):
         self.addCleanup(pool.shutdown, True)
         leader = pool.submit(memo.get_or_compute, a, partial)
         self.assertTrue(started.wait(TIMEOUT))
+        done = watch(memo, a)
         batch = pool.submit(memo.get_or_compute_many, [a, b], lambda ks: [["mine"] for _ in ks])
-        time.sleep(0.2)
+        self.assertTrue(done.until_waiting(1))                                 # (the batch has taken b and now awaits a)
         gate.set()
         self.assertEqual(batch.result(TIMEOUT), [["mine"], ["mine"]])
         leader.result(TIMEOUT)
@@ -833,8 +867,9 @@ class BookkeepingTests(unittest.TestCase):
         gate, thread, raised = self.lead_a_batch(memo, k, ValueError("engine said no"))
         asked, pool = [], concurrent.futures.ThreadPoolExecutor(1)
         self.addCleanup(pool.shutdown, True)
+        done = watch(memo, k)
         follower = pool.submit(memo.get_or_compute_many, [k], lambda ks: asked.append(list(ks)) or [["its own"] for _ in ks])
-        time.sleep(0.2)
+        self.assertTrue(done.until_waiting(1))                                             # (the follower is at the flight)
         gate.set()
         thread.join(TIMEOUT)
         with self.assertRaisesRegex(ValueError, "engine said no"):
@@ -846,8 +881,9 @@ class BookkeepingTests(unittest.TestCase):
         gate, thread, raised = self.lead_a_batch(memo, k, KeyboardInterrupt())
         pool = concurrent.futures.ThreadPoolExecutor(1)
         self.addCleanup(pool.shutdown, True)
+        done = watch(memo, k)
         follower = pool.submit(memo.get_or_compute_many, [k], lambda ks: [["its own"] for _ in ks])
-        time.sleep(0.2)
+        self.assertTrue(done.until_waiting(1))                                             # (the follower is at the flight)
         gate.set()
         thread.join(TIMEOUT)
         self.assertEqual(follower.result(TIMEOUT), [["its own"]])

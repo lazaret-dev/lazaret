@@ -3,7 +3,9 @@ line, severity, message), metrics, gate and exit code on a tree of model files â
 numpy's files, benign and hostile, cut short, one of the project's own class, checkpoints of 200 MB (sparse files,
 read by range), a dependency's under --deps, and the precision review's (Oct 21): the libraries' benign files
 (tests/fixtures/model_files), the standard library's data types, enums' member lookups of the project's own and a
-dependency's enums (MAJOR: calls with text), a zip of one pickle. The
+dependency's enums (MAJOR: calls with text), a zip of one pickle; and FP-MODEL-FILES-PY311's members of the
+standard library's data enums as Python 3.10, 3.11.0 and 3.12 write them, kept (quiet) and called, made, changed or
+reached through (CRITICAL), in the project and under --deps (std_member_tree). The
 expectations are in tests/scanner/test_review_model_files.py; this holds the packages to each other. Files built in
 the test (tests/_model_files.py), inert. Skipped where the npm engine is not built (node, and npm run build in js/).
 """
@@ -94,6 +96,20 @@ def cap_tree():
             "caps/ok.pkl": classes_pickle(64)}
 
 
+def std_member_tree():
+    """FP-MODEL-FILES-PY311: each Python's form of the standard library's enum members at every protocol, each use of
+    one (tests/_model_files.std_member_shapes), in the project and in a dependency, and a checkpoint holding each."""
+    shapes = mf.std_member_shapes()
+    forms = {f"members.{form}.p{p}.pkl": mf.std_members(protocol=p, form=form) for form in mf.STD_FORMS for p in range(6)}
+    files = {"app.py": "import dep\n", ".venv/pyvenv.cfg": "home = /usr/bin\n", f"{SP}/dep/__init__.py": "x = 1\n"}
+    for where in ("e", f"{SP}/dep"):
+        files.update({f"{where}/{k}": v for k, (v, _) in shapes.items()})
+        files.update({f"{where}/{k}": v for k, v in forms.items()})
+        files[f"{where}/kept.pt"] = mf.torch_zip(mf.std_members(protocol=2, form="3.10"))
+        files[f"{where}/called.pt"] = mf.torch_zip(shapes["called_reduce.pkl"][0])
+    return files
+
+
 def write(root, files):
     for rel, data in files.items():
         path = os.path.join(root, *rel.split("/"))
@@ -166,6 +182,28 @@ class ModelFileParityTests(unittest.TestCase):
         self.assertGreater(found[("caps/classes.pkl", "SC-PICKLE-CODE")], 0)
         self.assertGreater(found[("caps/ok.pkl", "SC-PICKLE-CODE")], 0)
         self.assertEqual(found[("caps/members.pt", "SC-BINARY")], 64)
+
+    def test_the_standard_librarys_enum_members(self):
+        """FP-MODEL-FILES-PY311: alike in both packages, with and without --deps: a member kept is quiet in each
+        Python's form; called, made, changed or reached through, and a name no member's exactly, SC-PICKLE-CODE."""
+        shapes = mf.std_member_shapes()
+        for deps in (False, True):
+            report = self.assert_same(deps=deps, tree=std_member_tree())
+            found = {}
+            for i in report["issues"]:
+                found.setdefault(i["file"].replace("\\", "/"), set()).add((i["rule"], i["sev"]))
+            wheres = ("e", f"{SP}/dep") if deps else ("e",)
+            for where in wheres:
+                for k, (_, quiet) in shapes.items():
+                    if quiet:
+                        self.assertNotIn(f"{where}/{k}", found, (deps, k))
+                    else:
+                        self.assertIn(("SC-PICKLE-CODE", "CRITICAL"), found.get(f"{where}/{k}", set()), (deps, k))
+                for form in mf.STD_FORMS:
+                    for p in range(6):
+                        self.assertNotIn(f"{where}/members.{form}.p{p}.pkl", found, (deps, form, p))
+                self.assertNotIn(f"{where}/kept.pt", found, deps)
+                self.assertIn(("SC-PICKLE-CODE", "CRITICAL"), found.get(f"{where}/called.pt", set()), deps)
 
     def test_model_files_with_deps(self):
         report = self.assert_same(deps=True)

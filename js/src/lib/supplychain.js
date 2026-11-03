@@ -141,10 +141,15 @@ function fromEngine(v) {
  * prepare family, which is INFO unless hostile or hinted (INSTALL_HOOK_RE).
  * Dependencies npm would fetch from an insecure source are SC-DEP-URL
  * (D-14). An unparseable root manifest is SC-MANIFEST-UNPARSEABLE. The
- * engine's (core.scan_manifest).
+ * engine's (core.scan_manifest). `windows`: `path` is the walk's on Windows
+ * (collect.js WINDOWS), where a backslash separates its folders too, so a
+ * dependency's node_modules\dep\test\package.json is no package's root
+ * manifest (WIN-DEP-PATHS); otherwise a backslash is a file name's, as on
+ * POSIX.
  */
-export function scanManifest(path, content, { registry = null } = {}) {
-  return engineIssues(path, "scan_manifest", { registry: registry === null ? null : !!registry, hooks: null }, content);
+export function scanManifest(path, content, { registry = null, windows = false } = {}) {
+  return engineIssues(path, "scan_manifest",
+    { registry: registry === null ? null : !!registry, hooks: null, windows: !!windows }, content);
 }
 
 /** What makes a dependency's spec risky to fetch: ["a plain-http URL", "a raw IP address (HOST)"], the ones that

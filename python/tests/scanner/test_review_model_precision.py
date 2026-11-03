@@ -9,6 +9,13 @@ the formats' own; the data types of modules of code (http.HTTPStatus, signal.Sig
 of one pickle is read. A call with text of an enum stays MAJOR whatever the scanned source says of the class (the
 external re-review of Oct 27 dropped the waiver: which file the name is at load time is the loading program's).
 
+FP-MODEL-FILES-PY311: Python 3.10 and 3.11.0 to 3.11.4 pickle a member of signal's, socket's and ssl's converted
+enums by its module-level name (GLOBAL 'signal SIGTERM'), and 3.11.0 to 3.11.4 another as getattr(ssl.TLSVersion,
+'TLSv1_2'), where 3.12 writes signal.Signals(15): the alias was code (CRITICAL), so a benign pickle 3.10 or 3.11 wrote
+was a false CRITICAL and these tests failed there. Each form is now built here byte by byte (tests/_model_files.
+std_members, the bytes those Pythons write), whatever Python runs the tests; such a member kept as data is quiet, and
+called, made, changed or reached through it is code as before.
+
 The libraries' files the tests cannot write (pandas 3 with pyarrow, dateutil, pytz, datasets) are fixtures written by
 scripts/make_model_fixtures.py (tests/fixtures/model_files); the standard library's are written here. Nothing is
 unpickled or loaded: the scanner reads bytes.
@@ -43,7 +50,9 @@ def fixtures():
 
 
 def stdlib_data():
-    """The standard library's data types of modules of code, pickled by pickle itself at every protocol."""
+    """The standard library's data types of modules of code, pickled by pickle itself at every protocol; and the
+    members of its data enums as Python 3.10, 3.11.0 to 3.11.4 and 3.12 write them, hand-built (whatever Python runs
+    the tests: FP-MODEL-FILES-PY311)."""
     objs = {
         "status": [http.HTTPStatus.OK, http.HTTPStatus.NOT_FOUND],
         "signals": [signal.Signals.SIGTERM, signal.Handlers.SIG_DFL],
@@ -55,7 +64,10 @@ def stdlib_data():
     }
     if hasattr(http, "HTTPMethod"):
         objs["method"] = http.HTTPMethod.GET
-    return {f"std/data.p{p}.pkl": pickle.dumps(objs, protocol=p) for p in range(6)}
+    out = {f"std/data.p{p}.pkl": pickle.dumps(objs, protocol=p) for p in range(6)}
+    out.update({f"std/members.{form}.p{p}.pkl": mf.std_members(protocol=p, form=form)
+                for form in mf.STD_FORMS for p in range(6)})
+    return out
 
 
 class TheLibrariesFiles(unittest.TestCase):
@@ -87,6 +99,45 @@ class TheLibrariesFiles(unittest.TestCase):
         self.assertNotIn("ok.pkl.zip", got)
         # (a zip of more than its pickle stays an archive the scan does not open)
         self.assertEqual(got.get("more.zip"), {("SC-NESTED-ARCHIVE", "MINOR")})
+
+
+class StdlibEnumMembers(unittest.TestCase):
+    """FP-MODEL-FILES-PY311: a member of the standard library's data enums by the exact name a pickle writes for it
+    (PICKLE_DATA_MEMBERS: signal.SIGTERM, ssl.TLSVersion.TLSv1_2) is data where it is only kept; called, made, changed
+    by BUILD or reached through, it is code as before, and so is a name that is no member's exactly."""
+
+    def test_each_python_s_form_is_quiet(self):
+        # (the forms differ: 3.10's and 3.11.0's name the module-level alias, 3.12's the class)
+        self.assertIn(b"csignal\nSIGTERM\n", mf.std_members(protocol=2, form="3.10"))
+        self.assertIn(b"c__builtin__\ngetattr\n", mf.std_members(protocol=2, form="3.11.0"))
+        self.assertIn(b"csignal\nSignals\n", mf.std_members(protocol=2, form="3.12"))
+        for form in mf.STD_FORMS:
+            for p in range(6):
+                data = mf.std_members(protocol=p, form=form)
+                got = core.model_file("m.pkl", data, len(data), 16_000_000)
+                self.assertEqual((got["issues"], got["calls"], got["opaque"]), ([], [], False), (form, p))
+
+    def test_each_use(self):
+        for name, (data, quiet) in mf.std_member_shapes().items():
+            got = core.model_file(name, data, len(data), 16_000_000)
+            sev = {(i["rule"], i["sev"]) for i in got["issues"]}
+            if quiet:
+                self.assertEqual((got["issues"], got["calls"]), ([], []), name)
+            else:
+                self.assertIn(CODE, sev, name)
+
+    def test_in_a_project_and_with_deps(self):
+        shapes = mf.std_member_shapes()
+        files = {f"m/{k}": v for k, (v, _) in shapes.items()}
+        files.update({f"m/members.{form}.p{p}.pkl": mf.std_members(protocol=p, form=form)
+                      for form in mf.STD_FORMS for p in range(6)})
+        for deps in (False, True):
+            got = found(scan({**files, "app.py": "x = 1\n", ".venv/pyvenv.cfg": "home = /usr/bin\n"},
+                             include_deps=deps), "m/")
+            self.assertEqual(sorted(got), sorted(f"m/{k}" for k, (_, quiet) in shapes.items() if not quiet), deps)
+            for k, (_, quiet) in shapes.items():
+                if not quiet:
+                    self.assertIn(CODE, got[f"m/{k}"], k)
 
 
 class Enums(unittest.TestCase):

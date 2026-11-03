@@ -1305,7 +1305,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             }
         }
         "scan_manifest" => {
-            // {path, registry, hooks: [script…] or null, redact} -> {"issues": [scan_file's issues…, a hook's {"cmd"}]}
+            // {path, registry, hooks: [script…] or null, redact, windows} -> {"issues": [scan_file's issues…, a hook's
+            // {"cmd"}]}. `windows`: the path is a Windows walk's (os.sep), "\\" separating its folders too (a
+            // package's root manifest; WIN-DEP-PATHS); absent, a backslash is a file name's, as on POSIX
             let path = arg_str(args, "path")?;
             // (registry null: a manifest under a dependency folder is a dependency's, collect.rs)
             let registry = match args.get("registry") {
@@ -1317,7 +1319,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 Some(Value::Arr(_)) => Some(arg_strs(args, "hooks")),
                 _ => None,
             };
-            let issues = crate::manifest::scan_manifest(p, &path, text, registry, hooks.as_deref(), redact);
+            let windows = flag(args, "windows", false);
+            let issues = crate::manifest::scan_manifest(p, &path, text, registry, hooks.as_deref(), redact, windows);
             Value::obj(vec![("issues", Value::Arr(issues))])
         }
         "scan_gyp" => {

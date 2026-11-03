@@ -293,6 +293,35 @@ class SourceTests(unittest.TestCase):
         self.assertEqual([type(h) for h in https], [guard._HTTPSHandler])
         self.assertTrue(issubclass(guard._HTTPSHandler, nativenet.HTTPSHandler))
 
+    def test_every_urllib_opener_goes_through_the_shared_proxy_boundary(self):
+        direct = []
+        for path in sorted(SRC.rglob("*.py"), key=lambda p: p.as_posix()):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                func = node.func if isinstance(node, ast.Call) else None
+                request = func.value if isinstance(func, ast.Attribute) and func.attr == "build_opener" else None
+                urllib_name = request.value if isinstance(request, ast.Attribute) and request.attr == "request" else None
+                if isinstance(urllib_name, ast.Name) and urllib_name.id == "urllib":
+                    direct.append(path.relative_to(SRC).as_posix())
+        self.assertEqual(direct, ["scanner/nativenet.py"],
+                         "only nativenet.build_opener may call urllib.request.build_opener")
+
+        from lazaret.registry import guard, sources
+        with mock.patch.object(urllib.request, "getproxies", return_value={
+                "https": "https://proxy.invalid:8443"}):
+            openers = [nativenet.build_opener(repo._RegistryOpener, nativenet.HTTPSHandler()),
+                       repo._module_opener(lambda url: url),
+                       guard.Fetcher({"registry.invalid"})._opener("https://registry.invalid/x"),
+                       sources._post_opener(guard), nativenet.build_opener(*sca_feeds._HANDLERS)]
+        for opener in openers:
+            with self.subTest(opener=opener):
+                proxies = [handler for handler in opener.handlers
+                           if isinstance(handler, urllib.request.ProxyHandler)]
+                self.assertEqual([type(handler) for handler in proxies], [nativenet.ProxyHandler])
+        loopback = guard.Fetcher({"127.0.0.1:1"})._opener("http://127.0.0.1:1/x")
+        self.assertFalse(any(isinstance(handler, urllib.request.ProxyHandler) for handler in loopback.handlers),
+                         "an empty mapping still makes a loopback fetch bypass every proxy")
+
 
 if __name__ == "__main__":
     unittest.main()

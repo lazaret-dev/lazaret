@@ -18,7 +18,9 @@ python3 scripts/gooracle/gooracle.py golden --oracle /tmp/gooracle-bin/gooracle 
 ```
 
 * `build` copies the `golang.org/x/mod` that every Go toolchain carries (`$GOROOT/src/cmd/vendor/golang.org/x/mod`; v0.22.0
-  in Go 1.24.7, the one the results below came from), puts `main.go` beside it and builds one binary.
+  in Go 1.24.7, the one the results below came from), puts `main.go` beside it and builds one binary. Its generated
+  `go.mod` declares the installed toolchain's major/minor language level rather than a fixed version, because newer
+  toolchains may ship vendored x/mod code that uses newer language features.
 * `diff` makes `--scale` thousand cases of each kind from a fixed seed, asks Go and asks the Python module, and compares:
   module paths (valid or not, the `!` escape, the split into path and major version), versions (valid, canonical, pseudo),
   the path-and-major check, zip member names (`CheckZip`), `go.mod` files (module, requirements, indirect marks), and the

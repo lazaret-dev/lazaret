@@ -12,6 +12,7 @@ scan reads parts of. What these tests hold it to:
 """
 
 import collections
+import datetime as _dt
 import io
 import json
 import os
@@ -1123,18 +1124,35 @@ class CliTests(feeds.Feeds):
         self.assertEqual(b.verify()["advisories"], 14)
 
     def test_a_scan_reads_the_two_formats_alike(self):
-        json_path = self.path("out", "cve-bundle.json")
-        self.assertEqual(self.update(bundle=json_path)[0], 0)
-        self.assertEqual(self.update("--bundle-format", "index")[0], 0)
-        root = self.project()
-        rc1, out1, err1, res1 = self.report(json_path, root)
-        rc2, out2, err2, res2 = self.report(self.out, root)
+        # The two reports each print the bundle's generatedAt, stamped at each update by the runner's
+        # clock (sca_feeds._utc_now): one second boundary between the two runs of this ~1s test and the
+        # assert fails on a timestamp, not on anything the two formats did differently. This leg of the
+        # CI matrix (python-unit windows/3.12, PR #22, run 41174963015, job 124460500275) failed on
+        # exactly that: '…:23:28Z' vs '…:23:29Z'. The clock is held here instead, so the stamp is part
+        # of the answer the formats are compared on, not of when the machine happened to run.
+        held = _dt.datetime.now(_dt.timezone.utc)
+        with mock.patch.object(sca_feeds, "_utc_now", lambda: held):
+            json_path = self.path("out", "cve-bundle.json")
+            self.assertEqual(self.update(bundle=json_path)[0], 0)
+            self.assertEqual(self.update("--bundle-format", "index")[0], 0)
+            root = self.project()
+            rc1, out1, err1, res1 = self.report(json_path, root)
+            rc2, out2, err2, res2 = self.report(self.out, root)
         self.assertEqual((rc1, rc2), (0, 0), (err1, err2))
         self.assertEqual(res1["issues"], res2["issues"])
         self.assertEqual(res1["conditions"], res2["conditions"])
         self.assertEqual(res1["pass"], res2["pass"])
         self.assertTrue(len(res2["issues"]) >= 4)
         self.assertEqual(out1.replace("cve-bundle.json", "X"), out2.replace("cve-bundle.lzx", "X"))
+
+    def test_the_bundle_stamp_comes_from_the_module_s_clock(self):
+        # The fixed test above holds sca_feeds._utc_now; that only works while the stamp really
+        # flows through the module's clock. If a refactor ever inlines datetime.now() into
+        # build_bundle, this fails first, instead of the flake quietly coming back.
+        held = _dt.datetime(2026, 10, 31, 23, 28, 59, tzinfo=_dt.timezone.utc)
+        with mock.patch.object(sca_feeds, "_utc_now", lambda: held):
+            doc, _ = sca_feeds.build_bundle(osv_url=self.osv, kev_urls=[self.kev], epss_url=self.epss)
+        self.assertEqual(doc["generatedAt"], "2026-10-31T23:28:59Z")
 
     def test_update_then_scan_in_one_run(self):
         root = self.project()

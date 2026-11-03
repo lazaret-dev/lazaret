@@ -727,8 +727,9 @@ class InstallTests(EditorCase):
     def test_a_file_of_another_extension_or_version_is_blocked(self):
         self.gallery.add("a.b", "1.0.0")
         e = self.gallery.entries[0]
-        self.gallery.files[e["files"]["download"]] = ext_file("a.b", "0.9.0")
-        self.gallery.files[e["files"]["sha256"]] = hashlib.sha256(ext_file("a.b", "0.9.0")).hexdigest().encode()
+        data = ext_file("a.b", "0.9.0")
+        self.gallery.files[e["files"]["download"]] = data
+        self.gallery.files[e["files"]["sha256"]] = hashlib.sha256(data).hexdigest().encode()
         self.assertEqual(self.run_guard("--install-extension", "a.b"), G.EXIT_BLOCKED)
         self.assertIn("the file is a.b@0.9.0, not the version the registry named", self.out)
 
