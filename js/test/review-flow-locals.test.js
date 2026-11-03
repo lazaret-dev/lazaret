@@ -158,9 +158,9 @@ test("nested bindings and deep scopes stay linear", () => {
     sinks: "function f(p) {\n const q = p;\n" + "exec(".repeat(20000) + "q" + ")".repeat(20000) + "\n}\n",
   };
   for (const [label, src] of Object.entries(cases)) {
-    const t = Date.now();
+    const t = performance.now();
     analyzeFlows([{ path: "a.js", content: src, lang: "js" }]);
-    assert.ok(Date.now() - t < 20000, label);
+    assert.ok(performance.now() - t < 20000, label);
   }
 });
 

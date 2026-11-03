@@ -84,9 +84,9 @@ test("bounded work on hostile files", () => {
   ];
   for (const text of texts) {
     for (const lang of ["py", "js"]) {
-      const t0 = Date.now();
+      const t0 = performance.now();
       taintScan(`x.${lang}`, text.split("\n"), lang);
-      assert.ok(Date.now() - t0 < 10_000, `${text.slice(0, 30)} ${lang}`);
+      assert.ok(performance.now() - t0 < 10_000, `${text.slice(0, 30)} ${lang}`);
     }
   }
 });

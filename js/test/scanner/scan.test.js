@@ -81,9 +81,9 @@ test("a key right after its header is a key, and past one without, the line's ot
 
 test("a line of many headers is read in one walk", () => {
   // 60,000 headers without their keys, then an AWS key (searching the line again from each header took over 45 s)
-  const t0 = Date.now();
+  const t0 = performance.now();
   assert.deepEqual(tokenLines(`a = 1;\n${`x="${HEADER}")x(`.repeat(60_000)}"${AWS}"\n`, "js", "dist/x.js"), [2]);
-  assert.ok(Date.now() - t0 < 10_000);
+  assert.ok(performance.now() - t0 < 10_000);
 });
 
 test("Windows line endings change nothing: nosec still suppresses", () => {
