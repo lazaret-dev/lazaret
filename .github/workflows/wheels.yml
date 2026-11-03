@@ -196,21 +196,24 @@ jobs:
   macos-windows:
     name: library (${{ matrix.tag }})
     # The native ARM64 Mac library uses our disposable Apple-silicon pool for
-    # trusted Lazaret work. The Intel library remains on a real hosted Intel
-    # Mac until its build and load checks have a separately validated Rosetta
-    # toolchain.
+    # trusted branch and PR checks. Tags are release inputs, so every release
+    # wheel is built on GitHub-hosted infrastructure. The Intel library remains
+    # on a real hosted Intel Mac until its build and load checks have a
+    # separately validated Rosetta toolchain.
     runs-on: >-
       ${{
         matrix.tag == 'macosx_11_0_arm64' &&
         (
-          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          github.event_name == 'push' &&
+          github.repository == 'lazaret-dev/lazaret' &&
+          !startsWith(github.ref, 'refs/tags/') ||
           (
             github.event_name == 'pull_request' &&
             github.event.pull_request.head.repo.full_name == github.repository &&
             github.actor == 'johnabooth-afk'
           )
         ) &&
-        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        fromJSON('["self-hosted","macOS","ARM64","lazaret-tart"]') ||
         matrix.runner
       }}
     # (the Python suite alone took some 20 minutes on win_amd64, PR #17's
@@ -261,7 +264,9 @@ jobs:
           python-version: "3.12"
       - name: Rust toolchain for the disposable self-hosted runner
         if: runner.environment == 'self-hosted'
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 action, 2026-10-16
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
       - name: Rust ${{ env.RUST_VERSION }}
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET" --no-self-update
       - name: Build
@@ -342,14 +347,16 @@ jobs:
       ${{
         matrix.tag == 'macosx_11_0_arm64' &&
         (
-          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          github.event_name == 'push' &&
+          github.repository == 'lazaret-dev/lazaret' &&
+          !startsWith(github.ref, 'refs/tags/') ||
           (
             github.event_name == 'pull_request' &&
             github.event.pull_request.head.repo.full_name == github.repository &&
             github.actor == 'johnabooth-afk'
           )
         ) &&
-        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        fromJSON('["self-hosted","macOS","ARM64","lazaret-tart"]') ||
         matrix.runner
       }}
     timeout-minutes: 15

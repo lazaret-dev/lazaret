@@ -313,7 +313,11 @@ class NpmEngineTests(unittest.TestCase):
                 runs += 1
                 with self.subTest(workflow=name, job=job):
                     before = text[:at]
-                    self.assertIn("rustup target add wasm32-unknown-unknown", before)
+                    self.assertTrue(
+                        "rustup target add wasm32-unknown-unknown" in before
+                        or re.search(r"(?m)^\s+targets: wasm32-unknown-unknown$", before),
+                        "the WebAssembly target is not installed",
+                    )
                     self.assertIn("npm run build", before)
                     self.assertIn("n.available()", before, "the parity modules would skip silently")
         self.assertEqual(runs, 2)             # ci.yml's js and rust jobs
