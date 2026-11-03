@@ -192,9 +192,9 @@ test("texts built to make the follower work cost about one pass", () => {
     ("eval(" + "x".repeat(400) + "fetch(u)" + ");").repeat(500),
     "shell=True\n" + ("run(".repeat(100) + "fetch(u);").repeat(500),
   ];
-  const start = Date.now();
+  const start = performance.now();
   for (const text of shapes) assert.equal(runsReceivedCode(text), null);
-  assert.ok(Date.now() - start < 30000);
+  assert.ok(performance.now() - start < 30000);
 });
 
 test("a download substituted into a shell's or an interpreter's command line", () => {

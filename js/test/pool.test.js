@@ -116,10 +116,10 @@ test("workers that could not start send their tasks back at once, to be run here
   const empty = new WebAssembly.Module(new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]));   // (no engine in it)
   const pool = new Pool(2, empty);
   try {
-    const started = Date.now();
+    const started = performance.now();
     const tasks = [1, 2, 3, 4, 5].map((n) => ["scan", n]);
     assert.deepEqual(mapTasks(pool, tasks, ([, n]) => n * 10, () => "error"), [10, 20, 30, 40, 50]);
-    assert.ok(Date.now() - started < 10_000);              // (not the wait for workers that never answer)
+    assert.ok(performance.now() - started < 10_000);       // (not the wait for workers that never answer)
     assert.deepEqual(mapTasks(pool, tasks.slice(0, 2), ([, n]) => -n, () => "error"), [-1, -2]);
   } finally {
     pool.close();

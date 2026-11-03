@@ -111,9 +111,9 @@ test("a private-key header's key comes right after it (S-TOKEN-PEM; test_private
   assert.deepEqual(found("f.pem", `${RSA_HEADER}\n\n\n${BODY}\n${RSA_FOOTER}\n`), []);
   // 60,000 headers without their keys on one line, then an AWS key: one walk, each header's key looked for in place
   const many = `x="${HEADER}")x(`.repeat(60_000) + '"AKI' + 'AQWERTYUIOPASDFGH"';
-  const t0 = Date.now();
+  const t0 = performance.now();
   assert.deepEqual(found("x.env", `a = 1\n${many}\n`), [2]);
-  assert.ok(Date.now() - t0 < 10_000);
+  assert.ok(performance.now() - t0 < 10_000);
 });
 
 test("scanConfigFile: tokens everywhere, secrets outside comments, markers in comments only", () => {
@@ -183,9 +183,9 @@ test("npm's access tokens, Anthropic's and OpenAI's keys (V-2)", () => {
 test("linear time on hostile lines", () => {
   for (const line of ["a".repeat(2_000_000), "a=".repeat(1_000_000), 'k="'.repeat(700_000),
     "x://".repeat(500_000), "a:b@".repeat(500_000), ("-".repeat(127) + "=").repeat(15_000)]) {
-    const t0 = Date.now();
+    const t0 = performance.now();
     secretCol(line); redactConfigValues(line); configCommentSpans(line);
-    assert.ok(Date.now() - t0 < 10_000, line.slice(0, 12));
+    assert.ok(performance.now() - t0 < 10_000, line.slice(0, 12));
   }
 });
 

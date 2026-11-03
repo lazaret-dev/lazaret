@@ -56,7 +56,8 @@ test("a leading \\b that may match zero characters keeps both sides", () => {
 test("a 2 MB minified bundle with one non-ASCII character scans quickly", () => {
   const unit = 'var e=function(t,n){return t.exec(n)||o.get(n,"key→")},r=a.b.c;';
   const content = unit.repeat(Math.ceil(2e6 / unit.length)) + "\n";
-  const t = Date.now();
+  const t = performance.now();
   scanFile({ path: "bundle.js", content, lang: "js", dep: true });
-  assert.ok(Date.now() - t < 2000, `${Date.now() - t} ms (was about 4,000)`);
+  const elapsed = performance.now() - t;
+  assert.ok(elapsed < 2000, `${elapsed} ms (was about 4,000)`);
 });

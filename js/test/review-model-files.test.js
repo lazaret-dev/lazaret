@@ -270,9 +270,9 @@ test("a 200 MB checkpoint is read by range (a .pth one's lines in chunks): quiet
       writeParts(join(d, ...rel.split("/")), parts);
       assert.ok(statSync(join(d, ...rel.split("/"))).size > 200_000_000);
     }
-    const t = Date.now();
+    const t = performance.now();
     const code = run(["check", d, "-q", "--no-html", "--deps"], { out: () => {}, err: () => {} });
-    const took = Date.now() - t;
+    const took = performance.now() - t;
     const issues = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8")).issues;
     const got = sc(issues);
     assert.deepEqual(got.filter(([f]) => f === "w/model.pt" || f === "w/model.pth"), []);

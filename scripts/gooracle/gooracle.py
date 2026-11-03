@@ -8,6 +8,8 @@ tests read.
 
 `build` needs `go` (1.22 or later) and nothing from the network: every Go toolchain carries x/mod under
 `$GOROOT/src/cmd/vendor`, and `main.go` here is a program over its module, semver, modfile, zip and sumdb packages. The
+generated module declares the installed toolchain's major/minor language level, so a newer vendored x/mod may use the
+language features shipped with that toolchain. The
 tests never run Go; they read what `golden` wrote. `golden` needs `git` and the network (three small repositories at
 tags) and checks the module zips it builds against the hashes real go.sum files carry (PUBLISHED below), so what is
 committed is real data and a drift in either tool is found.
@@ -51,6 +53,19 @@ KEEP_ZIPS = ("github.com/pmezard/go-difflib", "github.com/pkg/errors")          
 
 
 # ---------------------------------------------------------------- the oracle
+def toolchain_language(go):
+    """The installed Go toolchain's major.minor language version."""
+    done = subprocess.run([go, "env", "GOVERSION"], capture_output=True, encoding="utf-8", errors="replace")
+    match = re.search(r"(?:^|\s)go(\d+)\.(\d+)", done.stdout)
+    if done.returncode != 0 or not match:
+        detail = done.stderr.strip() or done.stdout.strip() or "no version returned"
+        raise SystemExit("could not determine the Go toolchain version: " + detail[:500])
+    version = tuple(map(int, match.groups()))
+    if version < (1, 22):
+        raise SystemExit("the Go oracle needs Go 1.22 or later (found %d.%d)" % version)
+    return "%d.%d" % version
+
+
 class Oracle:
     def __init__(self, path):
         self.path = path
@@ -76,6 +91,7 @@ def build(out):
     go = shutil.which("go")
     if not go:
         raise SystemExit("go is not installed")
+    language = toolchain_language(go)
     goroot = subprocess.run([go, "env", "GOROOT"], capture_output=True, encoding="utf-8", errors="replace").stdout.strip()
     vendored = os.path.join(goroot, "src", "cmd", "vendor", "golang.org", "x", "mod")
     if not os.path.isdir(vendored):
@@ -83,7 +99,7 @@ def build(out):
     work = tempfile.mkdtemp(prefix="gooracle-")
     shutil.copytree(vendored, work, dirs_exist_ok=True)
     with open(os.path.join(work, "go.mod"), "w", encoding="utf-8", newline="\n") as fh:
-        fh.write("module golang.org/x/mod\n\ngo 1.22\n")
+        fh.write(f"module golang.org/x/mod\n\ngo {language}\n")
     os.makedirs(os.path.join(work, "cmd", "ref"))
     shutil.copy(os.path.join(HERE, "main.go"), os.path.join(work, "cmd", "ref", "main.go"))
     target = os.path.join(out, "gooracle")
