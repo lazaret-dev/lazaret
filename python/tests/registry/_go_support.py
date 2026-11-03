@@ -18,6 +18,8 @@ import threading
 import urllib.parse
 import zipfile
 
+from tests import _support
+
 NOW = datetime.datetime.now(datetime.timezone.utc)
 OLD = NOW - datetime.timedelta(days=30)
 FRESH = NOW - datetime.timedelta(hours=1)
@@ -270,9 +272,10 @@ sys.exit(code)
 
 
 def install_fake_go(folder):
-    """Put a fake `go` in `folder` (and so on PATH, when it is put there) -> its path."""
+    """Put a fake `go` in `folder` (and so on PATH, when it is put there) -> the path that runs it: on Windows a `go.cmd` beside
+    it (_support.runnable), which the guard finds on PATH before the real go.exe of a later folder."""
     path = os.path.join(folder, "go")
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(FAKE_GO.replace("@@PYTHON@@", sys.executable))
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return path
+    return _support.runnable(path)

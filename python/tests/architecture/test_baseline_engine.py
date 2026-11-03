@@ -379,13 +379,18 @@ class Scenarios:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+#: the reasons 3.10 to 3.12 word otherwise than 3.13, whose words the engine gives: an int past 4,300 digits
+#: ("Exceeds the limit (4300)" on 3.10, "(4300 digits)" since), and a string a bad \\u escape ends ("Invalid
+#: \\uXXXX escape" where 3.13 says "Unterminated string"; CI's python-unit, Oct 29)
+WORDED_OTHERWISE = (": Exceeds the limit (4300", ": Invalid \\uXXXX escape", ": Unterminated string starting at")
+
+
 def reason_cut(text, path):
-    """`text` with a "could not read baseline" line cut after its path. The engine words json's and int's errors as
-    Python 3.13 does, and 3.10 to 3.12 word two otherwise: an int past 4,300 digits ("Exceeds the limit (4300)" on
-    3.10), and a string a bad \\u escape ends ("Invalid \\uXXXX escape" where 3.13 says "Unterminated string"; CI's
-    python-unit, Oct 29). On those, that the baseline is refused is compared, and on 3.13 and later its words too."""
-    head = f"warning: could not read baseline {path}: "
-    return "\n".join(line[:len(head)] if line.startswith(head) else line for line in text.split("\n"))
+    """`text` with a "could not read baseline" line whose reason is one WORDED_OTHERWISE cut after its path: on those
+    Pythons, that the baseline is refused is compared there, and every other line and reason word for word."""
+    head = f"warning: could not read baseline {path}"
+    return "\n".join(head if line.startswith(head) and any(w in line for w in WORDED_OTHERWISE) else line
+                     for line in text.split("\n"))
 
 
 class ApplyTests(unittest.TestCase):

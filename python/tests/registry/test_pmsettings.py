@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from lazaret.registry import pmsettings as pm
 
@@ -67,6 +68,19 @@ class CredentialsTests(unittest.TestCase):
                          ("https://h.example:8443/simple/", ("u", "p@ss")))
         self.assertEqual(pm.split_userinfo("https://h.example/x"), ("https://h.example/x", None))
         self.assertEqual(pm.shown("https://token@h.example/x"), "https://h.example/x")
+
+    def test_printed_urls_drop_query_values_and_fragments(self):
+        url = "https://user:password@h.example:8443/pkg?X-Amz-Signature=query-canary&unknown=opaque#fragment-canary"
+        self.assertEqual(pm.shown(url), "https://h.example:8443/pkg [query redacted]")
+        self.assertEqual(pm.shown("https://h.example/pkg#fragment-canary"), "https://h.example/pkg")
+        self.assertEqual(pm.shown("https://h.example/pkg?"), "https://h.example/pkg [query redacted]")
+        self.assertIsNone(pm.shown(None))
+
+    def test_a_malformed_url_still_does_not_show_userinfo_or_a_query(self):
+        shown = pm.shown("https://user:password@[broken/pkg?token=query-canary#fragment-canary")
+        self.assertEqual(shown, "https://[broken/pkg [query redacted]")
+        for secret in ("user", "password", "query-canary", "fragment-canary"):
+            self.assertNotIn(secret, shown)
 
 
 #: one host's npm keys, and the key each request path gets: the same table is in lazaret-net's tests
@@ -274,6 +288,20 @@ class NpmrcTests(unittest.TestCase):
             got = pm.npmrc_settings(paths, env)
             self.assertEqual(got["//reg.example/:_authToken"], "project")
             self.assertEqual(got["//other.example/:_authToken"], "user")
+
+    def test_pnpm_listing_does_not_replace_a_trusted_files_credential(self):
+        with tempfile.TemporaryDirectory() as d:
+            project, userconfig = os.path.join(d, "project"), os.path.join(d, "user.npmrc")
+            os.makedirs(project)
+            with open(userconfig, "w", encoding="utf-8") as f:
+                f.write("//reg.example/:_authToken=${TOKEN}\n")
+            listed = {"registry": "https://reg.example/", "//reg.example/:_authToken": "[protected]",
+                      "//listed.example/:_authToken": "listed-only"}
+            env = {"HOME": d, "TOKEN": TOKEN, "NPM_CONFIG_USERCONFIG": userconfig}
+            with mock.patch.object(pm, "run_json", return_value=listed):
+                got = pm.npm_tool_settings("pnpm", "pnpm", env, project, project)
+            self.assertEqual(got["//reg.example/:_authToken"], TOKEN)
+            self.assertEqual(got["//listed.example/:_authToken"], "listed-only")
 
 
 class YarnAndBunTests(unittest.TestCase):

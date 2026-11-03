@@ -252,14 +252,27 @@ class AsJavaReadsTheProperties(unittest.TestCase):
         self.assertEqual(found(scan({JAR: genuine("8.14"), PROPS: hostile("fits")})), set())
 
     def test_a_symbolic_link_java_follows(self):
-        root = tree({JAR: genuine("8.14"), "elsewhere.properties": props("8.14")})
-        try:
-            os.symlink(os.path.join(root, "elsewhere.properties"), os.path.join(root, *PROPS.split("/")))
-            res = core.scan_project(root)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-        self.assertEqual(found(res), {(JAR, "SC-GRADLE-WRAPPER", "MAJOR")})
-        self.assertIn("was not read", next(i["msg"] for i in res["issues"] if i["rule"] == "SC-GRADLE-WRAPPER"))
+        # Where a file is opened beneath the root's folders with no link followed, the scan does not read the
+        # properties a link names: the jar can't be verified. Where a file is opened by its path (Windows: no such
+        # open), the link is followed and what it reaches kept only when it is under the root (core._open_verified):
+        # the properties judged are those Java reads, genuine or not.
+        for target, want in ((props("8.14"), set()), (hostile("crlf"), {(JAR, "SC-GRADLE-WRAPPER", "MAJOR")})):
+            root = tree({JAR: genuine("8.14"), "elsewhere.properties": target})
+            try:
+                os.symlink(os.path.join(root, "elsewhere.properties"), os.path.join(root, *PROPS.split("/")))
+                res = core.scan_project(root)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+            with self.subTest(target=target.splitlines()[0]):
+                if core._ANCHORED_OPEN:
+                    self.assertEqual(found(res), {(JAR, "SC-GRADLE-WRAPPER", "MAJOR")})
+                    self.assertIn("was not read",
+                                  next(i["msg"] for i in res["issues"] if i["rule"] == "SC-GRADLE-WRAPPER"))
+                else:
+                    self.assertEqual(found(res), want)
+                    if want:
+                        self.assertIn("plain HTTP",
+                                      next(i["msg"] for i in res["issues"] if i["rule"] == "SC-GRADLE-WRAPPER"))
 
 
 class Dependencies(unittest.TestCase):

@@ -19,9 +19,9 @@ TOKEN = "lz-" + "t0ken" + "-" + "9f8e7d"          # (built in pieces: a whole on
 
 class PrivateRegistryTests(unittest.TestCase):
     """A registry that answers only with a token: the guard fetches with the
-    credentials each tool's own settings give (npm's and pnpm's .npmrc with
-    ${VAR}, yarn 1's .npmrc, yarn 2+'s .yarnrc.yml, bunfig.toml), sends them
-    to that registry, and never prints them."""
+    credentials each tool's own settings give (npm's project .npmrc, pnpm's
+    trusted user .npmrc, yarn 1's .npmrc, yarn 2+'s .yarnrc.yml,
+    bunfig.toml), sends them to that registry, and never prints them."""
 
     @classmethod
     def setUpClass(cls):
@@ -56,9 +56,16 @@ class PrivateRegistryTests(unittest.TestCase):
     def test_npm(self):
         self.check(self.npmrc_project(), self.env, "npm", "install", "good-pkg")
 
-    @unittest.skipUnless(shutil.which("pnpm"), "pnpm is not installed")
+    @unittest.skipUnless(gs.pnpm_ready(), "pnpm is not installed and runnable")
     def test_pnpm(self):
-        self.check(self.npmrc_project(), self.env, "pnpm", "add", "good-pkg")
+        d = gs.project(self.tmp)
+        with open(os.path.join(d, ".npmrc"), "w", encoding="utf-8") as f:
+            f.write(f"registry={self.registry.url}\n")
+        userconfig = os.path.join(self.tmp, "pnpm-user.npmrc")
+        with open(userconfig, "w", encoding="utf-8") as f:
+            f.write(f"//{self.host}:_authToken=${{LZ_TEST_TOKEN}}\n")
+        env = dict(self.env, NPM_CONFIG_USERCONFIG=userconfig, PNPM_CONFIG_NPMRC_AUTH_FILE=userconfig)
+        self.check(d, env, "pnpm", "add", "good-pkg")
 
     @unittest.skipUnless(yarn_major() == 1, "yarn 1 is not installed")
     def test_yarn_classic(self):

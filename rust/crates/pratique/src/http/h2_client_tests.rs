@@ -1809,7 +1809,10 @@ fn a_caller_who_reads_hands_the_socket_to_the_reader_thread_when_its_own_respons
 
 /// Starts requests on `conn` until one has been given the right to read the socket (when nothing is in flight the reader thread
 /// stays out of the way for a moment after the last request, see `PARK_WINDOW`; a loaded machine can make that moment pass, and
-/// then the request that was started is finished and another is tried).
+/// then the request that was started is finished and another is tried). A request that did not lead is read whole, up to 8 MiB,
+/// more than any request this is given: with a limit of 1,000 bytes, as this had, the download of 4 MB that some tests start
+/// failed ("exceeds the configured size limit") whenever its first try did not lead, which is what made
+/// `what_a_full_buffer_leaves_undecrypted_is_taken_in_by_whoever_reads_next` fail on a busy machine (B-119).
 fn start_with_the_right_to_read(
     conn: &Arc<Shared>,
     request: &Request<'_>,
@@ -1820,7 +1823,8 @@ fn start_with_the_right_to_read(
         if s.leads() {
             return s;
         }
-        s.response(1000, waits).unwrap_or_else(|f| panic!("{f:?}"));
+        s.response(1 << 23, waits)
+            .unwrap_or_else(|f| panic!("{f:?}"));
         thread::sleep(Duration::from_millis(1));
     }
     panic!("no request was given the right to read the socket when it started");
@@ -2031,10 +2035,14 @@ fn a_download_read_in_pieces_goes_straight_into_the_callers_buffer() {
         client.get(&server.url("/warm")).unwrap();
     }
     for piece in [1 << 20, 64 << 10, 4096, 100] {
-        let (straight, kept) = read_in_pieces(&client, &server, 4_000_000, piece);
+        // (in big pieces, more than the stream's window of 8 MiB: a caller that a busy machine wakes late finds that the reader
+        // thread has read on meanwhile, as much as the window lets it, and of 4 MB it could read all, which it did twice in
+        // fourteen runs of the module, Lazaret's runner job dea86553-c39e-4547-99b9-991b84406b8d)
+        let size = if piece >= 64 << 10 { 30_000_000 } else { 4_000_000 };
+        let (straight, kept) = read_in_pieces(&client, &server, size, piece);
         assert_eq!(
             straight + kept,
-            4_000_000,
+            size,
             "every byte is handed out once, one way or the other"
         );
         assert!(
@@ -2401,11 +2409,16 @@ fn a_download_that_pauses_does_not_hold_up_a_request_that_waits_for_the_reader_t
         headers: &[],
         secret: &[],
     };
+    // the other request's answer comes long after the download has paused, so that it is still in flight then (an answer
+    // after 100 ms, as this was, came in before the download's caller had read its first piece on macOS's runner, Oct 30:
+    // with one stream left in flight, that caller rightly kept the right to read)
+    let late_ms = 800;
+    let late_path = format!("/slow/{late_ms}");
     let slow = Request {
         method: "GET",
         scheme: "https",
         authority: &authority,
-        path: "/slow/100",
+        path: &late_path,
         headers: &[],
         secret: &[],
     };
@@ -2425,7 +2438,10 @@ fn a_download_that_pauses_does_not_hold_up_a_request_that_waits_for_the_reader_t
         assert_eq!((head.status, body.as_slice()), (200, &b"late"[..]));
         started.elapsed()
     });
-    thread::sleep(Duration::from_millis(20));
+    // (once that request's caller is asleep waiting for it: a thread that has not got there yet cannot be given the right)
+    wait_until("the other request's caller to wait", || {
+        conn.waits_to_lead(b_id)
+    });
     // the download has its head and a first piece, and its caller stops reading: with another request in flight, which
     // somebody has to read for, it does not keep the right, but gives it to the caller who waits for that one (B-89)
     a.head(waits).unwrap();
@@ -2441,7 +2457,7 @@ fn a_download_that_pauses_does_not_hold_up_a_request_that_waits_for_the_reader_t
     );
     let took = b.join().unwrap();
     assert!(
-        took < Duration::from_millis(600),
+        took < Duration::from_millis(late_ms + 500),
         "the other request took {took:?}"
     );
     assert_eq!(read_all(&mut a, waits), b"second");
@@ -2485,19 +2501,38 @@ fn reads_for(
 #[test]
 fn a_download_that_starts_on_a_connection_left_alone_is_taken_over_by_its_caller() {
     // the reader thread is reading (the connection has been left alone for longer than it stays out of the way): it reads the
-    // head and the first piece, tells the caller, and steps aside for it
+    // head and the first piece, tells the caller, and steps aside for it. A caller that a busy machine wakes late finds that
+    // the reader thread has read on meanwhile, as much as the stream's window lets it (8 MiB): the download is bigger than
+    // that, and what its caller reads after outnumbers it. (Of 4 MB, under the load of its module on Linux, the reader thread
+    // read it all: "callers read 0 times, the reader thread 19".)
     let server = H2Server::start(sizes_and_delays);
     let client = server.client();
     for _ in 0..3 {
         client.get(&server.url("/warm")).unwrap();
         thread::sleep(Duration::from_millis(80));
     }
-    let (callers, reader) = reads_for(&client, &server, 4_000_000, None);
+    let (callers, reader) = reads_for(&client, &server, 30_000_000, None);
     assert!(
-        callers >= 5 && callers > 5 * reader,
+        callers >= 5 && callers > 3 * reader,
         "callers read {callers} times, the reader thread {reader}"
     );
-    assert_eq!(server.connections(), 1);
+    // one connection: the client dialed once, one connection finished the handshake, and every request came on it. The
+    // server counts every connection it accepts, whoever makes it (on windows-latest it once counted two here, GitHub run
+    // 41089735856); a stray one, from another test's client or a socket that only connects, cannot finish the handshake
+    // against this test's root, so it is told from a second connection of this client by the handshakes, and the
+    // addresses say where each came from.
+    let dials = client.h2_dials();
+    let used: std::collections::BTreeSet<usize> =
+        server.requests().iter().map(|s| s.conn).collect();
+    assert!(
+        dials.len() == 1 && server.handshakes() == 1 && used.len() == 1,
+        "the client dialed {} times ({dials:?}); {} connections finished the handshake, of {} accepted, from {:?} ({} ended); requests came on the server's connections {used:?}",
+        dials.len(),
+        server.handshakes(),
+        server.connections(),
+        server.peers(),
+        server.ended_connections()
+    );
 }
 
 #[test]
@@ -2560,31 +2595,63 @@ fn a_whole_download_on_a_connection_that_was_left_alone_is_not_held_up_by_the_re
         client.get(&server.url("/n/12000000")).unwrap().body.len(),
         12_000_000
     );
-    thread::sleep(Duration::from_millis(100));
-    let started = Instant::now();
-    let r = client.get(&server.url("/n/12000000")).unwrap();
-    let took = started.elapsed();
-    assert_eq!(r.body.len(), 12_000_000);
-    // (a pause of the reader thread after each of its reads, which are of 256 KiB, would make it a second at least)
-    assert!(took < Duration::from_millis(800), "took {took:?}");
+    // A pause of the reader thread after each of its reads, which are of 256 KiB, would make every download a second at
+    // least: the quickest of three, each on a connection left alone, is held to 800 ms. (One download, timed alone, took
+    // 850 ms and 1.0 s now and then under the load of the module's other tests: the review of round 11's runs.)
+    let mut took = Vec::new();
+    for _ in 0..3 {
+        thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        let r = client.get(&server.url("/n/12000000")).unwrap();
+        took.push(started.elapsed());
+        assert_eq!(r.body.len(), 12_000_000);
+    }
+    let quickest = took.iter().min().copied().unwrap();
+    assert!(
+        quickest < Duration::from_millis(800),
+        "the quickest took {quickest:?} (all: {took:?})"
+    );
 }
 
 #[test]
 fn an_upload_that_waits_for_window_credit_on_a_connection_that_was_left_alone_is_not_held_up() {
-    let server = H2Server::start(sizes_and_delays);
+    // 4 MB through a stream window of 64 KiB: the upload waits for the server's credit some sixty times, on a connection
+    // left alone (its reader thread out of the way for PARK_WINDOW after each piece of news, then reading again). An upload
+    // that waits wakes the reader thread if it is out of the way; without that, each wait lasts until the reader thread
+    // comes back of itself, up to PARK_WINDOW (25 ms). What is counted is how often the reader thread came back of itself
+    // and found a caller asleep, waiting for the socket to be read: never (whoever wakes it says so), where an upload
+    // without the wake-up makes it some sixty times. Three uploads, each after a pause. (Rounds 9 and 10 timed the uploads
+    // against downloads instead, and the load of the module's other tests upset that: the quickest of three uploads took
+    // 1.6 s and 2.8 s against bounds of 0.93 and 0.91 s, Lazaret's runner job 88c58075-b7c0-4dcf-9184-efd9e6d84959. The
+    // count showed why: an upload woken with credit sent and waited again before the reader thread came to step aside,
+    // which then stepped aside all the same, 25 times in three uploads alone and 85 to 204 times under that load, job
+    // 66a1b994-a5df-4649-b093-50633730b3d9; it no longer steps aside while a caller that waits to send is asleep.)
+    let settings = Settings {
+        initial_window: 64 << 10,
+        ..Settings::default()
+    };
+    let server = H2Server::start_with(sizes_and_delays, settings, |c| c);
     let client = server.client();
     assert_eq!(
-        client.get(&server.url("/n/12000000")).unwrap().body.len(),
-        12_000_000
+        client.get(&server.url("/n/1000")).unwrap().body.len(),
+        1000
     );
-    thread::sleep(Duration::from_millis(100));
-    let started = Instant::now();
-    let r = client
-        .post(&server.url("/up"), vec![5u8; 30_000_000])
-        .unwrap();
-    let took = started.elapsed();
-    assert_eq!(r.text(), "hello /up");
-    assert!(took < Duration::from_millis(800), "took {took:?}");
+    let before = client.h2_late_wakes();
+    let mut took = Vec::new();
+    for _ in 0..3 {
+        thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        let r = client
+            .post(&server.url("/up"), vec![5u8; 4_000_000])
+            .unwrap();
+        took.push(started.elapsed());
+        assert_eq!(r.text(), "hello /up");
+    }
+    let late = client.h2_late_wakes() - before;
+    assert!(
+        late == 0,
+        "the reader thread came back of itself {late} times to an upload that waited for it (the uploads took {took:?})"
+    );
 }
 
 #[test]

@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from lazaret.scanner import core
 from tests.registry import _review_support as rs
@@ -98,6 +99,52 @@ class ManifestTests(unittest.TestCase):
     def test_a_manifest_with_no_such_dependency(self):
         text = manifest(dependencies={k: v for k, v in zip("abcdefghijklmnopq", QUIET) if isinstance(v, str)})
         self.assertEqual(found("package.json", text, True), [])
+
+
+class WindowsPathTests(unittest.TestCase):
+    """WIN-DEP-PATHS: on Windows the walk names a dependency's fixture node_modules\\dep\\test\\package.json
+    (os.sep), which the engine read '/'-separated as a manifest at the top of a package, so --deps reported the
+    fixture's dependencies there alone (test_js_parity_dep_url, PR #17's windows-latest job). The walk's paths go
+    with `windows` on Windows; elsewhere, and in a registry's members, a backslash is a file name's. These run on
+    every system: the engine is given the Windows form."""
+
+    TEXT = manifest(dependencies={"f": "http:\x2f/fixture.invalid/f.tgz"},
+                    devDependencies={"z": "https://3405803783/z.tgz"})
+
+    def dep_url(self, path, registry, windows):
+        return len([i for i in core.scan_manifest(path, self.TEXT, registry=registry, windows=windows)
+                    if i["rule"] == "SC-DEP-URL"])
+
+    def test_a_windows_walks_path_is_read_with_its_separators(self):
+        for path, registry, want in (("node_modules\\dep\\test\\package.json", True, 0),   # a dependency's fixture
+                                     ("node_modules\\@s\\dep\\test\\package.json", True, 0),
+                                     ("node_modules\\dep\\package.json", True, 1),         # its root, not devDeps
+                                     ("a\\node_modules\\@s\\dep\\package.json", True, 1),
+                                     ("package.json", False, 2),                           # the project's own
+                                     ("packages\\web\\package.json", False, 2)):           # a workspace's
+            with self.subTest(path=path):
+                self.assertEqual(self.dep_url(path, registry, True), want)
+
+    def test_elsewhere_a_backslash_is_a_file_names(self):
+        # POSIX unchanged: one file at the top of the tree, or one folder's name
+        self.assertEqual(self.dep_url("node_modules\\dep\\test\\package.json", True, False), 1)
+        self.assertEqual(self.dep_url("node_modules/a\\b/package.json", True, False), 1)
+        self.assertEqual(self.dep_url("node_modules/a\\b/package.json", True, True), 0)
+        self.assertEqual(len([i for i in core.scan_manifest("node_modules\\dep\\test\\package.json", self.TEXT,
+                                                            registry=True) if i["rule"] == "SC-DEP-URL"]), 1)
+
+    def test_the_walks_manifests_go_with_the_hosts_separator(self):
+        entries = [{"path": "node_modules\\dep\\test\\package.json", "content": self.TEXT, "dep": True},
+                   {"path": "node_modules\\dep\\package.json", "content": self.TEXT, "dep": True},
+                   {"path": "package.json", "content": self.TEXT, "dep": False}]
+
+        def files(windows):
+            with mock.patch.object(core, "_WINDOWS_PATHS", windows):
+                return sorted(i["file"] for mf in entries for i in core._scan_manifest_entry(mf)
+                              if i["rule"] == "SC-DEP-URL")
+        self.assertEqual(files(True), ["node_modules\\dep\\package.json", "package.json", "package.json"])
+        self.assertEqual(files(False), ["node_modules\\dep\\package.json", "node_modules\\dep\\test\\package.json",
+                                        "package.json", "package.json"])
 
 
 class ScanTests(unittest.TestCase):

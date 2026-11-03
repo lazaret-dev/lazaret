@@ -14,6 +14,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 from tests import _support
 
@@ -162,6 +163,18 @@ class BuildTests(unittest.TestCase):
         }.items():
             with self.subTest(name), self.assertRaises(gen.BuildError):
                 self.build_from(modules)
+
+    def test_modules_on_another_drive_than_the_repository(self):
+        # (Windows: the temporary folder may be on another drive than the checkout, and os.path.relpath has no answer
+        # there: such a module is named by its whole path, and what the build refuses is still its BuildError)
+        gen = build()
+        drives = ValueError("path is on mount 'C:', start on mount 'D:'")
+        with mock.patch.object(os.path, "relpath", side_effect=drives):
+            script = self.build_from({"entry.js": 'import { ONE } from "./lib.js";\nconsole.log(ONE);\n',
+                                      "lib.js": "export const ONE = 1;\n"})
+            with self.assertRaisesRegex(gen.BuildError, "entry.js imports 'node:fs'"):
+                self.build_from({"entry.js": 'import { readFileSync } from "node:fs";\n'})
+        self.assertLess(script.index("/lib.js ======== */"), script.index("/entry.js ======== */"))
 
 
 if __name__ == "__main__":

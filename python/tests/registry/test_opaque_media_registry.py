@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 from tests import _media_files as mf
+from tests._support import native_rel
 from tests.registry._review_support import scan_npm, scan_sdist, scan_wheel
 
 SETUP = "from setuptools import setup\nsetup(name='x')\n"
@@ -99,7 +100,8 @@ class TheReviewsBounds(unittest.TestCase):
 
 class GitHubScans(unittest.TestCase):
     """The scan-all route of the tally: a repository's checkout scanned as a project, its verdict decided as a
-    registry's (ghdiscover.result)."""
+    registry's (ghdiscover.result). Its findings are at the checkout's files' paths, as a project scan reports them
+    (os.sep-separated: `native_rel`), not at an archive member's."""
 
     def verdict(self, files):
         from lazaret.registry import ghdiscover
@@ -119,13 +121,13 @@ class GitHubScans(unittest.TestCase):
         for path, data, want in (("music/music1.mp3", mf.raw_mp3(60), []),
                                  ("Tests/images/bw_gradient.imt", mf.imt_gradient(), []),
                                  ("signing/tiles-foss-debug.pkcs12", mf.pkcs12(),
-                                  [("signing/tiles-foss-debug.pkcs12", "S-SECRET", "BLOCKER")])):
+                                  [(native_rel("signing/tiles-foss-debug.pkcs12"), "S-SECRET", "BLOCKER")])):
             with self.subTest(path=path):
                 self.assertEqual(self.verdict({path: data, "README.md": "# x\n"}), ("OK", want))
 
     def test_a_payload_is_still_warn(self):
         self.assertEqual(self.verdict({"music/music1.mp3": mf.appended(mf.raw_mp3(60))}),
-                         ("WARN", [("music/music1.mp3", "SC-OPAQUE-BLOB", "MAJOR")]))
+                         ("WARN", [(native_rel("music/music1.mp3"), "SC-OPAQUE-BLOB", "MAJOR")]))
 
     def test_the_reviews_shells_are_warn(self):
         # a Netpbm header on random bytes; free space then media data to the end, no movie; a big keystore
@@ -135,7 +137,7 @@ class GitHubScans(unittest.TestCase):
             with self.subTest(path=path):
                 verdict, got = self.verdict({path: data, "README.md": "# x\n"})
                 self.assertEqual(verdict, "WARN")
-                self.assertIn((path, "SC-OPAQUE-BLOB", "MAJOR"), got)
+                self.assertIn((native_rel(path), "SC-OPAQUE-BLOB", "MAJOR"), got)
 
 
 if __name__ == "__main__":

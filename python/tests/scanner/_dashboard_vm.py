@@ -99,3 +99,47 @@ def cli_result(files):
 
 def comparable(result, drop):
     return {k: v for k, v in result.items() if k not in drop}
+
+
+def as_the_cli_names_them(page, rels):
+    """The page's result with its files named as the CLI's project scan names them on this machine. The page names
+    a file as a browser gives it, '/'-separated; the CLI by its path below the folder it read, os.sep-separated
+    (core._collect), where it names one: a finding's file, perFile's keys, and the files' and folders' paths in a
+    finding's message (a cross-file flow's ends, an orphaned .pyc). The findings are then in the engine's order for
+    those names (result.rs `order`: severity, then file by code point, then line; stable). `rels`: the files given
+    ('/'-separated). Where os.sep is '/' the page's result is returned as it is: its order is held to the CLI's
+    there, untouched."""
+    if os.sep == "/":
+        return page
+
+    def native(path):
+        return path.replace("/", os.sep)
+    issues = page.get("issues", [])
+    named = set()
+    for path in list(rels) + [i["file"] for i in issues if isinstance(i.get("file"), str)]:
+        parts = path.split("/")
+        named.update("/".join(parts[:k]) for k in range(2, len(parts) + 1))     # (it and its folders, nested)
+    longest = sorted(named, key=len, reverse=True)
+
+    def in_text(text):
+        for path in longest:
+            text = text.replace(path, native(path))
+        return text
+
+    def renamed(i):
+        i = dict(i)
+        if isinstance(i.get("file"), str):
+            i["file"] = native(i["file"])
+        if isinstance(i.get("msg"), str):
+            i["msg"] = in_text(i["msg"])
+        return i
+    def order(i):
+        line = i.get("line")
+        return core.SEV_ORDER.get(i.get("sev"), len(core.SEV_ORDER)), i.get("file") or "", \
+            line if isinstance(line, int) else 0
+    out = dict(page)
+    if "perFile" in page:
+        out["perFile"] = {native(f): n for f, n in page["perFile"].items()}
+    if "issues" in page:
+        out["issues"] = sorted((renamed(i) for i in issues), key=order)
+    return out

@@ -156,7 +156,8 @@ resolving to one file. Writes are atomic
 - `.git` is never scanned. Dependency trees — `node_modules`,
   `bower_components`, `site-packages`, and `vendor`/`venv`/`.venv`/`env` when
   they look like one (`pyvenv.cfg`; `modules.txt`, `autoload.php`, a
-  `package.json` or `*.dist-info`/`*.egg-info` directly inside `vendor`) —
+  `package.json` or `*.dist-info`/`*.egg-info` directly inside `vendor`, or a
+  crate directory with `cargo vendor`'s `.cargo-checksum.json`) —
   are pruned unless `--deps` is given; with `--deps` their files get the
   supply-chain and secret rules only, each install hook of a dependency —
   package.json scripts, binding.gyp actions and the command expansions that

@@ -19,6 +19,7 @@ import threading
 import urllib.parse
 
 from lazaret.registry.ecosystems import crates
+from tests import _support
 
 NOW = datetime.datetime.now(datetime.timezone.utc)
 OLD = NOW - datetime.timedelta(days=30)
@@ -280,9 +281,10 @@ sys.exit(code)
 
 
 def install_fake_cargo(folder):
-    """Put a fake `cargo` in `folder` (and so on PATH, when it is put there) -> its path."""
+    """Put a fake `cargo` in `folder` (and so on PATH, when it is put there) -> the path that runs it: on Windows a `cargo.cmd`
+    beside it (_support.runnable), which the guard finds on PATH before the real cargo.exe of a later folder."""
     path = os.path.join(folder, "cargo")
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(FAKE_CARGO.replace("@@PYTHON@@", sys.executable))
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return path
+    return _support.runnable(path)

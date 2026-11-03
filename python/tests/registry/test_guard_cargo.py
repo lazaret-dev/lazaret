@@ -27,12 +27,15 @@ from unittest import mock
 
 from lazaret.registry import cargosrc, guard, pmsettings, prior, repo
 from lazaret.scanner import _native
+from tests import _support
 from tests.registry import _cargo_support as cs
 from tests.registry import _guard_support as gs
 from tests.registry.test_guard import options
 
 HEX = "ab" * 32
 OLD_LOCK = "version = 4\n"
+#: what the name of a program cargo install builds ends with
+EXE = ".exe" if os.name == "nt" else ""
 
 
 class CrateScanner:
@@ -319,6 +322,15 @@ class CheckCrateTests(CrateCase):
 
 
 class AgeTests(CrateCase):
+    def setUp(self):
+        super().setUp()
+        # The fake crates.io API deliberately emits fractional seconds as
+        # .123456.  Use that same precision for the frozen clock: otherwise
+        # the process-start microsecond can turn an exact hour into 59 minutes.
+        clock = mock.patch.object(guard, "now", return_value=cs.NOW.replace(microsecond=123456))
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def test_a_release_younger_than_min_age_is_blocked_by_the_indexs_pubtime(self):
         ctx = self.context()
         check = self.check(ctx, self.pkg("onlynew"))
@@ -897,8 +909,8 @@ class BuildCommandTests(FlowCase):
         self.assertEqual(code, 1, out)
         self.assertFalse(os.path.exists(self.lock))
 
-    def test_every_command_that_builds_is_wrapped(self):
-        for sub in sorted(guard.CARGO_BUILDS):
+    def assert_commands_that_build_are_wrapped(self, commands):
+        for sub in commands:
             with self.subTest(sub):
                 if os.path.exists(self.log):
                     os.remove(self.log)
@@ -906,6 +918,24 @@ class BuildCommandTests(FlowCase):
                 code, out = self.run_guard("cargo", sub)
                 self.assertEqual(code, 0, out)
                 self.assertEqual(self.commands(), [["update", "--workspace"], [sub, "--locked"]])
+
+    def assert_command_group_is_wrapped(self, group, groups=4):
+        commands = sorted(guard.CARGO_BUILDS)
+        start = len(commands) * group // groups
+        end = len(commands) * (group + 1) // groups
+        self.assert_commands_that_build_are_wrapped(commands[start:end])
+
+    def test_every_command_that_builds_is_wrapped_first_quarter(self):
+        self.assert_command_group_is_wrapped(0)
+
+    def test_every_command_that_builds_is_wrapped_second_quarter(self):
+        self.assert_command_group_is_wrapped(1)
+
+    def test_every_command_that_builds_is_wrapped_third_quarter(self):
+        self.assert_command_group_is_wrapped(2)
+
+    def test_every_command_that_builds_is_wrapped_fourth_quarter(self):
+        self.assert_command_group_is_wrapped(3)
 
     def test_what_comes_after_two_dashes_is_the_programs_own(self):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]]}
@@ -1557,16 +1587,27 @@ class RealCargoTests(TmpCase):
         build.rustc-wrapper, build.rustc-workspace-wrapper and build.rustc; under --plan it runs none of them. Without
         --plan the command runs as the project configures it, and cargo runs them."""
         marker = os.path.join(self.tmp, "ran.log")
-        script = os.path.join(self.tmp, "wrap.sh")
-        with open(script, "w", encoding="utf-8") as f:
-            f.write(f'#!/bin/sh\necho "$*" >> "{marker}"\nif [ "$1" = "-vV" ]; then exec rustc "$@"; fi\nexec "$@"\n')
-        os.chmod(script, 0o755)
+        if os.name == "nt":
+            # (Windows runs no shell script: the same wrapper in Python, run by a .cmd, which cargo runs through cmd.exe)
+            script = os.path.join(self.tmp, "wrap.py")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(f"import subprocess, sys\nwith open({marker!r}, 'a', encoding='utf-8') as f:\n"
+                        "    f.write(' '.join(sys.argv[1:]) + '\\n')\n"
+                        "argv = ['rustc'] + sys.argv[1:] if sys.argv[1:2] == ['-vV'] else sys.argv[1:]\n"
+                        "sys.exit(subprocess.call(argv))\n")
+            script = _support.runnable(script)
+        else:
+            script = os.path.join(self.tmp, "wrap.sh")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(f'#!/bin/sh\necho "$*" >> "{marker}"\nif [ "$1" = "-vV" ]; then exec rustc "$@"; fi\nexec "$@"\n')
+            os.chmod(script, 0o755)
         os.makedirs(os.path.join(self.dir, ".cargo"))
         # (cargo 1.95 asks the compiler when it updates a lock that exists)
         lock = 'version = 4\n\n[[package]]\nname = "app"\nversion = "0.1.0"\n'
         for k, key in enumerate(("rustc-wrapper", "rustc-workspace-wrapper", "rustc")):
             with self.subTest(key=key):
-                self.write(".cargo/config.toml", f'[build]\n{key} = "{script}"\n')
+                # (a TOML string: a Windows path's backslashes escaped, as in JSON)
+                self.write(".cargo/config.toml", f'[build]\n{key} = {json.dumps(script)}\n')
                 self.write("Cargo.lock", lock)
                 # (each run with a target folder of its own: cargo keeps what the compiler said there)
                 self.env["CARGO_TARGET_DIR"] = os.path.join(self.tmp, f"target-{k}")
@@ -1622,7 +1663,7 @@ class RealCargoTests(TmpCase):
         code, out = self.guard("cargo", "install", "--root", root, "tool")
         self.assertEqual(code, 0, out)
         self.assertIn("lazaret guard: checked 2 OK", out)
-        self.assertTrue(os.path.exists(os.path.join(root, "bin", "tool")))
+        self.assertTrue(os.path.exists(os.path.join(root, "bin", "tool" + EXE)))
 
     def test_cargo_install_of_a_tool_with_a_hostile_dependency_installs_nothing(self):
         root = os.path.join(self.tmp, "root")
@@ -1694,7 +1735,7 @@ class RealCargoTests(TmpCase):
         asked = self.reg.requests[before:]
         self.assertIn("/dl/pleaf/pleaf-1.0.0.crate", asked)
         self.assertNotIn("/dl/pleaf/pleaf-1.0.1.crate", asked)
-        self.assertTrue(os.path.exists(os.path.join(root, "bin", "pinned")))
+        self.assertTrue(os.path.exists(os.path.join(root, "bin", "pinned" + EXE)))
 
 B64_BLOB = base64.b64encode(bytes(range(256)) * 2).decode()
 INDEX = "https://index.crates.io/"

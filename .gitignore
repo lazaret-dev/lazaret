@@ -34,6 +34,12 @@ python/src/lazaret/_native/
 
 # repo tooling output
 /build/
+# the reports a scan writes where it is run (`lazaret-report.json`/`.html` under the scan root; a source scan's
+# `lazaret-github-owner-repo-0123456-report.json`/`.html`, registry/sourcescan.py): output, never committed
+lazaret-report.json
+lazaret-report.html
+lazaret-*-report.json
+lazaret-*-report.html
 # lazaret-registry's state database where --db is not given (and SQLite's WAL files)
 lazaret-registry.db
 lazaret-registry.db-*

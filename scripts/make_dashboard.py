@@ -62,7 +62,12 @@ class BuildError(Exception):
 
 
 def rel(path):
-    return os.path.relpath(path, REPO).replace(os.sep, "/")
+    """`path` as the build names it: relative to the repository, '/'-separated; a path on another drive than the
+    repository's (Windows), which has no relative form, whole."""
+    try:
+        return os.path.relpath(path, REPO).replace(os.sep, "/")
+    except ValueError:                          # (os.path.relpath: "path is on mount 'C:', start on mount 'D:'")
+        return os.path.abspath(path).replace(os.sep, "/")
 
 
 def read_text(path):

@@ -627,20 +627,21 @@ class BookkeepingTests(Case):
         self.assertEqual(p._running, 0)
 
     def test_an_archive_that_cannot_be_written_leaves_no_file_behind(self):
+        # (the file whose write fails is closed on its way out of the `with`, as a real one is, before the stage removes
+        # it: Windows removes no file that is still open, and a stand-in that left it open left it there)
         p = self.pool(support.behave)
         opened = []
-        real_open = os.open
 
-        def record(*args, **kw):
-            opened.append(real_open(*args, **kw))
-            return opened[-1]
-        writer = mock.MagicMock()
-        writer.__enter__.return_value.write.side_effect = OSError("disk full")
-        with mock.patch.object(scanpool.os, "open", record), mock.patch.object(scanpool.os, "fdopen", return_value=writer):
+        def fdopen(fd, *args, **kw):
+            opened.append(fd)
+            writer = mock.MagicMock()
+            writer.__enter__.return_value.write.side_effect = OSError("disk full")
+            writer.__exit__.side_effect = lambda *exc: os.close(fd)
+            return writer
+        with mock.patch.object(scanpool.os, "fdopen", fdopen):
             with self.assertRaisesRegex(OSError, "disk full"):
                 p.stage(b"archive")
-        for fd in opened:
-            os.close(fd)
+        self.assertEqual(len(opened), 1)
         self.assertEqual(os.listdir(p._dir), [])
 
 

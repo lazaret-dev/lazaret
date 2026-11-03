@@ -282,7 +282,11 @@ def build_adversarial(root):
     return skipped
 
 
-CLI_TIMEOUT = 25          # seconds per CLI run; every tree here scans in a few
+# Windows' hosted x64 filesystem is materially slower when the parity trees
+# contain sparse multi-gigabyte checkpoints and a 17 MB .pth file. Keep the
+# tighter deadlock/FIFO guard elsewhere, but leave one clean-gate command's
+# 45-second ceiling available to either CLI on Windows.
+CLI_TIMEOUT = 45 if os.name == "nt" else 25
 
 
 def run_cli(cmd, extra=(), out_dir=None, env=None):

@@ -781,12 +781,16 @@ pub(super) fn serve_with(
                 if let Some(t) = &ctl.timer {
                     t.until(Instant::now() + ctl.limits.idle_timeout);
                 }
-                ctl.idle.store(true, std::sync::atomic::Ordering::SeqCst);
-                let waited = if ctl.is_closing() { Ok(0) } else { c.fill() };
-                ctl.idle.store(false, std::sync::atomic::Ordering::SeqCst);
+                // (the shutdown, which may take the connection while it waits, stops it: even with a request come, as
+                // nothing may be written to it once it is stopped)
+                let Some(waited) = ctl.idle_wait(|| c.fill()) else {
+                    return Ok(());
+                };
                 match waited {
                     Ok(0) => return Ok(()),
                     Ok(_) => {}
+                    // the shutdown ended the wait (on Windows the read it woke fails rather than ending: B-119)
+                    Err(_) if ctl.is_closing() => return Ok(()),
                     Err(e) => return Err(e),
                 }
             }
@@ -894,12 +898,16 @@ pub(super) fn serve_with(
         let mut c = lock(&conn);
         match after {
             After::Upgraded => return Ok(()),
-            After::Close => return Ok(()),
+            After::Close => {
+                end_gently_unlocked(c);
+                return Ok(());
+            }
             After::KeepAlive => {}
         }
         // what the handler left of the body: read past it, a little, or close
         if !matches!(c.body.framing, Framing::Done) || c.body.error.is_some() {
             if c.body.continue_pending || c.body.error.is_some() {
+                end_gently_unlocked(c);
                 return Ok(());
             }
             let mut sink = [0u8; 8192];
@@ -910,10 +918,18 @@ pub(super) fn serve_with(
                     Ok(n) => {
                         drained += n as u64;
                         if drained > config.drain_limit {
+                            end_gently_unlocked(c);
                             return Ok(());
                         }
                     }
-                    Err(_) => return Ok(()),
+                    // (a client that stalled gains nothing from waiting on it: only one that sent what does not read)
+                    Err(e) if e.kind() == io::ErrorKind::TimedOut || e.kind() == io::ErrorKind::WouldBlock => {
+                        return Ok(())
+                    }
+                    Err(_) => {
+                        end_gently_unlocked(c);
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -1005,12 +1021,34 @@ fn read_head(c: &mut Conn, config: &HttpConfig) -> Result<Option<Head>, HeadErro
 /// Answers a request the server refuses, and lingers a little before the connection is closed.
 fn refuse(c: &mut Conn, b: &Bad, config: &HttpConfig) {
     if write_refusal(c, b, config).is_ok() && !b.why.is_empty() {
-        if let Some(t) = &c.timer {
-            t.each(Duration::from_millis(200));
-        }
-        if let Some(io) = c.io.as_mut() {
-            io.linger();
-        }
+        end_gently(c);
+    }
+}
+
+/// Before the server closes a connection the client may still be sending on (a request it pipelined after one the
+/// server answered with `connection: close`, a body the handler left unread): stops writing and reads what comes, a
+/// little ([`Transport::linger`]). A socket closed with bytes unread is reset, and a Windows client then discards the
+/// response it had received and not yet read (B-126; Linux and macOS clients still hand it over).
+fn end_gently(c: &mut Conn) {
+    if let Some(t) = &c.timer {
+        t.each(Duration::from_millis(200));
+    }
+    if let Some(io) = c.io.as_mut() {
+        io.linger();
+    }
+}
+
+/// [`end_gently`], with the connection's lock let go first: a handler that is still running (reading what is left of
+/// its body, sending an interim response) does not wait on the lock while the connection lingers.
+fn end_gently_unlocked(mut c: MutexGuard<'_, Conn>) {
+    let io = c.io.take();
+    let timer = c.timer.clone();
+    drop(c);
+    if let Some(t) = &timer {
+        t.each(Duration::from_millis(200));
+    }
+    if let Some(mut io) = io {
+        io.linger();
     }
 }
 

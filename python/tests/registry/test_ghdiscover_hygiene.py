@@ -40,13 +40,21 @@ HYGIENE = {
         "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
         "      - run: make\n"),
 }
+
+
+def native(path):
+    """A path of the repository as the scans report it: root-relative, with this system's separator (core.py: "Paths
+    are root-relative (os.sep separators)"), a backslash on Windows."""
+    return path.replace("/", os.sep)
+
+
 #: what a project scan grades them (and so do a filter's candidate and `scan github:`)
-GRADES = [(".github/workflows/build.yml", 2, "SC-WORKFLOW-PERMISSIONS", "MINOR"),
-          (".github/workflows/build.yml", 6, "SC-WORKFLOW-UNPINNED", "MINOR"),
-          (".github/workflows/release.yml", 8, "SC-WORKFLOW-UNPINNED", "MAJOR"),
-          (".github/workflows/release.yml", 9, "SC-WORKFLOW-CACHE", "MAJOR"),
-          (".github/workflows/release.yml", 9, "SC-WORKFLOW-UNPINNED", "MINOR"),
-          (".github/workflows/release.yml", 12, "SC-WORKFLOW-OIDC-INSTALL", "MAJOR")]
+GRADES = [(native(".github/workflows/build.yml"), 2, "SC-WORKFLOW-PERMISSIONS", "MINOR"),
+          (native(".github/workflows/build.yml"), 6, "SC-WORKFLOW-UNPINNED", "MINOR"),
+          (native(".github/workflows/release.yml"), 8, "SC-WORKFLOW-UNPINNED", "MAJOR"),
+          (native(".github/workflows/release.yml"), 9, "SC-WORKFLOW-CACHE", "MAJOR"),
+          (native(".github/workflows/release.yml"), 9, "SC-WORKFLOW-UNPINNED", "MINOR"),
+          (native(".github/workflows/release.yml"), 12, "SC-WORKFLOW-OIDC-INSTALL", "MAJOR")]
 LISTED = {"SC-WORKFLOW-CACHE": 1, "SC-WORKFLOW-OIDC-INSTALL": 1, "SC-WORKFLOW-PERMISSIONS": 1,
           "SC-WORKFLOW-UNPINNED": 3}
 SAID = ("6 workflow hygiene findings listed as INFO, as the owner's configuration (SC-WORKFLOW-CACHE 1, "
@@ -135,7 +143,7 @@ class ScanAllTests(ScanAllCase):
         res = self.scan_all({"u/pr": {**HYGIENE, **PR_CHECKOUT}})["u/pr"]
         self.assertEqual((res["verdict"], res["strongIndicators"]), ("SUSPICIOUS", 1))
         self.assertEqual([(i["file"], i["sev"]) for i in by_rule(res, "SC-WORKFLOW-PR-CHECKOUT")],
-                         [(".github/workflows/pr.yml", "CRITICAL")])
+                         [(native(".github/workflows/pr.yml"), "CRITICAL")])
         self.assertEqual(res["issues"][0]["rule"], "SC-WORKFLOW-PR-CHECKOUT")
         self.assertEqual(res["hygieneInfo"], {**LISTED, "SC-WORKFLOW-UNPINNED": 4})     # pr.yml's checkout@v4 too
         self.assertEqual(self.candidates()["u/pr"]["verdict"], "SUSPICIOUS")

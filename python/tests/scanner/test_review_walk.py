@@ -166,7 +166,11 @@ class WindowsLinkTargets(unittest.TestCase):
 
 
 class DeepTree(unittest.TestCase):
-    DEPTH = 1100
+    # Keep the original os.walk RecursionError regression on POSIX, where a
+    # 1,100-level fixture is cheap.  Creating and removing that many nested
+    # paths is prohibitively slow on Windows; one level beyond the product's
+    # cap exercises the same truncation and incomplete-report behavior there.
+    DEPTH = 1100 if os.name == "posix" else core.MAX_WALK_DEPTH + 1
 
     def test_deep_tree_is_walked_iteratively(self):
         root = tempfile.mkdtemp(prefix="lz-review-deep-")
@@ -256,10 +260,10 @@ class Unreadable(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         real = core._Root.listdir               # (folders are listed from the root's descriptor: LZ-03)
 
-        def listdir(tree, parts=()):
+        def listdir(tree, parts=(), **kwargs):
             if tuple(parts)[-1:] == ("sub",):
                 raise PermissionError(13, "Permission denied")
-            return real(tree, parts)
+            return real(tree, parts, **kwargs)
         with mock.patch.object(core._Root, "listdir", listdir):
             res = core.scan_project(root)
         subs = [i for i in res["issues"] if i["file"] == "sub"]

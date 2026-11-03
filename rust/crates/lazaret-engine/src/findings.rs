@@ -618,22 +618,29 @@ impl<'a> Snippets<'a> {
 
     /// Line k as any snippet may show it (_Redactor.redacted).
     fn redacted(&self, k: usize) -> PyStr {
-        if let Some(r) = self.red.borrow().get(&k) {
-            return r.clone();
+        self.with_redacted(k, |l| l.to_vec())
+    }
+
+    /// `f` of line k as any snippet may show it (_Redactor.redacted), borrowed from the file's cache, where it is made
+    /// once: a snippet clips it to its window (clip_snippet_line, O(window)), so a long line is not copied whole for
+    /// each of its findings (a copy each was O(findings × line): 20,000 findings on one 300,000-character line, 24 GB
+    /// copied, 12.7 s on musl).
+    fn with_redacted<R>(&self, k: usize, f: impl FnOnce(&[u32]) -> R) -> R {
+        if !self.red.borrow().contains_key(&k) {
+            let pem = self.pem.get_or_init(|| pem_block_lines(self.p, &self.lines));
+            let r = if pem.contains(&k) {
+                self.p.text("REDACTED")
+            } else if !self.literals {
+                redact_context_line(self.p, self.lines[k])
+            } else if let Some(netrc) = self.config {
+                let shown = crate::config::redact_values(self.p, self.lines[k], netrc);
+                self.secrets().redact(self.p, &redact_context_line(self.p, &shown))
+            } else {
+                self.secrets().redact(self.p, &redact_context_line(self.p, self.lines[k]))
+            };
+            self.red.borrow_mut().insert(k, r);
         }
-        let pem = self.pem.get_or_init(|| pem_block_lines(self.p, &self.lines));
-        let r = if pem.contains(&k) {
-            self.p.text("REDACTED")
-        } else if !self.literals {
-            redact_context_line(self.p, self.lines[k])
-        } else if let Some(netrc) = self.config {
-            let shown = crate::config::redact_values(self.p, self.lines[k], netrc);
-            self.secrets().redact(self.p, &redact_context_line(self.p, &shown))
-        } else {
-            self.secrets().redact(self.p, &redact_context_line(self.p, self.lines[k]))
-        };
-        self.red.borrow_mut().insert(k, r.clone());
-        r
+        f(self.red.borrow()[&k].as_slice())
     }
 
     /// core._redact_text, with this file's literals (none for `plain` snippets).
@@ -686,18 +693,20 @@ impl<'a> Snippets<'a> {
         let mut snippet = Vec::with_capacity(stop.saturating_sub(start));
         for k in start..stop {
             let flagged = k as isize == flag;
-            let l: PyStr = if redact {
+            let col = if flagged { f.col } else { None };
+            // (each line clipped where it is, never copied whole first: M2 of the review of PR #17)
+            let shown = if redact {
                 if flagged && secret_rule {
                     let mut t = pystr::replace(&p.text("REDACT_PLACEHOLDER"), &pystr::u("{RULE}"), &f.rule.id);
                     t.extend(pystr::u(&format!(" ({} chars)", self.lines[k].len())));
-                    t
+                    clip_snippet_line(p, &t, col)
                 } else {
-                    self.redacted(k)
+                    self.with_redacted(k, |l| clip_snippet_line(p, l, col))
                 }
             } else {
-                self.lines[k].to_vec()
+                clip_snippet_line(p, self.lines[k], col)
             };
-            snippet.push(Value::Str(clip_snippet_line(p, &l, if flagged { f.col } else { None })));
+            snippet.push(Value::Str(shown));
         }
         let mut v = vec![
             Value::Str(f.rule.id.clone()),

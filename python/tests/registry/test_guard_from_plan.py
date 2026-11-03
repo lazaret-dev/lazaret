@@ -36,14 +36,14 @@ def pypi_files():
 
 
 def tree(target):
-    """{relative path: bytes} of what an install put under --target (no bytecode)."""
+    """{relative path, with `/` between its parts: bytes} of what an install put under --target (no bytecode)."""
     out = {}
     for root, dirs, files in os.walk(target):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for f in files:
             path = os.path.join(root, f)
             with open(path, "rb") as fh:
-                out[os.path.relpath(path, target)] = fh.read()
+                out[os.path.relpath(path, target).replace(os.sep, "/")] = fh.read()
     return out
 
 
@@ -61,6 +61,10 @@ class FromPlanInstallTests(unittest.TestCase):
             raise unittest.SkipTest("no venv with pip here (ensurepip missing)")
         cls.pip_env = dict(cls.env, PATH=bindir + os.pathsep + cls.env.get("PATH", ""), VIRTUAL_ENV=venv,
                            LAZARET_GUARD_PYPI_URL=cls.index.url)
+        if os.name == "nt":
+            # (on Windows pip makes a console script an .exe launcher with a zip of the script on its end, dated when it is
+            # written unless SOURCE_DATE_EPOCH says: two installs of the same files would differ by those dates)
+            cls.pip_env["SOURCE_DATE_EPOCH"] = "1700000000"
 
     @classmethod
     def tearDownClass(cls):

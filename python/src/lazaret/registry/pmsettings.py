@@ -188,8 +188,23 @@ def split_userinfo(url):
 
 
 def shown(url):
-    """A URL as the guard prints it: without user:password@."""
-    return split_userinfo(url)[0] if isinstance(url, str) else url
+    """A URL as the guard prints it: without userinfo, fragment or query values. A query is named so two failure
+    locations remain distinguishable without copying signed URLs or opaque tokens into terminals and reports."""
+    if not isinstance(url, str):
+        return url
+    clean = split_userinfo(url)[0]
+    without_fragment = clean.split("#", 1)[0]
+    base, query, _value = without_fragment.partition("?")
+    # urlsplit can reject a malformed bracketed host before split_userinfo removes credentials. Keep display fail-safe
+    # for that error path too, without treating an @ in the URL's path as userinfo.
+    start = 2 if base.startswith("//") else (base.find("://") + 3 if "://" in base else -1)
+    if start >= 0:
+        end = base.find("/", start)
+        end = len(base) if end < 0 else end
+        at = base.rfind("@", start, end)
+        if at >= 0:
+            base = base[:start] + base[at + 1:]
+    return base + (" [query redacted]" if query else "")
 
 
 def basic(user, password):
@@ -485,7 +500,17 @@ def npm_tool_settings(tool, exe, env, cwd, root):
         for k, v in npmrc_settings([os.path.join(xdg, "pnpm", "rc")], env).items():
             settings.setdefault(k, v)
     settings.update(npm_env_settings(env, ("npm_config_", "pnpm_config_") if tool == "pnpm" else ("npm_config_",)))
-    settings.update({k: v for k, v in listed.items() if isinstance(k, str)})
+    # pnpm 12's display-oriented config listing can return a protected value
+    # for a credential that was expanded from a trusted user auth file.  Keep
+    # the value we parsed from the file or environment; still accept listed
+    # credentials when that is the only place pnpm reports them.
+    for key, value in listed.items():
+        if not isinstance(key, str):
+            continue
+        if key.startswith("//") or key in ("_authToken", "_auth", "username", "_password"):
+            settings.setdefault(key, value)
+        else:
+            settings[key] = value
     return settings
 
 

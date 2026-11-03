@@ -700,6 +700,19 @@ impl Duplex for TunnelSocket {
     }
 }
 
+impl crate::tls::Linger for TunnelSocket {
+    /// The tunnel cannot shut its sending side, nor bound a read but by its connection's timer: without one (a proxy run
+    /// without the runtime) a read could wait until the client closes, so it does not linger.
+    fn linger(&mut self) {
+        let Some(timer) = self.ctl.timer.clone() else {
+            return;
+        };
+        let most = Instant::now() + crate::tls::LINGER_MOST;
+        let until = timer.deadline().map_or(most, |d| d.min(most));
+        crate::tls::discard(self, until, |_, wait| timer.each(wait));
+    }
+}
+
 impl Socket for TunnelSocket {
     fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
         Ok(())
@@ -731,7 +744,7 @@ fn pump(up: Upgraded, upstream: TcpStream, idle: Duration, ctl: Option<Arc<Ctl>>
     let _ = io::copy(&mut from_upstream, &mut to_client);
     let _ = to_client.flush();
     // the host is done: so is the client's side (its reading thread is woken by closing the socket's reading side)
-    let _ = from_upstream.shutdown(std::net::Shutdown::Both);
+    let _ = crate::sys::shutdown(&from_upstream, std::net::Shutdown::Both);
     if let Some(ctl) = &ctl {
         ctl.stop();
     }
