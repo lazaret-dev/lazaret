@@ -195,7 +195,24 @@ jobs:
   # load them.
   macos-windows:
     name: library (${{ matrix.tag }})
-    runs-on: ${{ matrix.runner }}
+    # The native ARM64 Mac library uses our disposable Apple-silicon pool for
+    # trusted Lazaret work. The Intel library remains on a real hosted Intel
+    # Mac until its build and load checks have a separately validated Rosetta
+    # toolchain.
+    runs-on: >-
+      ${{
+        matrix.tag == 'macosx_11_0_arm64' &&
+        (
+          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.actor == 'johnabooth-afk'
+          )
+        ) &&
+        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        matrix.runner
+      }}
     # (the Python suite alone took some 20 minutes on win_amd64, PR #17's
     # first run, and the second's win_amd64 and macOS jobs were cancelled at
     # 30 with the build before it)
@@ -242,6 +259,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+      - name: Rust toolchain for the disposable self-hosted runner
+        if: runner.environment == 'self-hosted'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
       - name: Rust ${{ env.RUST_VERSION }}
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET" --no-self-update
       - name: Build
@@ -318,7 +338,20 @@ jobs:
   install:
     name: install (${{ matrix.tag }})
     needs: dist
-    runs-on: ${{ matrix.runner }}
+    runs-on: >-
+      ${{
+        matrix.tag == 'macosx_11_0_arm64' &&
+        (
+          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.actor == 'johnabooth-afk'
+          )
+        ) &&
+        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        matrix.runner
+      }}
     timeout-minutes: 15
     strategy:
       fail-fast: false

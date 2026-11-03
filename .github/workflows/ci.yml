@@ -29,7 +29,23 @@ jobs:
   # interpreter by every OS. Tests that need Postgres skip themselves here
   # (LAZARET_TEST_PG_DSN is unset).
   python-unit:
-    runs-on: ${{ matrix.os }}
+    # Native macOS lanes use the disposable self-hosted Apple-silicon pool for
+    # this repository's trusted pushes, releases and maintainer-authored PRs.
+    # Fork PRs and other authors remain on GitHub-hosted runners.
+    runs-on: >-
+      ${{
+        matrix.os == 'macos-latest' &&
+        (
+          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.actor == 'johnabooth-afk'
+          )
+        ) &&
+        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        matrix.os
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +62,17 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Rust toolchain for the disposable self-hosted runner
+        if: runner.environment == 'self-hosted'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
+      - name: Match the GitHub-hosted optional tool surface
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          pnpm_path=$(command -v pnpm || true)
+          if [[ -n "$pnpm_path" ]]; then
+            /bin/mv "$pnpm_path" "${pnpm_path}.lazaret-disabled"
+          fi
       - name: The native engine
         working-directory: rust
         run: cargo build --release --offline --locked
@@ -125,7 +152,20 @@ jobs:
   # the engine: the test_js_parity modules skip where the WebAssembly build or
   # the native library is missing, so the step asserts that both load first.
   js:
-    runs-on: ${{ matrix.os }}
+    runs-on: >-
+      ${{
+        matrix.os == 'macos-latest' &&
+        (
+          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.actor == 'johnabooth-afk'
+          )
+        ) &&
+        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        matrix.os
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -138,6 +178,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
+      - name: Rust toolchain for the disposable self-hosted runner
+        if: runner.environment == 'self-hosted'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
       - run: rustup target add wasm32-unknown-unknown
       - working-directory: js
         run: npm run build
@@ -184,7 +227,20 @@ jobs:
   # make_rust_tables.py --check compares the generated Unicode 13.0 tables
   # with 3.10's unicodedata.
   rust:
-    runs-on: ${{ matrix.os }}
+    runs-on: >-
+      ${{
+        matrix.os == 'macos-latest' &&
+        (
+          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.actor == 'johnabooth-afk'
+          )
+        ) &&
+        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        matrix.os
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -196,6 +252,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.10"
+      - name: Rust toolchain for the disposable self-hosted runner
+        if: runner.environment == 'self-hosted'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
       - run: python scripts/check_rust_deps.py
       # pratique (NET-1) is in rust/crates as it is upstream, at the commit its LAZARET.md names: no file
       # changed since it was taken
