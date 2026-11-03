@@ -385,6 +385,11 @@ def _post_urllib(url, headers, data, max_bytes, what, has_token, kind, reply_hea
     cut = False
     try:
         read, cut = deadline.wait(timeout)
+        # On Windows the monotonic clock can remain unchanged between creating
+        # the deadline and starting the request. A per-call timeout equal to the
+        # entire budget is still deadline-limited even when wait() sees exact
+        # equality and therefore has no elapsed tick with which to prove it.
+        cut = cut or timeout >= deadline.seconds
         resp = opener.open(req, timeout=read)
     except urllib.error.HTTPError as exc:
         exc.close()
