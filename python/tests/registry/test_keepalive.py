@@ -122,6 +122,9 @@ class Server:
 
         class Plain(socketserver.ThreadingMixIn, http.server.HTTPServer):
             daemon_threads = True
+            # Several tests start eight clients together. The inherited
+            # backlog of five can reset otherwise valid connections on macOS.
+            request_queue_size = 32
 
             def handle_error(self, request, client_address):        # (a client that hangs up is not news)
                 pass

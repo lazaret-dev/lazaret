@@ -107,7 +107,7 @@ jobs:
               "$py" scripts/check_native_library.py "$lib" "$TAG" --load
               cd python
               LAZARET_NATIVE_LIB="$lib" "$py" -m unittest discover -s tests -t .'
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-${{ matrix.tag }}
           path: rust/target/${{ matrix.target }}/release/liblazaret_native.so
@@ -179,7 +179,7 @@ jobs:
               "$py" scripts/check_native_library.py "$lib" "$TAG" --load
               cd python
               LAZARET_NATIVE_LIB="$lib" "$py" -m unittest discover -s tests -t .'
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-${{ matrix.tag }}
           path: rust/target/${{ matrix.target }}/release/liblazaret_native.so
@@ -199,7 +199,9 @@ jobs:
     # (the Python suite alone took some 20 minutes on win_amd64, PR #17's
     # first run, and the second's win_amd64 and macOS jobs were cancelled at
     # 30 with the build before it)
-    timeout-minutes: 60
+    # The full Python suite takes about 53 minutes on the Tart macOS image;
+    # setup and the native build put the complete job just over one hour.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -237,7 +239,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Rust ${{ env.RUST_VERSION }}
@@ -250,7 +252,7 @@ jobs:
       - name: The Python suite on this library (its recorded outputs among them)
         working-directory: python
         run: python -m unittest discover -s tests -t .
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-${{ matrix.tag }}
           path: rust/target/${{ matrix.target }}/release/${{ matrix.library }}
@@ -269,12 +271,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # Exact version: the compressed bytes depend on the interpreter's
           # zlib, so rebuilding a tag byte-for-byte needs the same Python.
           python-version: "3.12.14"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: native-*
           path: native/
@@ -300,7 +302,7 @@ jobs:
           --expect manylinux_2_28_x86_64 --expect manylinux_2_28_aarch64
           --expect musllinux_1_2_x86_64 --expect musllinux_1_2_aarch64
           --expect macosx_11_0_arm64 --expect macosx_10_12_x86_64 --expect win_amd64 --expect win_arm64
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-dist
           path: python/dist/
@@ -339,11 +341,11 @@ jobs:
     env:
       TAG: ${{ matrix.tag }}
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: python-dist
           path: dist/
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: ${{ !matrix.image }}
         with:
           python-version: "3.12"
