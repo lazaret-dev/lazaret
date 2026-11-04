@@ -275,8 +275,8 @@ class PythonTestsRunOnTheLibrary(unittest.TestCase):
                                         or "_native.available()" in before, "the engine's tests would skip")
                         self.assertTrue("cargo build" in before or 'cargo +"$RUST_VERSION" build' in before,
                                         "no library is built for them")
-        # ci.yml's python-unit, python-integration, js and rust jobs; wheels.yml's three library jobs
-        self.assertEqual(runs, 7)
+        # ci.yml's per-PR, boundary, integration, js and rust jobs; wheels.yml's three library jobs
+        self.assertEqual(runs, 8)
 
     def test_the_whole_suite_runs_where_a_library_is_built(self):
         """The snapshot tests (test_snapshot_*) skip without the library: the
@@ -286,7 +286,8 @@ class PythonTestsRunOnTheLibrary(unittest.TestCase):
         self.assertGreaterEqual(len(modules), 7)
         whole = [(name, job) for name, workflow in workflows().items() for job, text in jobs(workflow).items()
                  if re.search(r"-m unittest discover -s tests -t \.", text)]
-        self.assertEqual(sorted(whole), [("ci.yml", "python-unit"), ("wheels.yml", "linux"),
+        self.assertEqual(sorted(whole), [("ci.yml", "python-boundaries"), ("ci.yml", "python-unit"),
+                                         ("wheels.yml", "linux"),
                                          ("wheels.yml", "macos-windows"), ("wheels.yml", "musllinux")])
         self.assertFalse([m for m in os.listdir(arch) if m.startswith("test_rust_parity_")
                           and m != "test_rust_parity_regex.py"], "the Python engine's parity modules are retired")
