@@ -10,10 +10,10 @@
 //!   multiple substreams, with packed and unpacked CRC-32 verification;
 //! * Bzip2 (including concatenated streams), XZ (single-filter LZMA2 blocks), and
 //!   LZMA-alone as single files, suitable for compressed pickle payloads.
-//! * ZIP listing and bounded member reads, including ZIP64 and the union of the
-//!   members found by common directory and streaming readers. ZIP remains a
-//!   caller-directed subsystem because ambiguous listings must be interpreted by
-//!   the scanner that requested them.
+//! * ZIP and ZIP64, using the union of the members found by common directory and
+//!   streaming readers. Generic extraction accepts stored and DEFLATE members
+//!   only when those readers agree; [`zip`] also exposes bounded whole/range
+//!   member reads for scanners that need selected members.
 //!
 //! Compressed or encrypted RAR members, solid/multi-volume archives, links and special
 //! files are refused with [`Error::Unsupported`]. Encrypted 7-Zip, coder chains and
@@ -57,6 +57,7 @@ pub enum Format {
     Bzip2,
     Xz,
     Lzma,
+    Zip,
     SevenZip,
 }
 
@@ -349,6 +350,7 @@ fn magic(data: &[u8]) -> Option<Format> {
     if data.starts_with(b"\x1f\x8b") { return Some(Format::Gzip); }
     if data.starts_with(b"BZh") { return Some(Format::Bzip2); }
     if data.starts_with(b"\xfd7zXZ\x00") { return Some(Format::Xz); }
+    if data.starts_with(b"PK\x03\x04") || data.starts_with(b"PK\x05\x06") { return Some(Format::Zip); }
     if data.starts_with(b"7z\xbc\xaf\x27\x1c") { return Some(Format::SevenZip); }
     None
 }
@@ -395,8 +397,97 @@ pub fn extract_as(data: &[u8], format: Format, limits: Limits) -> Result<Archive
         Format::Bzip2 => { expect(Format::Bzip2)?; extract_single(data, limits, Format::Bzip2) }
         Format::Xz => { expect(Format::Xz)?; extract_single(data, limits, Format::Xz) }
         Format::Lzma => extract_single(data, limits, Format::Lzma),
+        Format::Zip => { expect(Format::Zip)?; extract_zip(data, limits) }
         Format::SevenZip => { expect(Format::SevenZip)?; seven::extract(data, limits) }
     }
+}
+
+fn zip_listing_error(error: zip::Miss) -> Error {
+    match error {
+        zip::Miss::Need => Error::Truncated,
+        zip::Miss::Bad(message) if message.contains("entries read") => Error::Limit("entry count"),
+        zip::Miss::Bad(message)
+            if message.contains("central directory") && message.contains("more than")
+                || message.contains("more entries or bytes than the reader reads") =>
+        {
+            Error::Limit("archive metadata")
+        }
+        zip::Miss::Bad(_) => Error::Corrupt("ZIP structure"),
+    }
+}
+
+fn zip_member_error(error: zip::Miss) -> Error {
+    match error {
+        zip::Miss::Need => Error::Truncated,
+        zip::Miss::Bad(message) if message.contains("CRC-32") => Error::Checksum("ZIP member"),
+        zip::Miss::Bad(message) if message.contains("expands to") => Error::Corrupt("ZIP member size"),
+        zip::Miss::Bad(_) => Error::Corrupt("ZIP member data"),
+    }
+}
+
+fn extract_zip(data: &[u8], limits: Limits) -> Result<Archive> {
+    let source = zip::Bytes::whole(data);
+    let listing = zip::entries(&source, limits.max_entries, limits.max_metadata_size).map_err(zip_listing_error)?;
+    if listing.is_ambiguous() {
+        return Err(Error::Ambiguous("ZIP readers disagree on its members or layout"));
+    }
+
+    let mut names = Vec::with_capacity(listing.entries.len());
+    let mut kinds = Vec::with_capacity(listing.entries.len());
+    let mut file_sizes = Vec::new();
+    for entry in &listing.entries {
+        const KNOWN_FLAGS: u16 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)
+            | (1 << 6) | (1 << 11) | (1 << 13);
+        if entry.flags & ((1 << 0) | (1 << 6) | (1 << 13)) != 0 {
+            return Err(Error::Unsupported("encrypted ZIP member"));
+        }
+        if entry.flags & ((1 << 4) | (1 << 5)) != 0 || entry.flags & !KNOWN_FLAGS != 0 {
+            return Err(Error::Unsupported("ZIP member flags"));
+        }
+        if !matches!(entry.method, 0 | 8) {
+            return Err(Error::Unsupported("ZIP compression method"));
+        }
+        if entry.method == 0 && entry.flags & ((1 << 1) | (1 << 2)) != 0 {
+            return Err(Error::Unsupported("stored ZIP member flags"));
+        }
+
+        let name = if entry.flags & (1 << 11) == 0 && !entry.name.is_ascii() {
+            return Err(Error::Unsupported("non-UTF-8 ZIP member name"));
+        } else {
+            std::str::from_utf8(&entry.name).map_err(|_| Error::Corrupt("invalid UTF-8 ZIP member name"))?
+        };
+        let slash_directory = name.ends_with('/');
+        let mode_kind = entry.special_kind();
+        if mode_kind.as_deref().is_some_and(|kind| kind != "directory") {
+            return Err(Error::Unsupported("special file in ZIP"));
+        }
+        if mode_kind.as_deref() == Some("directory") && !slash_directory {
+            return Err(Error::Ambiguous("a ZIP entry whose name and mode disagree on whether it is a directory"));
+        }
+        let kind = if slash_directory { EntryKind::Directory } else { EntryKind::File };
+        if kind == EntryKind::Directory {
+            if entry.size != 0 || entry.csize != 0 || entry.crc32 != 0 {
+                return Err(Error::Ambiguous("a ZIP directory entry that carries data"));
+            }
+        } else {
+            file_sizes.push(entry.size);
+        }
+        names.push(name);
+        kinds.push(kind);
+    }
+
+    let mut out = Builder::new(limits);
+    out.block_budget(&file_sizes)?;
+    for ((entry, name), kind) in listing.entries.iter().zip(names).zip(kinds) {
+        match kind {
+            EntryKind::Directory => out.add(name, kind, &[])?,
+            EntryKind::File => {
+                let bytes = zip::read_checked(&source, entry, entry.size).map_err(zip_member_error)?;
+                out.add(name, kind, &bytes)?;
+            }
+        }
+    }
+    Ok(out.finish(Format::Zip))
 }
 
 fn extract_single(data: &[u8], limits: Limits, format: Format) -> Result<Archive> {
@@ -512,6 +603,8 @@ mod tests {
         assert_eq!(detect(b"\x1f\x8brest"), Ok(Format::Gzip));
         assert_eq!(detect(b"BZh91AY"), Ok(Format::Bzip2));
         assert_eq!(detect(b"\xfd7zXZ\x00"), Ok(Format::Xz));
+        assert_eq!(detect(b"PK\x03\x04"), Ok(Format::Zip));
+        assert_eq!(detect(b"PK\x05\x06"), Ok(Format::Zip));
         assert_eq!(detect(b"7z\xbc\xaf\x27\x1c"), Ok(Format::SevenZip));
         assert_eq!(detect(b"not an archive"), Err(Error::UnknownFormat));
     }

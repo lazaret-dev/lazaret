@@ -30,6 +30,9 @@ pub struct Entry {
     pub name: Vec<u8>,
     pub flags: u16,
     pub method: u16,
+    /// CRC-32 of the uncompressed member bytes, from the central directory (or
+    /// the local header for a member no directory lists).
+    pub crc32: u32,
     pub csize: u64,
     pub size: u64,
     /// where its local header is
@@ -454,6 +457,7 @@ fn cen_entry(cd: &[u8], at: usize, concat: i128) -> Result<(Option<Entry>, usize
     let made_by = u16_at(cd, at + 4).ok_or_else(short)?;
     let flags = u16_at(cd, at + 8).ok_or_else(short)?;
     let method = u16_at(cd, at + 10).ok_or_else(short)?;
+    let crc32 = u32_at(cd, at + 16).ok_or_else(short)?;
     let mut csize = u32_at(cd, at + 20).ok_or_else(short)? as u64;
     let mut size = u32_at(cd, at + 24).ok_or_else(short)? as u64;
     let nlen = u16_at(cd, at + 28).ok_or_else(short)? as usize;
@@ -484,7 +488,7 @@ fn cen_entry(cd: &[u8], at: usize, concat: i128) -> Result<(Option<Entry>, usize
     let upath = unicode_paths(extra, &name);
     // (an offset the concat moves before the file's start: no reader that moves it reads the member)
     let local = u64::try_from(local as i128 + concat).ok();
-    Ok((local.map(|local| Entry { name, flags, method, csize, size, local, xlen, made_by, external, listed: true }), len,
+    Ok((local.map(|local| Entry { name, flags, method, crc32, csize, size, local, xlen, made_by, external, listed: true }), len,
         upath))
 }
 
@@ -605,6 +609,7 @@ fn directory(src: &Bytes, at: u64, v: View, concat: i128, budget: &mut Budget, m
 struct Local {
     flags: u16,
     method: u16,
+    crc32: u32,
     csize: u64,
     size: u64,
     name: Vec<u8>,
@@ -633,6 +638,7 @@ fn local_at(src: &Bytes, at: u64, hint: u64) -> Result<Option<Local>, String> {
     }
     let flags = u16_at(h, 6).unwrap_or(0);
     let method = u16_at(h, 8).unwrap_or(0);
+    let crc32 = u32_at(h, 14).unwrap_or(0);
     let mut csize = u32_at(h, 18).unwrap_or(0) as u64;
     let mut size = u32_at(h, 22).unwrap_or(0) as u64;
     let nlen = u16_at(h, 26).unwrap_or(0) as u64;
@@ -660,7 +666,7 @@ fn local_at(src: &Bytes, at: u64, hint: u64) -> Result<Option<Local>, String> {
             }
         }
     }
-    Ok(Some(Local { flags, method, csize, size, name, xlen, ufields, unames }))
+    Ok(Some(Local { flags, method, crc32, csize, size, name, xlen, ufields, unames }))
 }
 
 /// The first of reasons of one kind, with how many more there are (so that one kind does not crowd out others).
@@ -788,9 +794,9 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
     }
     // the union: zipfile's view first
     let mut out: Vec<Entry> = Vec::new();
-    let mut keys: HashSet<(u64, Vec<u8>, u16, u16, u64, u64)> = HashSet::new();
+    let mut keys: HashSet<(u64, Vec<u8>, u16, u16, u32, u64, u64)> = HashSet::new();
     let mut add = |out: &mut Vec<Entry>, e: Entry| -> Result<(), Miss> {
-        if keys.insert((e.local, e.name.clone(), e.method, e.flags, e.csize, e.size)) {
+        if keys.insert((e.local, e.name.clone(), e.method, e.flags, e.crc32, e.csize, e.size)) {
             if out.len() >= max {
                 return Err(format!("more than the {max} entries read").into());
             }
@@ -839,6 +845,7 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
         let Some(l) = locals.get(&e.local) else { continue };
         let names = &central_names[&e.local];
         let sizes = l.flags & 8 == 0 && (l.csize != e.csize || l.size != e.size);
+        let checksum = l.flags & 8 == 0 && l.crc32 != e.crc32;
         // its local names (its own, its Unicode Path extra fields') that no directory gives it
         let others: Vec<&Vec<u8>> = std::iter::once(&l.name).chain(l.unames.iter())
             .filter(|n| !names.contains(*n)).collect();
@@ -846,19 +853,21 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
             differ.push(format!("the local header of {} (byte {}) has {} Unicode Path extra fields (readers differ on \
                                  which they take)", quoted(&e.name), commas(e.local), l.ufields));
         }
-        if !others.is_empty() || l.method != e.method || l.flags != e.flags || sizes {
+        if !others.is_empty() || l.method != e.method || l.flags != e.flags || sizes || checksum {
             differ.push(format!("the local header of {} (byte {}) is not its directory entry's: {}", quoted(&e.name),
                                 commas(e.local),
                                 if let Some(n) = others.first() { format!("its name is {}", quoted(n)) }
                                 else if sizes { format!("{} bytes, not {}", l.csize, e.csize) }
+                                else if checksum { "its CRC-32 differs".into() }
                                 else { "its method or flags differ".into() }));
             let (csize, size) = if l.flags & 8 != 0 { (e.csize, e.size) } else { (l.csize, l.size) };
+            let crc32 = if l.flags & 8 != 0 { e.crc32 } else { l.crc32 };
             let mut local_names: Vec<Vec<u8>> = others.into_iter().cloned().collect();
             if local_names.is_empty() {
                 local_names.push(l.name.clone());
             }
             for name in local_names {
-                add(&mut out, Entry { name, flags: l.flags, method: l.method, csize, size, local: e.local,
+                add(&mut out, Entry { name, flags: l.flags, method: l.method, crc32, csize, size, local: e.local,
                                       xlen: l.xlen, made_by: e.made_by, external: e.external, listed: false })?;
             }
         }
@@ -924,7 +933,8 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
         };
         let (flags, size, wide) = (l.flags, l.size, csize >= 0xFFFF_FFFF || l.size >= 0xFFFF_FFFF);
         if listed_here.is_none() {
-            add(&mut out, Entry { name: l.name.clone(), flags: l.flags, method: l.method, csize, size, local: p,
+            add(&mut out, Entry { name: l.name.clone(), flags: l.flags, method: l.method, crc32: l.crc32,
+                                  csize, size, local: p,
                                   xlen: l.xlen, made_by: 0, external: 0, listed: false })?;
         }
         let mut next = data.saturating_add(csize);
@@ -1117,6 +1127,23 @@ pub fn read(src: &Bytes, e: &Entry, limit: u64) -> Result<Vec<u8>, Miss> {
         }
         m => Err(format!("it is compressed with {} (method {m}), which the reader cannot decompress", method_name(m)).into()),
     }
+}
+
+/// An entry's complete bytes, with its declared uncompressed size and CRC-32
+/// verified. Generic extraction uses this stricter form; scanners that only
+/// need a prefix keep using [`read_prefix_counted`].
+pub fn read_checked(src: &Bytes, e: &Entry, limit: u64) -> Result<Vec<u8>, Miss> {
+    let out = read(src, e, limit)?;
+    if out.len() as u64 != e.size {
+        return Err(Miss::Bad(format!(
+            "it expands to {} bytes, not the {} its directory declares",
+            commas(out.len() as u64), commas(e.size)
+        )));
+    }
+    if lazaret_verify::inflate::crc32(0, &out) != e.crc32 {
+        return Err(Miss::Bad("its CRC-32 does not match its directory".into()));
+    }
+    Ok(out)
 }
 
 fn method_name(m: u16) -> &'static str {
