@@ -470,6 +470,17 @@ pub fn native_program(p: &Pack, raw: &[u8]) -> bool {
         && (program(p, raw, true).is_some() || raw.starts_with(b"MZ"))
 }
 
+/// A byte-first description of a native or loadable program, when the same
+/// bounded signature checks used by [`native_program`] accept it.
+pub(crate) fn native_program_description(p: &Pack, raw: &[u8]) -> Option<String> {
+    if !looks_binary(p, &raw[..raw.len().min(p.usize("_LOOKS_SAMPLE"))]) {
+        return None;
+    }
+    program(p, &raw[..raw.len().min(512)], true)
+        .or_else(|| raw.starts_with(b"MZ").then(|| p.text("_PE_DESC")))
+        .map(|description| pystr::to_string(&description))
+}
+
 /// core.pyc_issues: SC-PYC-UNCHECKED for an unchecked-hash .pyc (PEP 552: flags 0b01 after the magic's "\r\n"),
 /// SC-PYC-ORPHAN when no source sits next to its __pycache__.
 pub fn pyc_issues(p: &Pack, path: &[u32], header: &[u8], has_source: bool) -> Vec<Value> {

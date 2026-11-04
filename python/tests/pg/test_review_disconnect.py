@@ -14,7 +14,7 @@ import unittest
 from lazaret import pg
 from lazaret.pg.errors import error_from_fields
 from tests.pg.test_hostile_server import FakeServer, connect, msg
-from tests.pg.test_review_hostile import ready_for_query
+from tests.pg.test_review_hostile import read_until, ready_for_query
 
 
 def fatal(code, text):
@@ -39,7 +39,10 @@ class FatalBeforeCloseTests(unittest.TestCase):
     def test_terminated_during_a_query(self):
         def script(conn, srv):
             ready_for_query(conn, srv)
-            srv.read_message(conn)
+            # Consume the complete extended-query request before replying.
+            # Closing with unread Parse/Bind/Execute frames resets the socket
+            # on Windows and can discard the FATAL response we are testing.
+            read_until(conn, srv, b"S")
             conn.sendall(fatal("57P01", "terminating connection due to administrator command"))
         c = connect(FakeServer(script))
         with self.assertRaises(pg.ServerOperationalError) as info:
@@ -106,7 +109,7 @@ class FatalBeforeCloseTests(unittest.TestCase):
     def test_other_fatal_errors_are_chained(self):
         def script(conn, srv):
             ready_for_query(conn, srv)
-            srv.read_message(conn)
+            read_until(conn, srv, b"S")
             conn.sendall(fatal("XX000", "internal error"))
         c = connect(FakeServer(script))
         with self.assertRaisesRegex(pg.OperationalError, "the server reported: FATAL: internal error") as info:
@@ -162,7 +165,7 @@ class ReconnectTests(unittest.TestCase):
     def test_reconnect_after_the_server_ended_the_session(self):
         def terminated(conn, srv):
             ready_for_query(conn, srv)
-            srv.read_message(conn)
+            read_until(conn, srv, b"S")
             conn.sendall(fatal("57P01", "terminating connection due to administrator command"))
         srv = SequentialServer(terminated, answer_one_query)
         c = connect(srv)
