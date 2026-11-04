@@ -114,6 +114,15 @@ class SelfHostedRoutingTests(unittest.TestCase):
             section = job(text, name)
             self.assertIn("toolchain: ${{ env.RUST_VERSION }}", section)
 
+        # GitHub's Windows default is PowerShell, where $RUST_VERSION is not
+        # environment-variable syntax. Keep every explicitly versioned cargo
+        # command in bash so Windows cannot silently turn `+1.95.0` into `+`.
+        steps = re.findall(r"(?ms)^      - .*?(?=^      - |\Z)", text)
+        cargo_steps = [step for step in steps if 'cargo +"$RUST_VERSION"' in step]
+        self.assertEqual(len(cargo_steps), 6)
+        for step in cargo_steps:
+            self.assertIn("shell: bash", step)
+
 
 if __name__ == "__main__":
     unittest.main()
