@@ -45,12 +45,14 @@ class EntityAttackTests(unittest.TestCase):
         """With forbid_entities=False, libexpat's amplification limit stops the bomb."""
         for api_name, api in APIS.items():
             with self.subTest(api=api_name):
-                start = time.monotonic()
+                start = time.process_time()
                 with self.assertRaises(Exception) as info:
                     api(payloads.BILLION_LAUGHS, forbid_entities=False)
                 self.assertNotIsInstance(info.exception, sx.SafeXMLError)
                 self.assertIn("amplification", str(info.exception))
-                self.assertLess(time.monotonic() - start, 10)
+                # Bound the CPU spent expanding entities, not time the hosted
+                # runner may be descheduled under shared load.
+                self.assertLess(time.process_time() - start, 10)
 
     def test_harmless_internal_entity_when_allowed(self):
         self.assertEqual(ET.fromstring(payloads.INTERNAL_ENTITY, forbid_entities=False).text, "Lazaret")

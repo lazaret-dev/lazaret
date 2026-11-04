@@ -25,8 +25,8 @@ class NpmLockfileGuardTests(gs.RegistryCase):
         shutil.rmtree(os.path.join(d, "node_modules"))
         code, out = self.guard(d, "npm", "ci")
         self.assertEqual(code, 1, out)
-        self.assertIn("BLOCKED    fresh-pkg@1.1.0: published ", out)
-        self.assertIn("under --min-age 2 days (--allow-new fresh-pkg lets it through)", out)
+        self.assertIn("BLOCKED    fresh-pkg@1.1.0: published 1 hour ago, under --min-age 2 days "
+                      "(--allow-new fresh-pkg lets it through)", out)
         self.assertFalse(os.path.exists(os.path.join(d, "node_modules")))
         code, out = self.guard(d, "--allow-new", "fresh-pkg", "npm", "ci")
         self.assertEqual(code, 0, out)

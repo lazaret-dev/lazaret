@@ -48,8 +48,7 @@ class YarnClassicGuardTests(gs.RegistryCase):
         self.assertEqual(sorted(os.listdir(d)), [".npmrc", "package.json"])
         code, out = self.guard(d, "yarn", "add", "fresh-pkg@1.1.0")           # yarn 1 can't hold it back
         self.assertEqual(code, 1, out)
-        self.assertIn("BLOCKED    fresh-pkg@1.1.0: published ", out)
-        self.assertIn("under --min-age 2 days", out)
+        self.assertIn("BLOCKED    fresh-pkg@1.1.0: published 1 hour ago, under --min-age 2 days", out)
 
 
 class _Berry(gs.RegistryCase):

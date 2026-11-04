@@ -72,20 +72,22 @@ GOOD_JS = {"index.js": "module.exports = (a, b) => a + b;\n"}
 EVIL_JS = {"install.js": EXFIL_JS}
 
 
-def default_npm_packages():
+def default_npm_packages(at=None):
     """name -> {version: (tarball, manifest, published)}."""
+    at = at or datetime.datetime.now(datetime.timezone.utc)
+    old, fresh = at - datetime.timedelta(days=30), at - datetime.timedelta(hours=1)
     pkgs = {}
 
-    def add(name, version, published=OLD, **kw):
+    def add(name, version, published=None, **kw):
         data, manifest = npm_package(name, version, **kw)
-        pkgs.setdefault(name, {})[version] = (data, manifest, published)
+        pkgs.setdefault(name, {})[version] = (data, manifest, old if published is None else published)
 
     add("good-pkg", "1.0.0", files=GOOD_JS)
     add("evil-pkg", "1.0.0", scripts={"postinstall": "node install.js"}, files=EVIL_JS)
     add("dep-parent", "1.0.0", deps={"evil-pkg": "^1.0.0"})
     add("fresh-pkg", "1.0.0")
-    add("fresh-pkg", "1.1.0", published=FRESH)
-    add("only-new", "1.0.0", published=FRESH)
+    add("fresh-pkg", "1.1.0", published=fresh)
+    add("only-new", "1.0.0", published=fresh)
     add("plat-parent", "1.0.0", optional={"plat-other": "1.0.0"})
     add("plat-other", "1.0.0", os_=["aix"], scripts={"postinstall": "node install.js"}, files=EVIL_JS)
     add("@scope/good", "2.0.0", files=GOOD_JS)
@@ -100,7 +102,8 @@ class NpmRegistry:
     it answers 401 to a request without it: a private registry."""
 
     def __init__(self, packages=None, auth=None):
-        self.packages = default_npm_packages() if packages is None else packages
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+        self.packages = default_npm_packages(self.now) if packages is None else packages
         self.requests = []
         self.authorizations = []
         self.auth = auth
@@ -156,7 +159,8 @@ class NpmRegistry:
         return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
 
     def packument(self, name):
-        versions, times = {}, {"created": iso(OLD), "modified": iso(NOW)}
+        versions, times = {}, {"created": iso(self.now - datetime.timedelta(days=30)),
+                               "modified": iso(self.now)}
         for version, (data, manifest, published) in self.packages[name].items():
             doc = dict(manifest)
             doc["dist"] = {"tarball": f"{self.url}{name}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz",
@@ -207,18 +211,20 @@ def sdist(name, version, files):
     return f"{name.replace('-', '_')}-{version}.tar.gz", tarball(body, root=root)
 
 
-def default_pypi_files():
+def default_pypi_files(at=None):
     """project -> [(filename, bytes, published)]."""
+    at = at or datetime.datetime.now(datetime.timezone.utc)
+    old, fresh = at - datetime.timedelta(days=30), at - datetime.timedelta(hours=1)
     out = {}
 
-    def add(project, made, published=OLD):
-        out.setdefault(project, []).append((made[0], made[1], published))
+    def add(project, made, published=None):
+        out.setdefault(project, []).append((made[0], made[1], old if published is None else published))
 
     add("good-py", wheel("good-py", "1.0", {"good_py/__init__.py": "VALUE = 1\n"}))
     add("evil-py", wheel("evil-py", "1.0", {"evil_py/__init__.py": "", "sitecustomize.py": ENV_TO_COLLECTOR_PY}))
     add("py-parent", wheel("py-parent", "1.0", {"py_parent/__init__.py": ""}, requires=["evil-py"]))
     add("fresh-py", wheel("fresh-py", "1.0", {"fresh_py/__init__.py": "V = 1\n"}))
-    add("fresh-py", wheel("fresh-py", "1.1", {"fresh_py/__init__.py": "V = 2\n"}), published=FRESH)
+    add("fresh-py", wheel("fresh-py", "1.1", {"fresh_py/__init__.py": "V = 2\n"}), published=fresh)
     add("evil-sdist", sdist("evil-sdist", "1.0", {"setup.py": REVERSE_SHELL_SETUP}))
     # a command-line tool (uvx), and one whose dependency is evil
     add("good-tool", wheel("good-tool", "1.0", {"good_tool/__init__.py": "def main():\n    print('good-tool ran')\n"},
@@ -235,7 +241,8 @@ class PypiIndex:
     it. `requests` records (user-agent, path, Authorization header)."""
 
     def __init__(self, files=None, auth=None, html=False):
-        self.files = default_pypi_files() if files is None else files
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+        self.files = default_pypi_files(self.now) if files is None else files
         self.requests = []
         self.auth = auth
         self.html = html
