@@ -96,6 +96,39 @@ Anything merged through the GitHub web UI reaches GitLab the next time you pull 
 
 ## Cutting a release
 
+### Build-machine trust boundary
+
+Published artifacts are built only on GitHub-hosted infrastructure. A release
+tag calls `ci.yml` and `wheels.yml`, but their routing expressions keep every
+tag job off the private runner:
+
+- the Linux libraries and sdist use GitHub-hosted Linux runners and pinned
+  PyPA manylinux or musllinux images;
+- both macOS libraries, including ARM64, use GitHub-hosted macOS runners;
+- both Windows libraries use GitHub-hosted Windows runners; and
+- the npm WebAssembly package is built on GitHub-hosted Linux.
+
+The private Apple-silicon pool is only an acceleration lane for trusted branch
+and pull-request testing. It must never build a file published to PyPI or npm.
+Before enabling or changing that pool, confirm every item in this checklist:
+
+- [ ] every runner has the unique `lazaret-tart` label and is limited to the
+      `lazaret-dev/lazaret` repository;
+- [ ] the controller accepts only canonical-repository pushes and
+      maintainer-authored, same-repository pull requests; fork and external
+      pull requests remain on GitHub-hosted runners;
+- [ ] GitHub requires approval for workflows from all external contributors;
+- [ ] each job receives a fresh ephemeral JIT runner and a fresh VM cloned
+      from the immutable base, and both are discarded after that one job;
+- [ ] the VM network permits required internet/DNS access but no access to the
+      host or LAN; and
+- [ ] tag pushes, release workflow calls, manual dispatches and scheduled
+      workflows resolve to GitHub-hosted labels in the routing-policy tests.
+
+The workflow file is defense in depth, not the only authorization boundary:
+the out-of-repository controller must reject an untrusted job before it creates
+or registers a runner, even if a pull request changes its own workflow YAML.
+
 1. Bump the version in one commit, and get it onto `main` (merge the PR, or push to `main`): `__version__` in `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and `version` under `[workspace.package]` in `rust/Cargo.toml`, the native engine's, which ships in the platform wheels; then run `cargo update --workspace --offline` in `rust/`, which rewrites the workspace's entries in `rust/Cargo.lock` (`lazaret-archive`, `lazaret-engine`, `lazaret-ffi`, `lazaret-net` and `lazaret-verify`; pratique keeps its own version), and commit that too. `sh scripts/check-versions.sh HEAD` checks all of them.
 2. Tag the commit on `main`, from a clean checkout of it:
    ```sh
