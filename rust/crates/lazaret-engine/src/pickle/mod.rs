@@ -56,7 +56,7 @@
 
 pub mod npy;
 pub mod vm;
-pub mod zip;
+pub use lazaret_archive::zip;
 
 #[cfg(test)]
 mod tests;
@@ -786,6 +786,24 @@ impl<'d, 'c> Reader<'d, 'c> {
         if l.is_empty() { "the pickle".into() } else { l.clone() }
     }
 
+    /// Read and charge a ZIP member prefix. A decoder may produce bytes before
+    /// discovering corrupt input; those bytes still consume the cumulative
+    /// model-file decompression budget.
+    fn zip_prefix(&mut self, src: &zip::Bytes, entry: &zip::Entry, n: usize, fetch: u64)
+        -> Result<Vec<u8>, zip::Miss>
+    {
+        match zip::read_prefix_counted(src, entry, n, fetch) {
+            Ok(bytes) => {
+                self.inflated = self.inflated.saturating_add(bytes.len() as u64);
+                Ok(bytes)
+            }
+            Err(error) => {
+                self.inflated = self.inflated.saturating_add(error.produced as u64);
+                Err(error.miss)
+            }
+        }
+    }
+
     fn cut(&mut self, part: usize, at: usize, why: &str) {
         let w = self.where_(part);
         if self.cuts.len() < MAX_CUTS {
@@ -901,8 +919,6 @@ impl<'d, 'c> Reader<'d, 'c> {
             if low.ends_with(b"/") && e.size == 0 {
                 continue;                                    // (a folder's own entry)
             }
-            let room = self.max_inflated.saturating_sub(self.inflated);
-            let fetch = room.saturating_mul(2).saturating_add(1 << 20);
             // a member whose directory entry's mode (its external attributes' high bits, whatever system made it)
             // makes it other than a regular file (a symlink, a directory, a device, a FIFO, a socket), or a regular
             // file anyone may run, before anything the format owns is passed over (H4 of the external re-review of
@@ -919,7 +935,7 @@ impl<'d, 'c> Reader<'d, 'c> {
                 }
             } else if e.executable() && marked.insert(e.local) {
                 self.opaque = true;
-                self.executable_member(src, e, &label, fetch);
+                self.executable_member(src, e, &label);
             }
             let r = if torch { rel(&e.name) } else { None };
             let r_low = r.as_ref().map(|r| r.to_ascii_lowercase());
@@ -933,15 +949,19 @@ impl<'d, 'c> Reader<'d, 'c> {
                 }
                 // a record of the format: small, and what it holds is what the format writes there
                 if let Some(check) = torch_record(rl) {
-                    match zip::read(src, e, 64) {
-                        Ok(b) if check(&b) => {}
-                        Ok(_) => self.opaque = true,
+                    let room = self.max_inflated.saturating_sub(self.inflated).min(64);
+                    match zip::read(src, e, room) {
+                        Ok(b) => {
+                            self.inflated = self.inflated.saturating_add(b.len() as u64);
+                            if !check(&b) { self.opaque = true; }
+                        }
                         Err(zip::Miss::Need) => {}
                         Err(zip::Miss::Bad(_)) => self.opaque = true,
                     }
                     continue;
                 }
                 if torchscript && rl.starts_with(b"code/") && rl.ends_with(b".py") {
+                    let room = self.max_inflated.saturating_sub(self.inflated);
                     self.torchscript_code(src, e, &label, room);
                     continue;
                 }
@@ -959,7 +979,15 @@ impl<'d, 'c> Reader<'d, 'c> {
                 self.opaque = true;
             }
             // what the member's first bytes are (enough for a protocol 0 pickle's first GLOBAL, and a tar's header)
-            let head = match zip::read_prefix(src, e, 512, fetch) {
+            let room = self.max_inflated.saturating_sub(self.inflated);
+            if room == 0 {
+                self.zip_cut(&label, "the shared decompression budget is spent");
+                self.opaque = true;
+                continue;
+            }
+            let head_len = usize::try_from(room.min(512)).unwrap_or(512);
+            let fetch = room.saturating_mul(2).saturating_add(1 << 20);
+            let head = match self.zip_prefix(src, e, head_len, fetch) {
                 Ok(h) => h,
                 Err(zip::Miss::Need) => continue,
                 Err(zip::Miss::Bad(why)) => {
@@ -968,8 +996,8 @@ impl<'d, 'c> Reader<'d, 'c> {
                     continue;
                 }
             };
-            self.inflated += head.len() as u64;
             let mut is_pickle = named_pkl || proto_start(&head) || proto0_global(&head) || head.starts_with(TORCH_MAGIC);
+            let mut probed_body = None;
             if !is_pickle && !head.starts_with(b"\x93NUMPY") {
                 // a program or an archive inside: what it would be at the top (SC-BINARY, SC-NESTED-ARCHIVE), named
                 if !format {
@@ -994,9 +1022,11 @@ impl<'d, 'c> Reader<'d, 'c> {
                 if !format && head.first().is_some_and(|&c| vm::is_opcode(c)) {
                     let room = self.max_inflated.saturating_sub(self.inflated);
                     if let Ok(b) = zip::read(src, e, room) {
+                        self.inflated = self.inflated.saturating_add(b.len() as u64);
                         let mut probe = Book::new(self.cls);
                         if matches!(Machine::new(&b, 0, false).run(&mut probe), End::Stop(_)) {
                             is_pickle = true;
+                            probed_body = Some(b);
                         }
                     }
                 }
@@ -1009,14 +1039,15 @@ impl<'d, 'c> Reader<'d, 'c> {
                 match npy_header(&head) {
                     Some((off, hl)) => {
                         let end = off.saturating_add(hl);
+                        let room = self.max_inflated.saturating_sub(self.inflated);
                         if end as u64 > room {
                             self.zip_cut(&label, "its .npy header is longer than the reader reads");
                             self.opaque = true;
                             continue;
                         }
-                        match zip::read_prefix(src, e, end, fetch) {
+                        let fetch = room.saturating_mul(2).saturating_add(1 << 20);
+                        match self.zip_prefix(src, e, end, fetch) {
                             Ok(h) => {
-                                self.inflated += h.len() as u64;
                                 match h.get(off..end).map(npy::header_has_object) {
                                     Some(Ok(false)) => continue,
                                     Some(Ok(true)) => {}
@@ -1036,17 +1067,24 @@ impl<'d, 'c> Reader<'d, 'c> {
                     None => self.opaque = true,
                 }
             }
-            let room = self.max_inflated.saturating_sub(self.inflated);
-            let body = match zip::read(src, e, room) {
-                Ok(b) => b,
-                Err(zip::Miss::Need) => continue,
-                Err(zip::Miss::Bad(why)) => {
-                    self.zip_cut(&label, &why);
-                    self.opaque = true;
-                    continue;
+            let body = match probed_body {
+                Some(body) => body,
+                None => {
+                    let room = self.max_inflated.saturating_sub(self.inflated);
+                    match zip::read(src, e, room) {
+                        Ok(b) => {
+                            self.inflated = self.inflated.saturating_add(b.len() as u64);
+                            b
+                        }
+                        Err(zip::Miss::Need) => continue,
+                        Err(zip::Miss::Bad(why)) => {
+                            self.zip_cut(&label, &why);
+                            self.opaque = true;
+                            continue;
+                        }
+                    }
                 }
             };
-            self.inflated += body.len() as u64;
             let k = self.part(label, Buf::Owned(body));
             if is_pickle {
                 // (a checkpoint's pickles, and any member whose bytes are a pickle: read as one)
@@ -1069,9 +1107,12 @@ impl<'d, 'c> Reader<'d, 'c> {
 
     /// A member a Unix system marked executable: SC-BINARY when its first bytes are a program's, else
     /// SC-NESTED-ARCHIVE (MINOR) naming it and its mode.
-    fn executable_member(&mut self, src: &zip::Bytes, e: &zip::Entry, label: &str, fetch: u64) {
+    fn executable_member(&mut self, src: &zip::Bytes, e: &zip::Entry, label: &str) {
         let mode = e.unix_mode().unwrap_or(0);
-        let head = match zip::read_prefix(src, e, 512, fetch) {
+        let room = self.max_inflated.saturating_sub(self.inflated);
+        let n = usize::try_from(room.min(512)).unwrap_or(512);
+        let fetch = room.saturating_mul(2).saturating_add(1 << 20);
+        let head = match self.zip_prefix(src, e, n, fetch) {
             Ok(h) => h,
             Err(zip::Miss::Need) => return,
             Err(zip::Miss::Bad(_)) => Vec::new(),

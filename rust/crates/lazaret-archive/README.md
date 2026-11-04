@@ -2,7 +2,10 @@
 
 Bounded, in-memory archive extraction in native Rust. The crate uses no external
 crates, performs no filesystem or network I/O, and forbids `unsafe` code.
-Lazaret's existing ZIP implementation is separate and unchanged.
+Lazaret's ZIP parser lives here as the `zip` subsystem. It lists the union of
+members found by common ZIP readers, reports where their views disagree, supports
+bounded whole-file and range-backed reads, and decompresses stored and DEFLATE
+members. The engine decides how an ambiguous model archive affects a finding.
 
 ## Support matrix
 
@@ -16,6 +19,7 @@ Lazaret's existing ZIP implementation is separate and unchanged.
 | Bzip2 | One in-memory file; block and combined CRC checks, multi-block and concatenated streams (pbzip2), unused selectors (lbzip2) |
 | XZ | One in-memory file; single-filter LZMA2 blocks, index verification, None/CRC32/CRC64 checks |
 | LZMA-alone | One in-memory file; known-size and end-marker streams |
+| ZIP | ZIP/ZIP64 listing across common reader views; bounded range-backed member reads; stored and DEFLATE data |
 
 These single-file formats can be used directly for compressed pickle payloads;
 the extracted entry is named `data`. The library decompresses but never executes

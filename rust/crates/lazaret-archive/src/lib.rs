@@ -10,6 +10,10 @@
 //!   multiple substreams, with packed and unpacked CRC-32 verification;
 //! * Bzip2 (including concatenated streams), XZ (single-filter LZMA2 blocks), and
 //!   LZMA-alone as single files, suitable for compressed pickle payloads.
+//! * ZIP listing and bounded member reads, including ZIP64 and the union of the
+//!   members found by common directory and streaming readers. ZIP remains a
+//!   caller-directed subsystem because ambiguous listings must be interpreted by
+//!   the scanner that requested them.
 //!
 //! Compressed or encrypted RAR members, solid/multi-volume archives, links and special
 //! files are refused with [`Error::Unsupported`]. Encrypted 7-Zip, coder chains and
@@ -35,6 +39,7 @@ mod rar;
 mod seven;
 mod tar;
 mod xz;
+pub mod zip;
 
 use lazaret_verify::inflate;
 

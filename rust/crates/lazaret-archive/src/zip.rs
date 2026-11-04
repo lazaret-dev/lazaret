@@ -14,6 +14,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use lazaret_verify::inflate::{decode_all, Format, Limits};
 
+fn commas(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i != 0 && (s.len() - i) % 3 == 0 { out.push(','); }
+        out.push(c);
+    }
+    out
+}
+
 /// One member of the archive, as a view of it finds it (`Listing`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -73,6 +83,15 @@ impl Entry {
 pub enum Miss {
     Need,
     Bad(String),
+}
+
+/// A failed prefix read, including bytes the decoder produced before it found
+/// the error. Callers with a cumulative decompression budget must charge
+/// `produced` even though no bytes are returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrefixError {
+    pub miss: Miss,
+    pub produced: usize,
 }
 
 impl From<String> for Miss {
@@ -207,7 +226,7 @@ impl<'d> Bytes<'d> {
         let mut needed = self.needed.borrow_mut();
         if self.given.saturating_add(*needed).saturating_add(add) > self.cap {
             return Err(Miss::Bad(format!("it would take reading more than the {} bytes read of a model file",
-                                         super::commas(self.cap))));
+                                         commas(self.cap))));
         }
         *needed += add;
         for (s, e) in new {
@@ -380,12 +399,12 @@ fn views_of(src: &Bytes, ep: u64, amb: &mut Vec<String>) -> Result<Vec<View>, Mi
                     z64.get_or_insert(v);
                 }
                 Got::Asked => return Err(Miss::Need),
-                _ => amb.push(format!("its zip64 locator names no zip64 record {whose} (byte {})", super::commas(pos))),
+                _ => amb.push(format!("its zip64 locator names no zip64 record {whose} (byte {})", commas(pos))),
             }
         }
         if z != zipfile_at {
             amb.push(format!("its zip64 record is at byte {}, not just before its locator, where zipfile reads it",
-                             super::commas(z)));
+                             commas(z)));
         }
         match z64 {
             Some(v) => {
@@ -393,8 +412,8 @@ fn views_of(src: &Bytes, ep: u64, amb: &mut Vec<String>) -> Result<Vec<View>, Mi
                     || (off != 0xFFFF_FFFF && off != v.off);
                 if differ {
                     amb.push(format!("its zip64 record ({} entries, {} bytes at byte {}) and its end record ({} entries, \
-                                      {} bytes at byte {}) disagree", v.count, super::commas(v.size), super::commas(v.off),
-                                     count, super::commas(size), super::commas(off)));
+                                      {} bytes at byte {}) disagree", v.count, commas(v.size), commas(v.off),
+                                     count, commas(size), commas(off)));
                     if !saturated {
                         out.push(classic);              // (what a reader that takes the end record when it is not
                     }                                   // saturated reads: miniz)
@@ -498,8 +517,8 @@ fn extra_fields(extra: &[u8]) -> Vec<(u16, &[u8])> {
 fn directory(src: &Bytes, at: u64, v: View, concat: i128, budget: &mut Budget, max_dir: u64, amb: &mut Vec<String>)
              -> Result<Option<Vec<Entry>>, Miss> {
     if v.size > max_dir {
-        return Err(format!("a central directory of {} bytes, more than the {} read", super::commas(v.size),
-                           super::commas(max_dir)).into());
+        return Err(format!("a central directory of {} bytes, more than the {} read", commas(v.size),
+                           commas(max_dir)).into());
     }
     let Some(cd_end) = at.checked_add(v.size).filter(|&e| e <= src.size) else { return Ok(None) };
     src.get(at, v.size, "")?;                                  // (the declared directory, in one range)
@@ -571,7 +590,7 @@ fn directory(src: &Bytes, at: u64, v: View, concat: i128, budget: &mut Budget, m
     let listed = out.iter().filter(|e| e.listed).count() as u64;
     if pos < cd_end {
         amb.push(format!("its central directory holds {} bytes after its {inside} entries that are not an entry",
-                         super::commas(cd_end - pos)));
+                         commas(cd_end - pos)));
     }
     if listed > inside {
         amb.push(format!("{} central directory entries follow its declared size", listed - inside));
@@ -747,7 +766,7 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
             }
             if concat != 0 {
                 here_amb.push(format!("its directory is at byte {} by its end record's place and size, and at byte \
-                                       {} by its offset", super::commas(a), super::commas(v.off)));
+                                       {} by its offset", commas(a), commas(v.off)));
             }
         }
         if !dirs.is_empty() {
@@ -765,7 +784,7 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
         amb.push(format!("it has {} end records whose comments run to its end", read.len()));
     }
     if primary_ep != last {
-        amb.push(format!("its last end record (byte {}) is not one a reader can use", super::commas(last)));
+        amb.push(format!("its last end record (byte {}) is not one a reader can use", commas(last)));
     }
     // the union: zipfile's view first
     let mut out: Vec<Entry> = Vec::new();
@@ -803,7 +822,7 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
                 locals.insert(at, l);
             }
             Ok(None) => {}
-            Err(why) => amb.push(format!("{why} at byte {}, where its directory puts {}", super::commas(at),
+            Err(why) => amb.push(format!("{why} at byte {}, where its directory puts {}", commas(at),
                                          quoted(&e.name))),
         }
     }
@@ -825,11 +844,11 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
             .filter(|n| !names.contains(*n)).collect();
         if l.ufields > 1 {
             differ.push(format!("the local header of {} (byte {}) has {} Unicode Path extra fields (readers differ on \
-                                 which they take)", quoted(&e.name), super::commas(e.local), l.ufields));
+                                 which they take)", quoted(&e.name), commas(e.local), l.ufields));
         }
         if !others.is_empty() || l.method != e.method || l.flags != e.flags || sizes {
             differ.push(format!("the local header of {} (byte {}) is not its directory entry's: {}", quoted(&e.name),
-                                super::commas(e.local),
+                                commas(e.local),
                                 if let Some(n) = others.first() { format!("its name is {}", quoted(n)) }
                                 else if sizes { format!("{} bytes, not {}", l.csize, e.csize) }
                                 else { "its method or flags differ".into() }));
@@ -873,9 +892,9 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
                 Err(_) => {
                     amb.push(if p == 0 {
                         let first = out.iter().map(|e| e.local).min().unwrap_or(primary[0].0);
-                        format!("{} bytes before its first member", super::commas(first))
+                        format!("{} bytes before its first member", commas(first))
                     } else {
-                        format!("bytes at byte {} that are neither a member nor its directory", super::commas(p))
+                        format!("bytes at byte {} that are neither a member nor its directory", commas(p))
                     });
                     break;
                 }
@@ -896,11 +915,11 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
             }),
         };
         if listed_here.is_none() {
-            unlisted.push(format!("a member at byte {} that no central directory lists ({})", super::commas(p),
+            unlisted.push(format!("a member at byte {} that no central directory lists ({})", commas(p),
                                   quoted(&l.name)));
         }
         let Some(csize) = csize else {
-            amb.push(format!("a member at byte {} whose size only its data descriptor says", super::commas(p)));
+            amb.push(format!("a member at byte {} whose size only its data descriptor says", commas(p)));
             break;
         };
         let (flags, size, wide) = (l.flags, l.size, csize >= 0xFFFF_FFFF || l.size >= 0xFFFF_FFFF);
@@ -914,13 +933,13 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
                 Got::Here(d) => next += if d == b"PK\x07\x08" { 4 } else { 0 } + if wide { 20 } else { 12 },
                 Got::Asked => break,
                 Got::Past => {
-                    amb.push(format!("a member at byte {} that runs past the archive's end", super::commas(p)));
+                    amb.push(format!("a member at byte {} that runs past the archive's end", commas(p)));
                     break;
                 }
             }
         }
         if next >= src.size {
-            amb.push(format!("a member at byte {} that runs past the archive's end", super::commas(p)));
+            amb.push(format!("a member at byte {} that runs past the archive's end", commas(p)));
             break;
         }
         p = next;
@@ -929,12 +948,12 @@ pub fn entries(src: &Bytes, max: usize, max_dir: u64) -> Result<Listing, Miss> {
     // bytes after the primary directory, and after its end record
     let (pat, pv, _) = &primary[0];
     if pat + pv.size < pv.end {
-        amb.push(format!("{} bytes between its central directory and its end record", super::commas(pv.end - pat - pv.size)));
+        amb.push(format!("{} bytes between its central directory and its end record", commas(pv.end - pat - pv.size)));
     }
     if let Some(c) = src.peek(primary_ep + 20, 2).and_then(|c| u16_at(c, 0)) {
         let end = primary_ep + 22 + c as u64;
         if end < src.size {
-            amb.push(format!("{} bytes after its end record", super::commas(src.size - end)));
+            amb.push(format!("{} bytes after its end record", commas(src.size - end)));
         } else if end > src.size {
             amb.push("its end record's comment runs past the file's end".into());
         }
@@ -1019,23 +1038,30 @@ fn raw<'a>(src: &'a Bytes, e: &Entry, want: u64, fetch: u64, too_many: impl Fn()
 /// An entry's first `n` bytes, decompressed (fewer when it is shorter). Its first PREFIX_RAW stored bytes are read
 /// for them, and all of them (at most `fetch` asked for) when those hold fewer and the entry goes on: deflate's empty
 /// blocks hold nothing.
-pub fn read_prefix(src: &Bytes, e: &Entry, n: usize, fetch: u64) -> Result<Vec<u8>, Miss> {
+pub fn read_prefix_counted(src: &Bytes, e: &Entry, n: usize, fetch: u64) -> Result<Vec<u8>, PrefixError> {
     use lazaret_verify::inflate::{Inflater, Status};
     let first = PREFIX_RAW.max(n as u64);
     let more = || format!("its first {n} bytes are not in the {fetch} bytes of it read");
     match e.method {
         0 => {
-            let raw = raw(src, e, first, u64::MAX, String::new)?;
+            let raw = raw(src, e, first, u64::MAX, String::new)
+                .map_err(|miss| PrefixError { miss, produced: 0 })?;
             Ok(raw[..raw.len().min(n)].to_vec())
         }
         8 => {
             // (the bytes decompressed, and whether the stream ended)
-            let inflate = |raw: &[u8]| -> Result<(Vec<u8>, bool), Miss> {
+            let inflate = |raw: &[u8]| -> Result<(Vec<u8>, bool), PrefixError> {
                 let mut inf = Inflater::new(Format::Deflate, Limits::new(u64::MAX));
                 let mut out = vec![0u8; n];
                 let (mut got, mut pos, mut ended) = (0usize, 0usize, false);
                 while got < n {
-                    let pr = inf.inflate(&raw[pos..], &mut out[got..]).map_err(|err| err.to_string())?;
+                    let pr = match inf.inflate(&raw[pos..], &mut out[got..]) {
+                        Ok(progress) => progress,
+                        Err(error) => return Err(PrefixError {
+                            miss: Miss::Bad(error.to_string()),
+                            produced: usize::try_from(inf.total_out()).unwrap_or(usize::MAX),
+                        }),
+                    };
                     pos += pr.consumed;
                     got += pr.produced;
                     if pr.status == Status::Done {
@@ -1049,15 +1075,27 @@ pub fn read_prefix(src: &Bytes, e: &Entry, n: usize, fetch: u64) -> Result<Vec<u
                 out.truncate(got);
                 Ok((out, ended))
             };
-            let raw1 = raw(src, e, first, u64::MAX, String::new)?;
+            let raw1 = raw(src, e, first, u64::MAX, String::new)
+                .map_err(|miss| PrefixError { miss, produced: 0 })?;
             let (out, ended) = inflate(raw1)?;
             if out.len() < n && !ended && (raw1.len() as u64) < e.csize {
-                return Ok(inflate(raw(src, e, e.csize, fetch, more)?)?.0);
+                let all = raw(src, e, e.csize, fetch, more)
+                    .map_err(|miss| PrefixError { miss, produced: 0 })?;
+                return Ok(inflate(all)?.0);
             }
             Ok(out)
         }
-        m => Err(format!("it is compressed with {} (method {m}), which the reader cannot decompress", method_name(m)).into()),
+        m => Err(PrefixError {
+            miss: format!("it is compressed with {} (method {m}), which the reader cannot decompress", method_name(m)).into(),
+            produced: 0,
+        }),
     }
+}
+
+/// Compatibility wrapper for callers without a cumulative decompression
+/// budget. Budgeted callers should use [`read_prefix_counted`].
+pub fn read_prefix(src: &Bytes, e: &Entry, n: usize, fetch: u64) -> Result<Vec<u8>, Miss> {
+    read_prefix_counted(src, e, n, fetch).map_err(|error| error.miss)
 }
 
 /// An entry's bytes, decompressed (at most `limit` of them), or why they cannot be read.
