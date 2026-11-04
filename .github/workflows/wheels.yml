@@ -190,9 +190,12 @@ jobs:
   # library on macos-15-intel, GitHub's last Intel image, available until
   # August 2027; after that it becomes a cross build on Apple silicon, checked
   # by its headers only; the ARM64 Windows DLL on windows-11-arm). The
-  # deployment targets are the tags' minimums. The Windows DLLs link the C
-  # runtime statically: machines without the Visual C++ redistributable can
-  # load them.
+  # deployment targets are the tags' minimums. Apple silicon runs the full
+  # Python suite; Intel builds and loads the native library and runs a focused
+  # engine/snapshot smoke set, while the install job below also installs and
+  # executes the finished Intel wheel. This keeps Intel compatibility without
+  # duplicating the hour-long macOS suite. The Windows DLLs link the C runtime
+  # statically: machines without the Visual C++ redistributable can load them.
   macos-windows:
     name: library (${{ matrix.tag }})
     # The native ARM64 Mac library uses our disposable Apple-silicon pool for
@@ -216,12 +219,9 @@ jobs:
         fromJSON('["self-hosted","macOS","ARM64","lazaret-tart"]') ||
         matrix.runner
       }}
-    # (the Python suite alone took some 20 minutes on win_amd64, PR #17's
-    # first run, and the second's win_amd64 and macOS jobs were cancelled at
-    # 30 with the build before it)
     # The full Python suite takes about 53 minutes on the Tart macOS image;
-    # setup and the native build put the complete job just over one hour.
-    timeout-minutes: 90
+    # Intel's focused lane has a smaller per-matrix timeout.
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -231,21 +231,29 @@ jobs:
             target: aarch64-apple-darwin
             library: liblazaret_native.dylib
             deployment-target: "11.0"
+            test-profile: full
+            timeout: 90
           - tag: macosx_10_12_x86_64
             runner: macos-15-intel
             target: x86_64-apple-darwin
             library: liblazaret_native.dylib
             deployment-target: "10.12"
+            test-profile: intel-smoke
+            timeout: 30
           - tag: win_amd64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
             library: lazaret_native.dll
             rustflags: -C target-feature=+crt-static
+            test-profile: full
+            timeout: 90
           - tag: win_arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             library: lazaret_native.dll
             rustflags: -C target-feature=+crt-static
+            test-profile: full
+            timeout: 90
     defaults:
       run:
         shell: bash
@@ -274,9 +282,20 @@ jobs:
         run: cargo +"$RUST_VERSION" build --release --offline --locked --target "$TARGET"
       - name: Check it against its tag, and load it
         run: python scripts/check_native_library.py "$LAZARET_NATIVE_LIB" "$TAG" --load
-      - name: The Python suite on this library (its recorded outputs among them)
+      - name: The full Python suite on this library (its recorded outputs among them)
+        if: matrix.test-profile == 'full'
         working-directory: python
         run: python -m unittest discover -s tests -t .
+      - name: Intel native-engine and recorded-output smoke tests
+        if: matrix.test-profile == 'intel-smoke'
+        working-directory: python
+        run: >-
+          python -m unittest
+          tests.scanner.test_engine_scan_file
+          tests.scanner.test_jsparse
+          tests.architecture.test_snapshot_scanfile
+          tests.architecture.test_snapshot_js_parse
+          tests.architecture.test_snapshot_small
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-${{ matrix.tag }}

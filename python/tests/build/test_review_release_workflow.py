@@ -192,6 +192,26 @@ class WheelPlatformTests(unittest.TestCase):
         self.assertIn("MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment-target }}", other)
         self.assertIn("RUSTFLAGS: ${{ matrix.rustflags }}", other)
 
+    def test_intel_mac_keeps_compatibility_without_repeating_the_full_suite(self):
+        other = self.jobs["macos-windows"]
+        self.assertIn("timeout-minutes: ${{ matrix.timeout }}", other)
+        intel = other[other.index("tag: macosx_10_12_x86_64"):][:500]
+        self.assertIn("test-profile: intel-smoke", intel)
+        self.assertIn("timeout: 30", intel)
+        arm = other[other.index("tag: macosx_11_0_arm64"):][:500]
+        self.assertIn("test-profile: full", arm)
+        self.assertIn("timeout: 90", arm)
+
+        full = re.search(r"(?ms)- name: The full Python suite.*?(?=^      - |\Z)", other).group(0)
+        self.assertIn("if: matrix.test-profile == 'full'", full)
+        self.assertIn("python -m unittest discover -s tests -t .", full)
+        smoke = re.search(r"(?ms)- name: Intel native-engine.*?(?=^      - |\Z)", other).group(0)
+        self.assertIn("if: matrix.test-profile == 'intel-smoke'", smoke)
+        for module in ("tests.scanner.test_engine_scan_file", "tests.scanner.test_jsparse",
+                       "tests.architecture.test_snapshot_scanfile", "tests.architecture.test_snapshot_js_parse",
+                       "tests.architecture.test_snapshot_small"):
+            self.assertIn(module, smoke)
+
     def test_the_musl_libraries(self):
         """Built in the musllinux image of their tag with the musl-hosted
         toolchain, linking musl's libc dynamically (a static one would be a
@@ -276,7 +296,7 @@ class PythonTestsRunOnTheLibrary(unittest.TestCase):
                         self.assertTrue("cargo build" in before or 'cargo +"$RUST_VERSION" build' in before,
                                         "no library is built for them")
         # ci.yml's per-PR, boundary, integration, js and rust jobs; wheels.yml's three library jobs
-        self.assertEqual(runs, 8)
+        self.assertEqual(runs, 9)
 
     def test_the_whole_suite_runs_where_a_library_is_built(self):
         """The snapshot tests (test_snapshot_*) skip without the library: the
