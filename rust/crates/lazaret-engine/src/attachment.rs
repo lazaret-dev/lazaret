@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 pub const API_SCHEMA_VERSION: u32 = 1;
 pub const MAIL_PROFILE_ID: &str = "mail-attachment";
+pub const MAIL_P0_PROFILE_VERSION: u32 = 1;
+pub const MAIL_P0_COVERAGE_VERSION: u32 = 1;
 pub const MAIL_PROFILE_VERSION: u32 = 2;
 pub const MAIL_COVERAGE_VERSION: u32 = 2;
 
@@ -33,6 +35,14 @@ pub const MAIL_P0_CAPABILITIES: &[Capability] = &[
     Capability::Model,
     Capability::Media,
     Capability::Keystore,
+];
+
+pub const MAIL_P1_CAPABILITIES: &[Capability] = &[
+    Capability::Binary,
+    Capability::Source,
+    Capability::Model,
+    Capability::Media,
+    Capability::Keystore,
     Capability::Document,
 ];
 
@@ -49,9 +59,19 @@ impl AnalysisProfile {
     pub const fn mail_p0() -> Self {
         Self {
             id: MAIL_PROFILE_ID,
+            version: MAIL_P0_PROFILE_VERSION,
+            coverage_version: MAIL_P0_COVERAGE_VERSION,
+            capabilities: MAIL_P0_CAPABILITIES,
+        }
+    }
+
+    /// Gateway profile with bounded structural PDF and OOXML analysis.
+    pub const fn mail_p1() -> Self {
+        Self {
+            id: MAIL_PROFILE_ID,
             version: MAIL_PROFILE_VERSION,
             coverage_version: MAIL_COVERAGE_VERSION,
-            capabilities: MAIL_P0_CAPABILITIES,
+            capabilities: MAIL_P1_CAPABILITIES,
         }
     }
 }
@@ -1694,6 +1714,18 @@ mod tests {
     }
 
     #[test]
+    fn document_analysis_is_an_explicit_p1_contract() {
+        let p0 = AnalysisProfile::mail_p0();
+        let p1 = AnalysisProfile::mail_p1();
+        assert_eq!(p0.version, MAIL_P0_PROFILE_VERSION);
+        assert_eq!(p0.coverage_version, MAIL_P0_COVERAGE_VERSION);
+        assert!(!p0.capabilities.contains(&Capability::Document));
+        assert_eq!(p1.version, MAIL_PROFILE_VERSION);
+        assert_eq!(p1.coverage_version, MAIL_COVERAGE_VERSION);
+        assert!(p1.capabilities.contains(&Capability::Document));
+    }
+
+    #[test]
     fn exact_budget_boundaries_succeed_and_one_over_does_not_spend() {
         let mut budget = WorkBudget::new(limits(5));
         assert_eq!(budget.charge(Resource::DecodedBytes, 5), Ok(()));
@@ -1799,9 +1831,9 @@ mod tests {
     #[test]
     fn any_incomplete_reason_or_unfinished_analyzer_prevents_complete() {
         let scanner = AttachmentScanner::with_pack(
-            AnalysisProfile::mail_p0(),
+            AnalysisProfile::mail_p1(),
             pack::current(),
-            MAIL_P0_CAPABILITIES,
+            MAIL_P1_CAPABILITIES,
         );
         let mut report = AttachmentReport {
             versions: scanner.versions(),
@@ -1815,7 +1847,7 @@ mod tests {
             detected_formats: Vec::new(),
             findings: Vec::new(),
             requested_ranges: Vec::new(),
-            coverage: MAIL_P0_CAPABILITIES
+            coverage: MAIL_P1_CAPABILITIES
                 .iter()
                 .map(|capability| AnalyzerCoverage {
                     capability: *capability,
@@ -1889,7 +1921,7 @@ mod tests {
 
     #[test]
     fn pdf_structure_and_active_content_are_typed_for_the_gateway() {
-        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p0());
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
         let bytes = pdf("/OpenAction << /S /JavaScript /JS (x) >>");
         let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
         let report = scanner
@@ -1921,7 +1953,7 @@ mod tests {
 
     #[test]
     fn ooxml_structure_not_extension_confirms_type_and_surfaces_features() {
-        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p0());
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
         let content_types = br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
         let relationships = br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
         let external = br#"<Relationships><Relationship Id="rId2" Type="image" TargetMode="External" Target="https://example.invalid/a.png"/></Relationships>"#;
@@ -1968,7 +2000,7 @@ mod tests {
 
     #[test]
     fn generic_zip_is_not_a_document_and_false_document_claims_are_reported() {
-        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p0());
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
         let bytes = stored_zip(&[("hello.txt", b"hello")]);
         let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
         let report = scanner
