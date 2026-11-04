@@ -718,19 +718,42 @@ fn adversarial_many_fields_linear_cost() {
     };
 
     let d100 = build(100);
-    let t1 = Instant::now();
-    assert!(file_descriptor(&d100));
-    let e1 = t1.elapsed();
-
     let d1000 = build(1000);
-    let t2 = Instant::now();
+    assert!(file_descriptor(&d100));             // warm allocation and instruction caches before timing
     assert!(file_descriptor(&d1000));
-    let e2 = t2.elapsed();
+
+    // One descriptor is faster than a shared runner's timer and scheduler granularity: timing one call made the
+    // 100-field denominator nearly zero when macOS paused the 1,000-field call. Measure batches instead, interleave
+    // their order, and take the fastest of several samples (the uncontended cost). `black_box` keeps release builds
+    // from learning that every batch asks the same question.
+    const REPEATS: usize = 128;
+    const SAMPLES: usize = 7;
+    let timed = |descriptor: &[u8]| {
+        let start = Instant::now();
+        for _ in 0..REPEATS {
+            assert!(std::hint::black_box(file_descriptor(std::hint::black_box(descriptor))));
+        }
+        start.elapsed()
+    };
+    let (mut e1, mut e2) = (None, None);
+    for sample in 0..SAMPLES {
+        let (a, b) = if sample % 2 == 0 {
+            (timed(&d100), timed(&d1000))
+        } else {
+            let large = timed(&d1000);
+            (timed(&d100), large)
+        };
+        e1 = Some(e1.map_or(a, |best| a.min(best)));
+        e2 = Some(e2.map_or(b, |best| b.min(best)));
+    }
+    let (e1, e2) = (e1.unwrap(), e2.unwrap());
 
     // 10x more fields should take roughly 10x longer (linear), not quadratic
     // Allow generous margin: 50x would still be acceptable
     let ratio = e2.as_nanos() as f64 / e1.as_nanos().max(1) as f64;
-    assert!(ratio < 50.0, "cost should be linear: 1000/100 fields took {:.1}x (limit 50x)", ratio);
+    assert!(ratio < 50.0,
+            "cost should be linear: batched 1000/100 fields took {:.1}x (limit 50x; {:?} vs {:?})",
+            ratio, e2, e1);
 }
 
 #[test]

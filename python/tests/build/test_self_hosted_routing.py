@@ -151,7 +151,7 @@ class SelfHostedRoutingTests(unittest.TestCase):
     LABELS = ["self-hosted", "macOS", "ARM64", "lazaret-tart"]
 
     def assert_ci_policy(self, expression):
-        self.assertEqual(route(expression, event="push", ref="refs/heads/integration"), self.LABELS)
+        self.assertEqual(route(expression, event="push", ref="refs/heads/main"), self.LABELS)
         self.assertEqual(route(expression, event="push", ref="refs/tags/v0.1.9"), "macos-latest")
         self.assertEqual(route(expression, event="pull_request", ref="refs/pull/44/merge"), self.LABELS)
         self.assertEqual(route(expression, event="pull_request", ref="refs/pull/44/merge",
@@ -162,7 +162,7 @@ class SelfHostedRoutingTests(unittest.TestCase):
                          "macos-latest")
         self.assertEqual(route(expression, event="schedule", ref="refs/heads/integration"),
                          "macos-latest")
-        self.assertEqual(route(expression, event="push", ref="refs/heads/integration",
+        self.assertEqual(route(expression, event="push", ref="refs/heads/main",
                                os_name="ubuntu-latest"), "ubuntu-latest")
 
     def assert_wheel_policy(self, expression):
@@ -178,7 +178,6 @@ class SelfHostedRoutingTests(unittest.TestCase):
 
     def test_native_ci_lanes_use_the_pool(self):
         text = workflow("ci.yml")
-        self.assertIn("branches: [main, integration]", text)
         for name in ("python-unit", "js", "rust"):
             section = job(text, name)
             self.assert_ci_policy(runner_expression(section))
@@ -190,6 +189,11 @@ class SelfHostedRoutingTests(unittest.TestCase):
         self.assertIn('{ os: windows-latest, python: "3.10" }', boundaries)
         for name in ("versions", "python-unit", "python-integration", "js", "rust"):
             self.assertIn("if: github.event_name != 'schedule'", job(text, name))
+
+    def test_integration_is_tested_by_pull_requests_not_again_after_merge(self):
+        text = workflow("ci.yml")
+        self.assertIn("push:\n    branches: [main]\n  pull_request:", text)
+        self.assertNotIn("branches: [main, integration]", text)
 
     def test_the_arm_wheel_build_and_install_use_the_pool(self):
         text = workflow("wheels.yml")
