@@ -2877,6 +2877,27 @@ fn zip_x(entries: &[Zx]) -> Vec<u8> {
     [body.clone(), cd.clone(), zend(entries.len() as u16, cd.len(), body.len(), b"")].concat()
 }
 
+#[test]
+fn every_zip_side_read_shares_the_inflated_budget() {
+    let executable = [b"\x7fELF".as_slice(), &[2, 1, 1], &[0u8; 120]].concat();
+    let entries: Vec<Zx> = vec![
+        (&b"archive/byteorder"[..], &b"little"[..], vec![], vec![], 0o100644),
+        (&b"archive/data.pkl"[..], &b"\x80\x02N."[..], vec![], vec![], 0o100644),
+        (&b"archive/tool"[..], executable.as_slice(), vec![], vec![], 0o100755),
+        (&b"archive/version"[..], &b"3\n"[..], vec![], vec![], 0o100644),
+    ];
+    let archive = zip_x(&entries);
+    let p = crate::pack::current();
+    let classes = Classes::of(&p);
+    let mut reader = Reader::new(&p, classes);
+    reader.max_inflated = 8;
+    reader.read_zip(&zip::Bytes::whole(&archive));
+    assert!(reader.inflated <= reader.max_inflated,
+            "ZIP metadata, executable prefixes and payloads share one budget: {} > {}",
+            reader.inflated, reader.max_inflated);
+    assert!(reader.opaque, "the executable and the exhausted reading keep the archive opaque");
+}
+
 /// Info-ZIP's Unicode Path extra field: version, the CRC-32 of `raw`, `name`.
 fn upath(version: u8, raw: &[u8], name: &[u8]) -> Vec<u8> {
     let mut x = 0x7075u16.to_le_bytes().to_vec();
