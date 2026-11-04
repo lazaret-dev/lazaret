@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 pub const API_SCHEMA_VERSION: u32 = 1;
 pub const MAIL_PROFILE_ID: &str = "mail-attachment";
-pub const MAIL_PROFILE_VERSION: u32 = 1;
-pub const MAIL_COVERAGE_VERSION: u32 = 1;
+pub const MAIL_PROFILE_VERSION: u32 = 2;
+pub const MAIL_COVERAGE_VERSION: u32 = 2;
 
 /// A detector family named by an analysis profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -24,6 +24,7 @@ pub enum Capability {
     Model,
     Media,
     Keystore,
+    Document,
 }
 
 pub const MAIL_P0_CAPABILITIES: &[Capability] = &[
@@ -32,6 +33,7 @@ pub const MAIL_P0_CAPABILITIES: &[Capability] = &[
     Capability::Model,
     Capability::Media,
     Capability::Keystore,
+    Capability::Document,
 ];
 
 /// The declared detector contract against which completeness is measured.
@@ -186,11 +188,10 @@ impl AttachmentScanner {
                     IncompleteReason {
                         kind: IncompleteKind::Unsupported,
                         analyzer: Some(analyzer_name(*capability)),
-                        detail: Some(if *capability == Capability::Binary {
-                            "bounded byte-signature preflight only; complete binary coverage is not wired yet"
-                                .to_string()
-                        } else {
-                            "detector adapter is not wired yet".to_string()
+                        detail: Some(match *capability {
+                            Capability::Binary => "bounded byte-signature preflight only; complete binary coverage is not wired yet".to_string(),
+                            Capability::Document => "bounded structural document pass only; cancellation is not yet threaded through archive and PDF inner loops".to_string(),
+                            _ => "detector adapter is not wired yet".to_string(),
                         }),
                     },
                 );
@@ -235,7 +236,13 @@ impl AttachmentScanner {
         let path = pystr::u(attachment.filename.unwrap_or("attachment"));
         let program = crate::binary::native_program_description(&self.pack, sample);
         if let Some(description) = program.as_ref() {
-            if let Err(stop) = retain_format(&mut report, context, description, evidence) {
+            if let Err(stop) = retain_format(
+                &mut report,
+                context,
+                DetectedFormatKind::ExecutableOrLoadableProgram,
+                description,
+                evidence,
+            ) {
                 record_stop(&mut report, context, "binary-preflight", stop);
                 return Ok(finish(report, context));
             }
@@ -300,7 +307,24 @@ impl AttachmentScanner {
             }
         }
 
+        if self.profile.capabilities.contains(&Capability::Document) {
+            set_coverage(&mut report, Capability::Document, CoverageState::Incomplete);
+            if let Err(stop) = self.scan_documents(&attachment, context, &mut report) {
+                record_stop(&mut report, context, "document", stop);
+            }
+        }
+
         Ok(finish(report, context))
+    }
+
+    fn scan_documents(
+        &self,
+        attachment: &WholeAttachment<'_>,
+        context: &mut ScanContext<'_>,
+        report: &mut AttachmentReport,
+    ) -> Result<(), StopReason> {
+        scan_pdf(attachment, context, report)?;
+        scan_ooxml(&self.pack, attachment, context, report)
     }
 }
 
@@ -351,6 +375,10 @@ pub struct ReportedInput {
 #[non_exhaustive]
 pub enum DetectedFormatKind {
     ExecutableOrLoadableProgram,
+    Pdf,
+    WordprocessingDocument,
+    SpreadsheetDocument,
+    PresentationDocument,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -368,6 +396,11 @@ pub enum SignalClass {
     CredentialOrPrivateKeyMaterial,
     OpaqueOrUnaccountedPayload,
     NameOrDeclaredTypeMismatch,
+    ActiveDocumentContent,
+    StructuralAmbiguity,
+    EncryptedOrPasswordProtected,
+    MalformedOrUnsupportedContent,
+    ExternalReference,
     Other,
 }
 
@@ -737,6 +770,12 @@ impl<'a> ScanContext<'a> {
     pub fn limits(&self) -> WorkLimits {
         self.budget.limits()
     }
+
+    pub fn remaining(&self, resource: Resource) -> u64 {
+        self.budget
+            .limit(resource)
+            .saturating_sub(self.budget.used(resource))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -784,6 +823,7 @@ pub enum IncompleteKind {
     LimitExhausted,
     Cancelled,
     InternalEngineFailure,
+    EncryptedOrPasswordProtected,
     ReasonsTruncated,
 }
 
@@ -821,6 +861,451 @@ pub struct AttachmentReport {
     pub redacted: bool,
 }
 
+fn document_limits(context: &ScanContext<'_>) -> crate::document::Limits {
+    let defaults = crate::document::Limits::default();
+    let remaining_operations = context.remaining(Resource::Operations);
+    crate::document::Limits {
+        max_members: usize::try_from(context.remaining(Resource::Members))
+            .unwrap_or(usize::MAX)
+            .min(defaults.max_members),
+        max_total_member_bytes: context
+            .remaining(Resource::DecodedBytes)
+            .min(defaults.max_total_member_bytes),
+        max_xml_bytes: usize::try_from(context.remaining(Resource::DecodedBytes))
+            .unwrap_or(usize::MAX)
+            .min(defaults.max_xml_bytes),
+        max_xml_tags: usize::try_from(remaining_operations)
+            .unwrap_or(usize::MAX)
+            .min(defaults.max_xml_tags),
+        max_xml_attributes: usize::try_from(remaining_operations.saturating_mul(4))
+            .unwrap_or(usize::MAX)
+            .min(defaults.max_xml_attributes),
+        max_features: usize::try_from(context.remaining(Resource::Findings))
+            .unwrap_or(usize::MAX)
+            .min(defaults.max_features),
+        max_reasons: usize::try_from(context.remaining(Resource::IncompleteReasons))
+            .unwrap_or(usize::MAX)
+            .min(defaults.max_reasons),
+        max_detail_bytes: defaults.max_detail_bytes,
+        max_pdf_bytes: usize::try_from(context.remaining(Resource::InputBytes))
+            .unwrap_or(usize::MAX)
+            .max(context.usage().input_bytes as usize)
+            .min(defaults.max_pdf_bytes),
+        max_pdf_tokens: usize::try_from(remaining_operations)
+            .unwrap_or(usize::MAX)
+            .min(defaults.max_pdf_tokens),
+    }
+}
+
+fn detected_document_kind(kind: crate::document::DocumentKind) -> DetectedFormatKind {
+    match kind {
+        crate::document::DocumentKind::Pdf => DetectedFormatKind::Pdf,
+        crate::document::DocumentKind::Wordprocessing => DetectedFormatKind::WordprocessingDocument,
+        crate::document::DocumentKind::Spreadsheet => DetectedFormatKind::SpreadsheetDocument,
+        crate::document::DocumentKind::Presentation => DetectedFormatKind::PresentationDocument,
+    }
+}
+
+fn document_description(kind: crate::document::DocumentKind) -> &'static str {
+    match kind {
+        crate::document::DocumentKind::Pdf => "PDF document",
+        crate::document::DocumentKind::Wordprocessing => "Office Open XML word-processing document",
+        crate::document::DocumentKind::Spreadsheet => "Office Open XML spreadsheet",
+        crate::document::DocumentKind::Presentation => "Office Open XML presentation",
+    }
+}
+
+fn document_claim_from_filename(filename: &str) -> Option<crate::document::DocumentKind> {
+    let extension = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .and_then(|name| name.rsplit_once('.'))?
+        .1
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "pdf" => Some(crate::document::DocumentKind::Pdf),
+        "docx" | "docm" | "dotx" | "dotm" => Some(crate::document::DocumentKind::Wordprocessing),
+        "xlsx" | "xlsm" | "xltx" | "xltm" => Some(crate::document::DocumentKind::Spreadsheet),
+        "pptx" | "pptm" | "potx" | "potm" | "ppsx" | "ppsm" => {
+            Some(crate::document::DocumentKind::Presentation)
+        }
+        _ => None,
+    }
+}
+
+fn document_claim_from_media_type(media_type: &str) -> Option<crate::document::DocumentKind> {
+    let media_type = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    if media_type == "application/pdf" {
+        Some(crate::document::DocumentKind::Pdf)
+    } else if media_type.contains("wordprocessingml") || media_type.contains("msword") {
+        Some(crate::document::DocumentKind::Wordprocessing)
+    } else if media_type.contains("spreadsheetml") || media_type.contains("ms-excel") {
+        Some(crate::document::DocumentKind::Spreadsheet)
+    } else if media_type.contains("presentationml") || media_type.contains("ms-powerpoint") {
+        Some(crate::document::DocumentKind::Presentation)
+    } else {
+        None
+    }
+}
+
+fn document_claims(
+    attachment: &WholeAttachment<'_>,
+) -> Vec<(&'static str, crate::document::DocumentKind)> {
+    let mut claims = Vec::new();
+    if let Some(kind) = attachment.filename.and_then(document_claim_from_filename) {
+        claims.push(("filename", kind));
+    }
+    if let Some(kind) = attachment
+        .declared_media_type
+        .and_then(document_claim_from_media_type)
+    {
+        claims.push(("declared media type", kind));
+    }
+    claims
+}
+
+fn document_mismatch_finding(
+    source: &'static str,
+    claimed: crate::document::DocumentKind,
+    detected: Option<crate::document::DocumentKind>,
+    evidence: ByteRange,
+) -> AttachmentFinding {
+    let actual = detected.map_or("unrecognized document bytes", document_description);
+    AttachmentFinding {
+        rule_id: "ATTACHMENT-DOCUMENT-TYPE-MISMATCH".to_string(),
+        name: "Document content disagrees with its claimed type".to_string(),
+        engine_severity: "INFO".to_string(),
+        class: SignalClass::NameOrDeclaredTypeMismatch,
+        message: format!(
+            "the {source} claims {} but structural inspection found {actual}",
+            document_description(claimed)
+        ),
+        evidence: vec![evidence],
+    }
+}
+
+fn document_feature_finding(
+    feature: &crate::document::Feature,
+    evidence: ByteRange,
+) -> Option<AttachmentFinding> {
+    use crate::document::FeatureKind;
+    let (name, class) = match feature.kind {
+        FeatureKind::Macro => ("Office macro content", SignalClass::ActiveDocumentContent),
+        FeatureKind::ActiveX => ("Office ActiveX content", SignalClass::ActiveDocumentContent),
+        FeatureKind::EmbeddedObject => {
+            ("Embedded Office object", SignalClass::ActiveDocumentContent)
+        }
+        FeatureKind::EmbeddedProgram => (
+            "Program embedded in a document",
+            SignalClass::ExecutableOrLoadableProgram,
+        ),
+        FeatureKind::ExternalRelationship => (
+            "External Office relationship",
+            SignalClass::ExternalReference,
+        ),
+        FeatureKind::PdfJavaScript => ("PDF JavaScript", SignalClass::ActiveDocumentContent),
+        FeatureKind::PdfAutomaticAction => {
+            ("Automatic PDF action", SignalClass::ActiveDocumentContent)
+        }
+        FeatureKind::PdfLaunchAction => ("PDF launch action", SignalClass::ActiveDocumentContent),
+        FeatureKind::PdfEmbeddedFile => {
+            ("File embedded in a PDF", SignalClass::ActiveDocumentContent)
+        }
+        FeatureKind::PdfXfa => ("PDF XFA content", SignalClass::ActiveDocumentContent),
+        FeatureKind::PdfExternalReference => {
+            ("External PDF reference", SignalClass::ExternalReference)
+        }
+        FeatureKind::TrailingData => (
+            "Data after the PDF EOF marker",
+            SignalClass::StructuralAmbiguity,
+        ),
+        FeatureKind::IncrementalRevision => (
+            "Incrementally revised PDF",
+            SignalClass::StructuralAmbiguity,
+        ),
+        FeatureKind::FeaturesTruncated => return None,
+    };
+    let mut message = name.to_string();
+    if let Some(member) = feature.member.as_deref() {
+        message.push_str(" in ");
+        message.push_str(member);
+    }
+    if let Some(detail) = feature.detail.as_deref() {
+        message.push_str(": ");
+        message.push_str(detail);
+    }
+    Some(AttachmentFinding {
+        rule_id: feature.id.to_string(),
+        name: name.to_string(),
+        engine_severity: "INFO".to_string(),
+        class,
+        message,
+        evidence: vec![evidence],
+    })
+}
+
+fn push_document_reason(
+    report: &mut AttachmentReport,
+    context: &mut ScanContext<'_>,
+    reason: &crate::document::Reason,
+) {
+    use crate::document::ReasonKind;
+    let kind = match reason.kind {
+        ReasonKind::Malformed => IncompleteKind::Corrupt,
+        ReasonKind::Ambiguous => IncompleteKind::StructurallyAmbiguous,
+        ReasonKind::Unsupported => IncompleteKind::Unsupported,
+        ReasonKind::Encrypted => IncompleteKind::EncryptedOrPasswordProtected,
+        ReasonKind::Limit => IncompleteKind::LimitExhausted,
+        ReasonKind::Truncated => IncompleteKind::Truncated,
+        ReasonKind::ReasonsTruncated => IncompleteKind::ReasonsTruncated,
+    };
+    let detail = reason.detail.as_ref().map_or_else(
+        || reason.component.to_string(),
+        |detail| format!("{}: {detail}", reason.component),
+    );
+    push_reason(
+        report,
+        context,
+        IncompleteReason {
+            kind,
+            analyzer: Some("document"),
+            detail: Some(detail),
+        },
+    );
+}
+
+fn retain_document_report(
+    value: &crate::document::DocumentReport,
+    context: &mut ScanContext<'_>,
+    report: &mut AttachmentReport,
+    evidence: ByteRange,
+) -> Result<(), StopReason> {
+    context.charge(Resource::Operations, value.operations_examined)?;
+    if let Some(kind) = value.kind.filter(|_| value.is_confirmed()) {
+        retain_format(
+            report,
+            context,
+            detected_document_kind(kind),
+            document_description(kind),
+            evidence,
+        )?;
+    }
+    for feature in &value.features {
+        if feature.kind == crate::document::FeatureKind::FeaturesTruncated {
+            push_reason(
+                report,
+                context,
+                IncompleteReason {
+                    kind: IncompleteKind::LimitExhausted,
+                    analyzer: Some("document"),
+                    detail: Some("document feature findings were truncated".to_string()),
+                },
+            );
+        } else if let Some(finding) = document_feature_finding(feature, evidence) {
+            push_finding(report, context, finding)?;
+        }
+    }
+    for reason in &value.reasons {
+        push_document_reason(report, context, reason);
+    }
+    Ok(())
+}
+
+fn scan_pdf(
+    attachment: &WholeAttachment<'_>,
+    context: &mut ScanContext<'_>,
+    report: &mut AttachmentReport,
+) -> Result<(), StopReason> {
+    context.charge(Resource::Operations, 1)?;
+    let evidence = ByteRange {
+        offset: 0,
+        length: attachment.bytes.len().min(1024) as u64,
+    };
+    let value = crate::document::analyze_pdf(attachment.bytes, document_limits(context));
+    retain_document_report(&value, context, report, evidence)?;
+    if let Some(detected) = value.kind.filter(|_| value.is_confirmed()) {
+        for (source, claimed) in document_claims(attachment) {
+            if claimed != detected {
+                push_finding(
+                    report,
+                    context,
+                    document_mismatch_finding(source, claimed, Some(detected), evidence),
+                )?;
+            }
+        }
+    } else if document_claims(attachment)
+        .iter()
+        .any(|(_, kind)| *kind == crate::document::DocumentKind::Pdf)
+    {
+        for (source, claimed) in document_claims(attachment)
+            .into_iter()
+            .filter(|(_, kind)| *kind == crate::document::DocumentKind::Pdf)
+        {
+            push_finding(
+                report,
+                context,
+                document_mismatch_finding(source, claimed, None, evidence),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn zip_magic(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"PK\x03\x04")
+        || bytes.starts_with(b"PK\x05\x06")
+        || bytes.starts_with(b"PK\x07\x08")
+}
+
+fn archive_incomplete_kind(error: &lazaret_archive::Error) -> IncompleteKind {
+    match error {
+        lazaret_archive::Error::Unsupported(_) | lazaret_archive::Error::UnknownFormat => {
+            IncompleteKind::Unsupported
+        }
+        lazaret_archive::Error::Truncated => IncompleteKind::Truncated,
+        lazaret_archive::Error::Limit(_) => IncompleteKind::LimitExhausted,
+        lazaret_archive::Error::Ambiguous(_) | lazaret_archive::Error::DuplicateEntry(_) => {
+            IncompleteKind::StructurallyAmbiguous
+        }
+        lazaret_archive::Error::Corrupt(_)
+        | lazaret_archive::Error::Checksum(_)
+        | lazaret_archive::Error::InvalidPath(_) => IncompleteKind::Corrupt,
+        _ => IncompleteKind::Unsupported,
+    }
+}
+
+fn scan_ooxml(
+    pack: &Pack,
+    attachment: &WholeAttachment<'_>,
+    context: &mut ScanContext<'_>,
+    report: &mut AttachmentReport,
+) -> Result<(), StopReason> {
+    let claims = document_claims(attachment);
+    let ooxml_claimed = claims
+        .iter()
+        .any(|(_, kind)| *kind != crate::document::DocumentKind::Pdf);
+    if !zip_magic(attachment.bytes) {
+        if ooxml_claimed
+            && !report.detected_formats.iter().any(|format| {
+                matches!(
+                    format.kind,
+                    DetectedFormatKind::Pdf
+                        | DetectedFormatKind::WordprocessingDocument
+                        | DetectedFormatKind::SpreadsheetDocument
+                        | DetectedFormatKind::PresentationDocument
+                )
+            })
+        {
+            let evidence = ByteRange {
+                offset: 0,
+                length: attachment.bytes.len().min(4) as u64,
+            };
+            for (source, claimed) in claims
+                .into_iter()
+                .filter(|(_, kind)| *kind != crate::document::DocumentKind::Pdf)
+            {
+                push_finding(
+                    report,
+                    context,
+                    document_mismatch_finding(source, claimed, None, evidence),
+                )?;
+            }
+            push_reason(
+                report,
+                context,
+                IncompleteReason {
+                    kind: IncompleteKind::Corrupt,
+                    analyzer: Some("document"),
+                    detail: Some("the claimed OOXML document has no ZIP signature".to_string()),
+                },
+            );
+        }
+        return Ok(());
+    }
+
+    context.checkpoint()?;
+    context.charge(Resource::Operations, 1)?;
+    let archive_limits = lazaret_archive::Limits {
+        max_entries: usize::try_from(context.remaining(Resource::Members)).unwrap_or(usize::MAX),
+        max_member_size: context.remaining(Resource::DecodedBytes),
+        max_total_size: context.remaining(Resource::DecodedBytes),
+        max_name_size: MAX_CONTAINER_PATH_BYTES,
+        max_metadata_size: context.remaining(Resource::DecodedBytes).min(1024 * 1024),
+    };
+    let archive = match lazaret_archive::extract_as(
+        attachment.bytes,
+        lazaret_archive::Format::Zip,
+        archive_limits,
+    ) {
+        Ok(archive) => archive,
+        Err(error) => {
+            push_reason(
+                report,
+                context,
+                IncompleteReason {
+                    kind: archive_incomplete_kind(&error),
+                    analyzer: Some("document"),
+                    detail: Some(error.to_string()),
+                },
+            );
+            return Ok(());
+        }
+    };
+    let decoded = archive
+        .entries
+        .iter()
+        .try_fold(0u64, |total, entry| total.checked_add(entry.len() as u64));
+    let Some(decoded) = decoded else {
+        push_reason(
+            report,
+            context,
+            IncompleteReason {
+                kind: IncompleteKind::LimitExhausted,
+                analyzer: Some("document"),
+                detail: Some("the extracted document size overflowed".to_string()),
+            },
+        );
+        return Ok(());
+    };
+    let analysis_limits = document_limits(context);
+    context.charge(Resource::Members, archive.entries.len() as u64)?;
+    context.charge(Resource::DecodedBytes, decoded)?;
+    let value = crate::document::analyze_ooxml(&archive, pack, analysis_limits);
+    let evidence = ByteRange {
+        offset: 0,
+        length: attachment.bytes.len().min(4) as u64,
+    };
+    retain_document_report(&value, context, report, evidence)?;
+    if let Some(detected) = value.kind.filter(|_| value.is_confirmed()) {
+        for (source, claimed) in claims {
+            if claimed != detected {
+                push_finding(
+                    report,
+                    context,
+                    document_mismatch_finding(source, claimed, Some(detected), evidence),
+                )?;
+            }
+        }
+    } else if ooxml_claimed {
+        for (source, claimed) in claims
+            .into_iter()
+            .filter(|(_, kind)| *kind != crate::document::DocumentKind::Pdf)
+        {
+            push_finding(
+                report,
+                context,
+                document_mismatch_finding(source, claimed, None, evidence),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_metadata(attachment: &WholeAttachment<'_>) -> Result<(), ScanArgumentError> {
     if attachment
         .filename
@@ -856,6 +1341,7 @@ fn analyzer_name(capability: Capability) -> &'static str {
         Capability::Model => "model",
         Capability::Media => "media",
         Capability::Keystore => "keystore",
+        Capability::Document => "document",
     }
 }
 
@@ -935,13 +1421,14 @@ fn finish(mut report: AttachmentReport, context: &ScanContext<'_>) -> Attachment
 fn retain_format(
     report: &mut AttachmentReport,
     context: &mut ScanContext<'_>,
+    kind: DetectedFormatKind,
     description: &str,
     evidence: ByteRange,
 ) -> Result<(), StopReason> {
     context.charge(Resource::Objects, 1)?;
     context.charge(Resource::RetainedBytes, description.len() as u64)?;
     report.detected_formats.push(DetectedFormat {
-        kind: DetectedFormatKind::ExecutableOrLoadableProgram,
+        kind,
         description: description.to_string(),
         evidence,
     });
@@ -1128,6 +1615,61 @@ mod tests {
             retained_bytes: n,
             operations: n,
         }
+    }
+
+    fn pdf(catalog: &str) -> Vec<u8> {
+        let mut value =
+            format!("%PDF-1.7\n1 0 obj\n<< /Type /Catalog {catalog} >>\nendobj\n").into_bytes();
+        let xref = value.len();
+        value.extend_from_slice(
+            format!(
+                "xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<< /Root 1 0 R /Size 2 >>\nstartxref\n{xref}\n%%EOF"
+            )
+            .as_bytes(),
+        );
+        value
+    }
+
+    fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in entries {
+            let offset = body.len() as u32;
+            let name = name.as_bytes();
+            let crc = lazaret_verify::inflate::crc32(0, data);
+            body.extend_from_slice(b"PK\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00");
+            body.extend_from_slice(&crc.to_le_bytes());
+            body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            body.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            body.extend_from_slice(&0u16.to_le_bytes());
+            body.extend_from_slice(name);
+            body.extend_from_slice(data);
+
+            central
+                .extend_from_slice(b"PK\x01\x02\x1e\x03\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00");
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&(0o100644u32 << 16).to_le_bytes());
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name);
+        }
+        let central_offset = body.len();
+        let central_size = central.len();
+        body.extend_from_slice(&central);
+        body.extend_from_slice(b"PK\x05\x06\x00\x00\x00\x00");
+        body.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        body.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        body.extend_from_slice(&(central_size as u32).to_le_bytes());
+        body.extend_from_slice(&(central_offset as u32).to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body
     }
 
     #[test]
@@ -1343,6 +1885,117 @@ mod tests {
         assert!(report.incomplete.iter().any(|reason| {
             reason.kind == IncompleteKind::Unsupported && reason.analyzer == Some("binary")
         }));
+    }
+
+    #[test]
+    fn pdf_structure_and_active_content_are_typed_for_the_gateway() {
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p0());
+        let bytes = pdf("/OpenAction << /S /JavaScript /JS (x) >>");
+        let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
+        let report = scanner
+            .scan_whole(
+                WholeAttachment {
+                    identity: InputIdentity([21; 16]),
+                    bytes: &bytes,
+                    filename: Some("invoice.pdf"),
+                    declared_media_type: Some("application/pdf"),
+                    container_path: None,
+                },
+                &mut context,
+            )
+            .unwrap();
+        assert!(report
+            .detected_formats
+            .iter()
+            .any(|format| format.kind == DetectedFormatKind::Pdf));
+        assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "PDF-JAVASCRIPT"
+                && finding.class == SignalClass::ActiveDocumentContent
+        }));
+        assert!(!report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "ATTACHMENT-DOCUMENT-TYPE-MISMATCH"));
+        assert!(report.usage.operations > 1);
+    }
+
+    #[test]
+    fn ooxml_structure_not_extension_confirms_type_and_surfaces_features() {
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p0());
+        let content_types = br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+        let relationships = br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+        let external = br#"<Relationships><Relationship Id="rId2" Type="image" TargetMode="External" Target="https://example.invalid/a.png"/></Relationships>"#;
+        let bytes = stored_zip(&[
+            ("[Content_Types].xml", content_types),
+            ("_rels/.rels", relationships),
+            ("word/document.xml", b"<document/>"),
+            ("word/vbaProject.bin", b"macro"),
+            ("word/_rels/document.xml.rels", external),
+        ]);
+        let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
+        let report = scanner
+            .scan_whole(
+                WholeAttachment {
+                    identity: InputIdentity([22; 16]),
+                    bytes: &bytes,
+                    filename: Some("invoice.docx"),
+                    declared_media_type: Some(
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ),
+                    container_path: None,
+                },
+                &mut context,
+            )
+            .unwrap();
+        assert!(
+            report
+                .detected_formats
+                .iter()
+                .any(|format| { format.kind == DetectedFormatKind::WordprocessingDocument }),
+            "{report:?}"
+        );
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "OOXML-MACRO"));
+        assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "OOXML-EXTERNAL-RELATIONSHIP"
+                && finding.class == SignalClass::ExternalReference
+        }));
+        assert_eq!(report.usage.members, 5);
+        assert!(report.usage.decoded_bytes > 0);
+    }
+
+    #[test]
+    fn generic_zip_is_not_a_document_and_false_document_claims_are_reported() {
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p0());
+        let bytes = stored_zip(&[("hello.txt", b"hello")]);
+        let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
+        let report = scanner
+            .scan_whole(
+                WholeAttachment {
+                    identity: InputIdentity([23; 16]),
+                    bytes: &bytes,
+                    filename: Some("hello.docx"),
+                    declared_media_type: None,
+                    container_path: None,
+                },
+                &mut context,
+            )
+            .unwrap();
+        assert!(!report.detected_formats.iter().any(|format| {
+            matches!(
+                format.kind,
+                DetectedFormatKind::Pdf
+                    | DetectedFormatKind::WordprocessingDocument
+                    | DetectedFormatKind::SpreadsheetDocument
+                    | DetectedFormatKind::PresentationDocument
+            )
+        }));
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "ATTACHMENT-DOCUMENT-TYPE-MISMATCH"));
     }
 
     #[test]
