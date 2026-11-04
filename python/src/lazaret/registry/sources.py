@@ -382,18 +382,25 @@ def _post_urllib(url, headers, data, max_bytes, what, has_token, kind, reply_hea
     opener = _post_opener(guard)
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     req.lazaret_deadline = deadline
+    cut = False
     try:
-        resp = opener.open(req, timeout=timeout)
+        read, cut = deadline.wait(timeout)
+        # On Windows the monotonic clock can remain unchanged between creating
+        # the deadline and starting the request. A per-call timeout equal to the
+        # entire budget is still deadline-limited even when wait() sees exact
+        # equality and therefore has no elapsed tick with which to prove it.
+        cut = cut or timeout >= deadline.seconds
+        resp = opener.open(req, timeout=read)
     except urllib.error.HTTPError as exc:
         exc.close()
         deadline.check()
         _keep_headers(reply_headers, exc.headers.items())
         raise _refused(exc.code, exc.headers.items(), url, what, has_token, kind) from None
     except urllib.error.URLError as exc:
-        deadline.check()
+        deadline.check(exc.reason if isinstance(exc.reason, BaseException) else exc, cut)
         raise SourceError(f"{what}: {exc.reason}") from None
     except (OSError, http.client.HTTPException) as exc:
-        deadline.check()
+        deadline.check(exc, cut)
         raise SourceError(f"{what}: network error ({type(exc).__name__})") from None
     too_big = f"{what}: response exceeds the {max_bytes // 1024} KB budget"
     with guard._Timed(resp, deadline, timeout) as r:
