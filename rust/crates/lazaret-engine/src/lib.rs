@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api;
+pub mod attachment;
 pub mod budget;
 pub mod collect;
 pub mod agentdoc;
