@@ -427,7 +427,7 @@ def _proxy_for(url):
     if ours[0] or native[0]:
         if ours != native:
             raise UsePython("HTTPS_PROXY and https_proxy (or NO_PROXY and no_proxy) say different things")
-        if ours[0].lower().startswith("https://"):
+        if ours[0].strip().lower().startswith("https:"):
             raise UsePython("a proxy reached over TLS")
         bypass = urllib.request.proxy_bypass_environment(parts.netloc.rpartition("@")[2],
                                                          urllib.request.getproxies_environment())
@@ -443,7 +443,7 @@ def _proxy_for(url):
             return "direct"
     except (OSError, ValueError):
         return "direct"
-    if proxy.strip().lower().startswith("https://"):
+    if proxy.strip().lower().startswith("https:"):
         raise UsePython("a proxy reached over TLS")
     if _urllib_proxy(proxy) != _native_proxy(proxy):
         raise UsePython("the proxy's address reads differently to urllib and the native client")
