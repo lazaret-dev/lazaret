@@ -3,7 +3,7 @@
 This folder is pratique 0.1.0, the HTTPS/TLS library Lazaret's network layer is built on, as it is upstream:
 nothing in it is edited by hand. Its repository is https://github.com/lazaret-dev/pratique; it was called tiny_https until October 2026.
 
-- **Taken** on 2026-11-04 by `scripts/sync_pratique.py`, from commit `1c5be54231d9498529e4ed3d172df344cf5a4b3a` (its files as git holds them): 803 files, 14,013,063 bytes.
+- **Taken** on 2026-11-04 by `scripts/sync_pratique.py`, from commit `169938a4287f394cf5ae446b8d1ffc411b8d9542` (its files as git holds them): 803 files, 14,013,264 bytes.
 - **Licence:** Apache-2.0 (`LICENSE`), as Lazaret's is. `NOTICE` keeps the notices of what the library holds from
   elsewhere: Mozilla's root store (`roots/mozilla.pem`) is under the Mozilla Public License 2.0, as NSS is, and
   BearSSL's MIT notice goes with two of its crypto files.
