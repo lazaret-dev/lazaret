@@ -382,6 +382,7 @@ MAX_ARCHIVE_TOTAL = 500 * 1024 * 1024
 # metadata below bounds that are generous for paths, links and git comments.
 MAX_TAR_METADATA_BLOCK = 256 << 10
 MAX_TAR_METADATA_TOTAL = 4 << 20
+MAX_TAR_SPARSE_EXTENTS = 4096
 # The ZIP preflight and tar decoders accept a dictionary through 64 MiB (xz
 # -9 / 7-Zip ultra).  liblzma's memlimit includes decoder bookkeeping as well
 # as the dictionary, so give the streaming tar decoder 8 MiB of overhead.
@@ -1193,14 +1194,31 @@ class _TarReader(tarfile.TarFile):
 class _BoundedTarInfo(tarfile.TarInfo):
     """TarInfo whose extension metadata is bounded before tarfile reads it."""
 
-    def _check_metadata(self, tarfile_):
-        size = self.size
+    def _charge_metadata(self, tarfile_, size):
         total = tarfile_.__dict__.get("_lazaret_metadata_bytes", 0) + max(size, 0)
         if size < 0 or size > MAX_TAR_METADATA_BLOCK or total > MAX_TAR_METADATA_TOTAL:
             detail = (f"tar metadata is {size:,} bytes in one block and {total:,} bytes so far "
                       f"(limits {MAX_TAR_METADATA_BLOCK:,} and {MAX_TAR_METADATA_TOTAL:,})")
             raise ArchiveLimit("corrupt", detail)
         tarfile_.__dict__["_lazaret_metadata_bytes"] = total
+
+    def _check_metadata(self, tarfile_):
+        self._charge_metadata(tarfile_, self.size)
+
+    def _read_sparse_block(self, tarfile_):
+        self._charge_metadata(tarfile_, tarfile.BLOCKSIZE)
+        block = tarfile_.fileobj.read(tarfile.BLOCKSIZE)
+        if len(block) != tarfile.BLOCKSIZE:
+            raise tarfile.InvalidHeaderError("invalid sparse header")
+        return block
+
+    @staticmethod
+    def _check_sparse_extent_count(count):
+        if count < 0 or count > MAX_TAR_SPARSE_EXTENTS:
+            raise ArchiveLimit(
+                "corrupt",
+                f"tar sparse map declares {count:,} extents (limit {MAX_TAR_SPARSE_EXTENTS:,})",
+            )
 
     def _proc_pax(self, tarfile_):
         self._check_metadata(tarfile_)
@@ -1209,6 +1227,55 @@ class _BoundedTarInfo(tarfile.TarInfo):
     def _proc_gnulong(self, tarfile_):
         self._check_metadata(tarfile_)
         return super()._proc_gnulong(tarfile_)
+
+    def _proc_sparse(self, tarfile_):
+        """Read old-GNU extension blocks without letting them grow a list first."""
+        structs, isextended, origsize = self._sparse_structs
+        del self._sparse_structs
+        self._check_sparse_extent_count(len(structs))
+        while isextended:
+            block = self._read_sparse_block(tarfile_)
+            pos = 0
+            for _ in range(21):
+                try:
+                    offset = tarfile.nti(block[pos:pos + 12])
+                    numbytes = tarfile.nti(block[pos + 12:pos + 24])
+                except ValueError:
+                    break
+                if offset and numbytes:
+                    self._check_sparse_extent_count(len(structs) + 1)
+                    structs.append((offset, numbytes))
+                pos += 24
+            isextended = bool(block[504])
+        self.sparse = structs
+        self.offset_data = tarfile_.fileobj.tell()
+        tarfile_.offset = self.offset_data + self._block(self.size)
+        self.size = origsize
+        return self
+
+    def _proc_gnusparse_10(self, next_, pax_headers, tarfile_):
+        """Read a PAX 1.0 sparse map under byte and extent-count bounds."""
+        block = self._read_sparse_block(tarfile_)
+        fields_raw, separator, block = block.partition(b"\n")
+        if not separator:
+            raise tarfile.InvalidHeaderError("invalid sparse header")
+        try:
+            fields = int(fields_raw)
+        except ValueError:
+            raise tarfile.InvalidHeaderError("invalid sparse header") from None
+        self._check_sparse_extent_count(fields)
+
+        sparse = []
+        while len(sparse) < fields * 2:
+            while b"\n" not in block:
+                block += self._read_sparse_block(tarfile_)
+            number, block = block.split(b"\n", 1)
+            try:
+                sparse.append(int(number))
+            except ValueError:
+                raise tarfile.InvalidHeaderError("invalid sparse header") from None
+        next_.offset_data = tarfile_.fileobj.tell()
+        next_.sparse = list(zip(sparse[::2], sparse[1::2]))
 
 
 class _PipTarInfo(_BoundedTarInfo):
