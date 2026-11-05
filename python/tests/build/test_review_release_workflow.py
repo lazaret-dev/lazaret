@@ -192,24 +192,28 @@ class WheelPlatformTests(unittest.TestCase):
         self.assertIn("MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment-target }}", other)
         self.assertIn("RUSTFLAGS: ${{ matrix.rustflags }}", other)
 
-    def test_intel_mac_keeps_compatibility_without_repeating_the_full_suite(self):
+    def test_intel_mac_runs_every_snapshot_on_prs_and_the_full_suite_on_tags(self):
         other = self.jobs["macos-windows"]
         self.assertIn("timeout-minutes: ${{ matrix.timeout }}", other)
         intel = other[other.index("tag: macosx_10_12_x86_64"):][:500]
         self.assertIn("test-profile: intel-smoke", intel)
-        self.assertIn("timeout: 30", intel)
+        self.assertIn("timeout: 90", intel)
         arm = other[other.index("tag: macosx_11_0_arm64"):][:500]
         self.assertIn("test-profile: full", arm)
         self.assertIn("timeout: 90", arm)
+        self.assertIn("TEST_PROFILE: ${{ matrix.tag == 'macosx_10_12_x86_64' && "
+                      "startsWith(github.ref, 'refs/tags/') && 'full' || matrix.test-profile }}", other)
 
         full = re.search(r"(?ms)- name: The full Python suite.*?(?=^      - |\Z)", other).group(0)
-        self.assertIn("if: matrix.test-profile == 'full'", full)
+        self.assertIn("if: env.TEST_PROFILE == 'full'", full)
         self.assertIn("python -m unittest discover -s tests -t .", full)
         smoke = re.search(r"(?ms)- name: Intel native-engine.*?(?=^      - |\Z)", other).group(0)
-        self.assertIn("if: matrix.test-profile == 'intel-smoke'", smoke)
-        for module in ("tests.scanner.test_engine_scan_file", "tests.scanner.test_jsparse",
-                       "tests.architecture.test_snapshot_scanfile", "tests.architecture.test_snapshot_js_parse",
-                       "tests.architecture.test_snapshot_small"):
+        self.assertIn("if: env.TEST_PROFILE == 'intel-smoke'", smoke)
+        self.assertIn("tests/architecture/test_snapshot_*.py", smoke)
+        snapshots = glob.glob(os.path.join(_support.REPO_ROOT, "python", "tests", "architecture",
+                                           "test_snapshot_*.py"))
+        self.assertEqual(len(snapshots), 19)
+        for module in ("tests.scanner.test_engine_scan_file", "tests.scanner.test_jsparse"):
             self.assertIn(module, smoke)
 
     def test_the_musl_libraries(self):
