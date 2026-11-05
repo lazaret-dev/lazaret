@@ -1952,16 +1952,20 @@ mod tests {
     }
 
     #[test]
-    fn ooxml_structure_not_extension_confirms_type_and_surfaces_features() {
+    fn ooxml_structure_confirms_macro_type_and_surfaces_renamed_active_content() {
         let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
-        let content_types = br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+        let content_types = br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.ms-word.document.macroEnabled.main+xml"/><Override PartName="/word/renamed.dat" ContentType="application/vnd.ms-office.vbaProject"/></Types>"#;
         let relationships = br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
         let external = br#"<Relationships><Relationship Id="rId2" Type="image" TargetMode="External" Target="https://example.invalid/a.png"/></Relationships>"#;
         let bytes = stored_zip(&[
             ("[Content_Types].xml", content_types),
             ("_rels/.rels", relationships),
             ("word/document.xml", b"<document/>"),
-            ("word/vbaProject.bin", b"macro"),
+            ("word/renamed.dat", b"macro"),
+            (
+                "word/media/preview.dat",
+                b"MZ\x90\x00\x03\x00\x00\x00\x04\x00",
+            ),
             ("word/_rels/document.xml.rels", external),
         ]);
         let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
@@ -1970,10 +1974,8 @@ mod tests {
                 WholeAttachment {
                     identity: InputIdentity([22; 16]),
                     bytes: &bytes,
-                    filename: Some("invoice.docx"),
-                    declared_media_type: Some(
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    ),
+                    filename: Some("invoice.docm"),
+                    declared_media_type: Some("application/vnd.ms-word.document.macroEnabled.12"),
                     container_path: None,
                 },
                 &mut context,
@@ -1991,10 +1993,15 @@ mod tests {
             .iter()
             .any(|finding| finding.rule_id == "OOXML-MACRO"));
         assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "OOXML-EMBEDDED-PROGRAM"
+                && finding.class == SignalClass::ExecutableOrLoadableProgram
+                && finding.message.contains("word/media/preview.dat")
+        }));
+        assert!(report.findings.iter().any(|finding| {
             finding.rule_id == "OOXML-EXTERNAL-RELATIONSHIP"
                 && finding.class == SignalClass::ExternalReference
         }));
-        assert_eq!(report.usage.members, 5);
+        assert_eq!(report.usage.members, 6);
         assert!(report.usage.decoded_bytes > 0);
     }
 
