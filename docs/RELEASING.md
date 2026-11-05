@@ -125,6 +125,27 @@ Before enabling or changing that pool, confirm every item in this checklist:
 - [ ] tag pushes, release workflow calls, manual dispatches and scheduled
       workflows resolve to GitHub-hosted labels in the routing-policy tests.
 
+Choose and record one runner-group policy; GitHub cannot combine both:
+
+- **Private-PR acceleration (the current workflow policy).** Keep the runner
+  group restricted to `lazaret-dev/lazaret`, but do not restrict it to
+  workflow files at `refs/heads/main`: a pull-request job executes the workflow
+  at `refs/pull/N/merge`, so that restriction would also block trusted PRs.
+  This mode therefore depends on *all* of the controller, external-contributor
+  approval, ephemeral-runner and network-isolation controls above. A workflow
+  expression that checks the PR author is only defense in depth; workflow YAML
+  from a fork is attacker-controlled.
+- **Trusted-ref-only pool.** Remove the self-hosted route from every
+  `pull_request` job and use the private pool only for trusted branch pushes.
+  The runner group can then allow only `.github/workflows/ci.yml` and
+  `.github/workflows/wheels.yml` at `refs/heads/main`. Pull requests use
+  GitHub-hosted runners in this mode.
+
+The first mode buys faster maintainer PR feedback; the second has the smaller
+authorization surface. Revisit the choice before enabling external
+contributions or adding an organization member who can open same-repository
+pull requests.
+
 The workflow file is defense in depth, not the only authorization boundary:
 the out-of-repository controller must reject an untrusted job before it creates
 or registers a runner, even if a pull request changes its own workflow YAML.
