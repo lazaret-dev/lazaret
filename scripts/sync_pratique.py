@@ -10,7 +10,8 @@ source; nothing in it is edited by hand.
     python3 scripts/sync_pratique.py CHECKOUT [--rev REV]
                                                 take the library from a git checkout of it: the files of commit REV
                                                 (HEAD if not given) as git holds them, whatever the working tree has;
-                                                the commit is recorded in LAZARET.md
+                                                the commit is recorded in LAZARET.md; an official upstream checkout
+                                                must show that commit on origin's default branch
     python3 scripts/sync_pratique.py SOURCE      take a drop of it: the library's folder (not a checkout), or a .tgz /
                                                 .tar.gz of it with one top-level folder
     python3 scripts/sync_pratique.py --verify    check rust/crates/pratique against the hashes recorded when it was
@@ -220,6 +221,47 @@ def read_commit(checkout, rev="HEAD"):
     return commit, files
 
 
+def check_upstream_default_branch(checkout, commit):
+    """Refuse a branch-only commit when `checkout` identifies the official upstream as origin.
+
+    Drops and unrelated local checkouts remain usable.  For the official repository, provenance must be demonstrable
+    from its remote-tracking default branch; otherwise Lazaret could record a reviewed-looking commit that upstream's
+    main line never contained.
+    """
+    try:
+        url = _git(checkout, "remote", "get-url", "origin").decode("utf-8").strip()
+    except DropError:
+        return
+    official = url.rstrip("/").removesuffix(".git") in (
+        UPSTREAM,
+        "git@github.com:lazaret-dev/pratique",
+        "ssh://git@github.com/lazaret-dev/pratique",
+    )
+    if not official:
+        return
+    try:
+        default = _git(checkout, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").decode(
+            "ascii"
+        ).strip()
+    except DropError:
+        default = "origin/main"
+    try:
+        default_commit = _git(checkout, "rev-parse", "--verify", default + "^{commit}").decode("ascii").strip()
+    except DropError as exc:
+        raise DropError(f"the official checkout has no fetched default branch {default}: {exc}") from exc
+    done = subprocess.run(
+        ["git", "--no-optional-locks", "-C", str(checkout), "merge-base", "--is-ancestor", commit, default_commit],
+        capture_output=True,
+        check=False,
+    )
+    if done.returncode == 1:
+        raise DropError(f"commit {commit} is not on pratique's upstream default branch ({default})")
+    if done.returncode != 0:
+        message = done.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise DropError(f"git merge-base could not check pratique's default branch: "
+                        f"{message[-1] if message else done.returncode}")
+
+
 def check_no_credentials(files):
     """DropError for a file whose name the repository never commits, or whose bytes hold a private key."""
     import fnmatch
@@ -328,6 +370,7 @@ def take(source, rev=None):
     source = pathlib.Path(source)
     if is_checkout(source):
         commit, files = read_commit(source, rev or "HEAD")
+        check_upstream_default_branch(source, commit)
         origin = f"commit `{commit}` (its files as git holds them)"
     elif rev is not None:
         raise DropError(f"--rev needs a git checkout of the library, and {source} is not one")
