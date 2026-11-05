@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api;
+pub mod attachment;
 pub mod budget;
 pub mod collect;
 pub mod agentdoc;
@@ -19,6 +20,7 @@ pub mod config;
 pub mod crossfile;
 pub mod datafmt;
 pub mod decode;
+pub mod document;
 pub mod evalcode;
 pub mod filectx;
 pub mod findings;

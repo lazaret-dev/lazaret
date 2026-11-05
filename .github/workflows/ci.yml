@@ -1,4 +1,5 @@
-# Tests both packages on every push to main or next (the branch the work in progress shares) and every PR.
+# Tests both packages on every push to main and every PR. Integration is PR-only,
+# so running again after a merge would duplicate the pull request's tested merge.
 # Also called by release.yml before publishing.
 # Everything runs on stock interpreters: nothing is pip- or npm-installed.
 # All third-party actions are pinned to full commit SHAs; Dependabot keeps them current.
@@ -6,15 +7,24 @@ name: CI
 
 on:
   push:
-    branches: [main, next]
+    branches: [main]
   pull_request:
+  # Hosted boundary interpreters that would make every PR's matrix expensive.
+  schedule:
+    - cron: "17 6 * * 0"
   workflow_call:
 
 permissions:
   contents: read
 
+env:
+  # CI and release builds use the same compiler, not whichever `stable`
+  # happens to name on a runner that day.
+  RUST_VERSION: "1.95.0"
+
 jobs:
   versions:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -24,26 +34,30 @@ jobs:
 
   # Unit, adversarial, compatibility, architecture and build tests, on the
   # native engine. Python 3.12 is the cross-platform reference interpreter;
-  # Linux also runs the supported range's 3.10 and 3.14 boundaries. This keeps
-  # OS coverage and interpreter-boundary coverage without multiplying every
-  # interpreter by every OS. Tests that need Postgres skip themselves here
-  # (LAZARET_TEST_PG_DSN is unset).
+  # Linux runs the full suite on every supported interpreter. This keeps OS
+  # coverage without multiplying every interpreter by every OS, while 3.11
+  # and 3.13 still exercise more than compilation and import. Tests that need
+  # Postgres skip themselves here (LAZARET_TEST_PG_DSN is unset).
   python-unit:
+    if: github.event_name != 'schedule'
     # Native macOS lanes use the disposable self-hosted Apple-silicon pool for
-    # this repository's trusted pushes, releases and maintainer-authored PRs.
-    # Fork PRs and other authors remain on GitHub-hosted runners.
+    # this repository's trusted branch pushes and maintainer-authored PRs.
+    # Tag/release builds, fork PRs and other authors remain on GitHub-hosted
+    # runners. The pool's unique label avoids matching another generic Mac.
     runs-on: >-
       ${{
         matrix.os == 'macos-latest' &&
         (
-          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          github.event_name == 'push' &&
+          github.repository == 'lazaret-dev/lazaret' &&
+          !startsWith(github.ref, 'refs/tags/') ||
           (
             github.event_name == 'pull_request' &&
             github.event.pull_request.head.repo.full_name == github.repository &&
             github.actor == 'johnabooth-afk'
           )
         ) &&
-        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        fromJSON('["self-hosted","macOS","ARM64","lazaret-tart"]') ||
         matrix.os
       }}
     strategy:
@@ -51,7 +65,9 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, python: "3.10" }
+          - { os: ubuntu-latest, python: "3.11" }
           - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
           - { os: ubuntu-latest, python: "3.14" }
           - { os: macos-latest, python: "3.12" }
           - { os: windows-latest, python: "3.12" }
@@ -62,9 +78,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
-      - name: Rust toolchain for the disposable self-hosted runner
-        if: runner.environment == 'self-hosted'
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
+      - name: Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
       - name: Match the GitHub-hosted optional tool surface
         if: runner.environment == 'self-hosted'
         shell: bash
@@ -75,7 +92,8 @@ jobs:
           fi
       - name: The native engine
         working-directory: rust
-        run: cargo build --release --offline --locked
+        shell: bash
+        run: cargo +"$RUST_VERSION" build --release --offline --locked
       - working-directory: python
         shell: bash
         run: |
@@ -84,15 +102,18 @@ jobs:
           PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
           python -m unittest discover -s tests -t . -v
 
-  # Intermediate supported interpreters get a cheap source-compatibility and
-  # import check. Their neighboring boundary/reference versions run the full
-  # native suite above, so these lanes need not rebuild the Rust engine.
-  python-smoke:
-    runs-on: ubuntu-latest
+  # Each supported Python runs the full suite on Linux for every PR. Once a
+  # week, hosted runners also exercise the other two OSes at their support
+  # boundaries. Scheduled work never reaches the private Tart pool.
+  python-boundaries:
+    if: github.event_name == 'schedule'
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.13"]
+        include:
+          - { os: macos-latest, python: "3.14" }
+          - { os: windows-latest, python: "3.10" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,14 +121,26 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: The native engine
+        working-directory: rust
+        shell: bash
+        run: cargo +"$RUST_VERSION" build --release --offline --locked
       - working-directory: python
+        shell: bash
         run: |
-          python -m compileall -q src tests
-          PYTHONPATH=src python -c "import lazaret; print('lazaret', lazaret.__version__)"
+          LAZARET_NATIVE_LIB=$(PYTHONPATH=src python -c 'import os; from lazaret.scanner import _native; print(os.path.abspath(os.path.join("..", "rust", "target", "release", _native.library_name())))')
+          export LAZARET_NATIVE_LIB
+          PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
+          python -m unittest discover -s tests -t . -v
 
   # Live Postgres. The password only exists inside this job's throwaway
   # container, so it is not a secret.
   python-integration:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -134,9 +167,14 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+      - name: Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
       - name: The native engine
         working-directory: rust
-        run: cargo build --release --offline --locked
+        shell: bash
+        run: cargo +"$RUST_VERSION" build --release --offline --locked
       - working-directory: python
         shell: bash
         run: |
@@ -152,18 +190,21 @@ jobs:
   # the engine: the test_js_parity modules skip where the WebAssembly build or
   # the native library is missing, so the step asserts that both load first.
   js:
+    if: github.event_name != 'schedule'
     runs-on: >-
       ${{
         matrix.os == 'macos-latest' &&
         (
-          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          github.event_name == 'push' &&
+          github.repository == 'lazaret-dev/lazaret' &&
+          !startsWith(github.ref, 'refs/tags/') ||
           (
             github.event_name == 'pull_request' &&
             github.event.pull_request.head.repo.full_name == github.repository &&
             github.actor == 'johnabooth-afk'
           )
         ) &&
-        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        fromJSON('["self-hosted","macOS","ARM64","lazaret-tart"]') ||
         matrix.os
       }}
     strategy:
@@ -178,11 +219,14 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
-      - name: Rust toolchain for the disposable self-hosted runner
-        if: runner.environment == 'self-hosted'
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
-      - run: rustup target add wasm32-unknown-unknown
+      - name: Rust ${{ env.RUST_VERSION }} with WebAssembly
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
       - working-directory: js
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_VERSION }}
         run: npm run build
       - working-directory: js
         run: npm test
@@ -193,7 +237,8 @@ jobs:
       - name: The native engine
         if: matrix.node == '24'
         working-directory: rust
-        run: cargo build --release --offline --locked
+        shell: bash
+        run: cargo +"$RUST_VERSION" build --release --offline --locked
       - name: The npm package against the Python package
         if: matrix.node == '24'
         working-directory: python
@@ -222,23 +267,26 @@ jobs:
   # keeps, its own tests, and its WebAssembly build against the library (the
   # Python suite runs on the library in python-unit). The network layer
   # (lazaret-net) and pratique, the library it is built on, are tested here
-  # too. Rust is on the runners already (1.87 or later); the build needs no
-  # registry (Cargo.lock lists only the workspace). Python 3.10 because
+  # too. The exact Rust compiler is installed above; the build needs no
+  # registry after that (Cargo.lock lists only the workspace). Python 3.10 because
   # make_rust_tables.py --check compares the generated Unicode 13.0 tables
   # with 3.10's unicodedata.
   rust:
+    if: github.event_name != 'schedule'
     runs-on: >-
       ${{
         matrix.os == 'macos-latest' &&
         (
-          github.event_name == 'push' && github.repository == 'lazaret-dev/lazaret' ||
+          github.event_name == 'push' &&
+          github.repository == 'lazaret-dev/lazaret' &&
+          !startsWith(github.ref, 'refs/tags/') ||
           (
             github.event_name == 'pull_request' &&
             github.event.pull_request.head.repo.full_name == github.repository &&
             github.actor == 'johnabooth-afk'
           )
         ) &&
-        fromJSON('["self-hosted","macOS","ARM64"]') ||
+        fromJSON('["self-hosted","macOS","ARM64","lazaret-tart"]') ||
         matrix.os
       }}
     strategy:
@@ -252,16 +300,19 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.10"
-      - name: Rust toolchain for the disposable self-hosted runner
-        if: runner.environment == 'self-hosted'
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # v1 stable, 2026-10-16
+      - name: Rust ${{ env.RUST_VERSION }} with WebAssembly
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
       - run: python scripts/check_rust_deps.py
       # pratique (NET-1) is in rust/crates as it is upstream, at the commit its LAZARET.md names: no file
       # changed since it was taken
       - run: python scripts/sync_pratique.py --verify
       - run: python scripts/make_rust_tables.py --check
       - working-directory: rust
-        run: cargo test --release --offline --locked
+        shell: bash
+        run: cargo +"$RUST_VERSION" test --release --offline --locked
       # pratique's own tests, those that need nothing installed (its interop tests want OpenSSL, Go or
       # aioquic servers and are the library's to run; its trust-store tests read this machine's stores);
       # chain_cases holds its chain verifier to 90 generated chains, under the CA/Browser Forum's rules and
@@ -275,17 +326,20 @@ jobs:
       # a_read_that_waits_too_long_times_out_and_one_that_keeps_moving_does_not) wait for what they time
       # since then, and run again, with B-119's tests of the server's shutdown on Windows and macOS.
       - working-directory: rust
+        shell: bash
         run: >-
-          cargo test --release --offline --locked -p pratique --lib --test go_vectors --test cms_vectors
+          cargo +"$RUST_VERSION" test --release --offline --locked -p pratique --lib --test go_vectors --test cms_vectors
           --test sigstore_real --test sigstore_synthetic --test rekor_real --test real_chains --test inflate_vectors
           --test tuf_sigstore --test tuf_synthetic --test wycheproof --test real_revocation --test chain_cases
           -- --skip a_coarse_clock_makes_the_harness_time_several_calls_together
       - working-directory: rust
-        run: cargo build --release --offline --locked
+        shell: bash
+        run: cargo +"$RUST_VERSION" build --release --offline --locked
       # The WebAssembly build (the npm package's engine) against this library:
       # the same answers for every case of the corpora. Node is on the runners.
-      - run: rustup target add wasm32-unknown-unknown
       - working-directory: js
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_VERSION }}
         run: npm run build
       - name: The WebAssembly build against the native library
         working-directory: python

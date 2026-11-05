@@ -2,7 +2,12 @@
 
 Bounded, in-memory archive extraction in native Rust. The crate uses no external
 crates, performs no filesystem or network I/O, and forbids `unsafe` code.
-Lazaret's existing ZIP implementation is separate and unchanged.
+Lazaret's ZIP parser lives here as the `zip` subsystem. It lists the union of
+members found by common ZIP readers, reports where their views disagree, supports
+bounded whole-file and range-backed reads, and decompresses stored and DEFLATE
+members. The generic archive API extracts ZIP only when those views agree, and
+checks each member's declared size and CRC. The engine can still use the range
+API directly and decide how an ambiguous model archive affects a finding.
 
 ## Support matrix
 
@@ -16,6 +21,7 @@ Lazaret's existing ZIP implementation is separate and unchanged.
 | Bzip2 | One in-memory file; block and combined CRC checks, multi-block and concatenated streams (pbzip2), unused selectors (lbzip2) |
 | XZ | One in-memory file; single-filter LZMA2 blocks, index verification, None/CRC32/CRC64 checks |
 | LZMA-alone | One in-memory file; known-size and end-marker streams |
+| ZIP | ZIP/ZIP64; generic extraction of agreed, UTF-8/ASCII-named stored and DEFLATE members with CRC checks; bounded range-backed member reads for scanners |
 
 These single-file formats can be used directly for compressed pickle payloads;
 the extracted entry is named `data`. The library decompresses but never executes
@@ -28,6 +34,11 @@ special entries fail closed. Encrypted 7-Zip, coder chains (including BCJ filter
 external metadata, additional streams, and anti entries are unsupported.
 No partial archive is returned after an error. Non-UTF-8 or encoded RAR names and
 unsupported TAR metadata are also refused.
+Generic ZIP extraction likewise refuses encrypted entries, special files,
+unsupported flags or compression methods, non-ASCII names without the UTF-8 flag,
+and any archive whose common reader views disagree. The lower-level `zip` module
+still reports all of those views to callers that need forensic evidence rather
+than one extracted archive.
 
 PAX metadata is limited to `path`, `size`, timestamps, numeric/user/group
 identity fields, comments, `hdrcharset` and `SCHILY.xattr.*`/`LIBARCHIVE.xattr.*`

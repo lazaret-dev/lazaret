@@ -1491,6 +1491,40 @@ class UrllibPostTests(unittest.TestCase):
                 self.assertEqual(str(caught.exception), "w: no answer within 0.2 s")
                 self.assertLess(took, 0.2 + ALLOWANCE, f"{took:.3f} s")
 
+    def test_a_read_cut_to_the_time_left_timing_out_is_the_deadline(self):
+        # Windows can deliver the socket timeout cut to the time left just before
+        # the deadline watchdog fires. The cut's timeout is the deadline's error,
+        # even when the wall clock has not crossed the stop yet.
+        import urllib.error
+        for raised in (TimeoutError("timed out"), urllib.error.URLError(TimeoutError("timed out"))):
+            with self.subTest(raised=type(raised).__name__):
+                def opener(guard, raised=raised):
+                    class Cut:
+                        def open(self, req, timeout=None):
+                            raise raised
+                    return Cut()
+                with mock.patch.object(sources, "_post_opener", opener):
+                    with self.assertRaises(SourceError) as caught:
+                        self.post(self.scripts.url + "/fast", seconds=5.0)
+                self.assertEqual(str(caught.exception), "w: no answer within 5 s")
+
+    def test_a_read_not_cut_to_the_time_left_stays_a_network_timeout(self):
+        # The ordinary 30 s metadata timeout is shorter than a 60 s total
+        # deadline. It is not the deadline's give-up and must remain a network
+        # error rather than being hidden behind the total-deadline message.
+        seen = []
+        def opener(guard):
+            class Uncut:
+                def open(self, req, timeout=None):
+                    seen.append(timeout)
+                    raise TimeoutError("timed out")
+            return Uncut()
+        with mock.patch.object(sources, "_post_opener", opener):
+            with self.assertRaises(SourceError) as caught:
+                self.post(self.scripts.url + "/fast", seconds=60.0)
+        self.assertEqual(str(caught.exception), "w: network error (TimeoutError)")
+        self.assertEqual(seen, [repo.METADATA_TIMEOUT])
+
     def test_the_byte_budget(self):
         unsaid = Recorder(body=b"x" * (300 * 1024), length=NO_LENGTH)
         self.addCleanup(unsaid.close)
