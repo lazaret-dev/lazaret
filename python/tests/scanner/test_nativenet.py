@@ -845,6 +845,18 @@ class ChoiceTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {**env, "HTTPS_PROXY": "https://proxy.invalid:3128"}, clear=True), \
                 self.assertRaises(nativenet.UsePython):
             nativenet._proxy_for("https://registry.npmjs.org/x")
+        malformed = ("https:user:secret@proxy.invalid:8443", "https:/user:secret@proxy.invalid:8443",
+                     "https:///user:secret@proxy.invalid:8443", " HTTPS:USER:secret@proxy.invalid:8443 ")
+        for proxy in malformed:
+            with self.subTest(proxy=proxy, source="environment"), \
+                    mock.patch.dict(os.environ, {**env, "HTTPS_PROXY": proxy}, clear=True), \
+                    self.assertRaises(nativenet.UsePython):
+                nativenet._proxy_for("https://registry.npmjs.org/x")
+            with self.subTest(proxy=proxy, source="system"), mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(urllib.request, "getproxies", return_value={"https": proxy}), \
+                    mock.patch.object(urllib.request, "proxy_bypass", return_value=False), \
+                    self.assertRaises(nativenet.UsePython):
+                nativenet._proxy_for("https://registry.npmjs.org/x")
         with mock.patch.dict(os.environ, env, clear=True), \
                 mock.patch.object(urllib.request, "getproxies", lambda: {"https": "http://sys.invalid:8080"}), \
                 mock.patch.object(urllib.request, "proxy_bypass", lambda host: host == "pypi.org"):

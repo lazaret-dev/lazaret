@@ -213,6 +213,16 @@ class ProxySettingsTests(unittest.TestCase):
                 http._proxy("a.example", {"https_proxy": value})
             self.assertEqual(caught.exception.kind, "proxy")
 
+    def test_malformed_https_proxies_are_refused_before_auth_is_built(self):
+        malformed = ("https:user:secret@proxy.example:8443", "https:/user:secret@proxy.example:8443",
+                     "https:///user:secret@proxy.example:8443", " HTTPS:USER:secret@proxy.example:8443 ")
+        for value in malformed:
+            with self.subTest(value=value), mock.patch.object(http.base64, "b64encode") as encoded, \
+                    self.assertRaises(http.TransportError) as caught:
+                http._proxy("a.example", {"https_proxy": value})
+            self.assertEqual(caught.exception.kind, "proxy")
+            encoded.assert_not_called()
+
 
 class StubCase(unittest.TestCase):
     @classmethod

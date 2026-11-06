@@ -488,9 +488,30 @@ fn main_kind(content_type: &str) -> Option<DocumentKind> {
     let lower = content_type.to_ascii_lowercase();
     if lower.contains("wordprocessingml") && lower.ends_with(".main+xml") {
         Some(DocumentKind::Wordprocessing)
+    } else if matches!(
+        lower.as_str(),
+        "application/vnd.ms-word.document.macroenabled.main+xml"
+            | "application/vnd.ms-word.template.macroenabledtemplate.main+xml"
+    ) {
+        Some(DocumentKind::Wordprocessing)
     } else if lower.contains("spreadsheetml") && lower.ends_with(".main+xml") {
         Some(DocumentKind::Spreadsheet)
+    } else if matches!(
+        lower.as_str(),
+        "application/vnd.ms-excel.sheet.macroenabled.main+xml"
+            | "application/vnd.ms-excel.template.macroenabled.main+xml"
+            | "application/vnd.ms-excel.addin.macroenabled.main+xml"
+    ) {
+        Some(DocumentKind::Spreadsheet)
     } else if lower.contains("presentationml") && lower.ends_with(".main+xml") {
+        Some(DocumentKind::Presentation)
+    } else if matches!(
+        lower.as_str(),
+        "application/vnd.ms-powerpoint.presentation.macroenabled.main+xml"
+            | "application/vnd.ms-powerpoint.slideshow.macroenabled.main+xml"
+            | "application/vnd.ms-powerpoint.template.macroenabled.main+xml"
+            | "application/vnd.ms-powerpoint.addin.macroenabled.main+xml"
+    ) {
         Some(DocumentKind::Presentation)
     } else {
         None
@@ -766,28 +787,28 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
         );
         return report;
     };
-    let Some(kind) = main_kind(content_type) else {
+    if let Some(kind) = main_kind(content_type) {
+        report.kind = Some(kind);
+        if !main_part.starts_with(expected_prefix(kind)) {
+            add_reason(
+                &mut report,
+                limits,
+                ReasonKind::Ambiguous,
+                "main-part",
+                Some(format!(
+                    "the {:?} main part is outside {}",
+                    kind,
+                    expected_prefix(kind)
+                )),
+            );
+        }
+    } else {
         add_reason(
             &mut report,
             limits,
             ReasonKind::Unsupported,
             "main-part",
             Some(format!("unsupported main-part content type {content_type}")),
-        );
-        return report;
-    };
-    report.kind = Some(kind);
-    if !main_part.starts_with(expected_prefix(kind)) {
-        add_reason(
-            &mut report,
-            limits,
-            ReasonKind::Ambiguous,
-            "main-part",
-            Some(format!(
-                "the {:?} main part is outside {}",
-                kind,
-                expected_prefix(kind)
-            )),
         );
     }
     if !members.contains_key(main_part.as_str()) {
@@ -800,6 +821,13 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
         );
     }
 
+    let vba_parts: BTreeSet<_> = overrides
+        .iter()
+        .filter(|(_, content_type)| {
+            content_type.eq_ignore_ascii_case("application/vnd.ms-office.vbaProject")
+        })
+        .map(|(part, _)| part.to_ascii_lowercase())
+        .collect();
     let mut seen = BTreeSet::new();
     for entry in archive
         .entries
@@ -809,7 +837,7 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
     {
         report.operations_examined = report.operations_examined.saturating_add(1);
         let lower = entry.name.to_ascii_lowercase();
-        if lower.ends_with("/vbaproject.bin") {
+        if lower.ends_with("/vbaproject.bin") || vba_parts.contains(&lower) {
             ooxml_feature(
                 &mut report,
                 limits,
@@ -865,6 +893,21 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
         };
         report.operations_examined = report.operations_examined.saturating_add(tags.len() as u64);
         for tag in tags.iter().filter(|tag| tag.local_name() == "Relationship") {
+            let relation_type = tag.attribute("Type").unwrap_or_default();
+            if relation_type.to_ascii_lowercase().ends_with("/vbaproject") {
+                let detail = tag
+                    .attribute("Target")
+                    .map(|target| clipped(target, limits.max_detail_bytes));
+                ooxml_feature(
+                    &mut report,
+                    limits,
+                    &mut seen,
+                    FeatureKind::Macro,
+                    "OOXML-MACRO",
+                    &entry.name,
+                    detail,
+                );
+            }
             if !tag
                 .attribute("TargetMode")
                 .is_some_and(|mode| mode.eq_ignore_ascii_case("external"))
@@ -1409,6 +1452,135 @@ mod tests {
         assert!(kinds.contains(&FeatureKind::ActiveX));
         assert!(kinds.contains(&FeatureKind::EmbeddedObject));
         assert!(kinds.contains(&FeatureKind::ExternalRelationship));
+    }
+
+    #[test]
+    fn macro_enabled_office_main_parts_are_inspected() {
+        let pack = crate::pack::current();
+        let cases = [
+            (
+                "word",
+                "application/vnd.ms-word.document.macroEnabled.main+xml",
+                DocumentKind::Wordprocessing,
+            ),
+            (
+                "xl",
+                "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+                DocumentKind::Spreadsheet,
+            ),
+            (
+                "ppt",
+                "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
+                DocumentKind::Presentation,
+            ),
+            (
+                "word",
+                "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
+                DocumentKind::Wordprocessing,
+            ),
+            (
+                "xl",
+                "application/vnd.ms-excel.template.macroEnabled.main+xml",
+                DocumentKind::Spreadsheet,
+            ),
+            (
+                "ppt",
+                "application/vnd.ms-powerpoint.template.macroEnabled.main+xml",
+                DocumentKind::Presentation,
+            ),
+            (
+                "xl",
+                "application/vnd.ms-excel.addin.macroEnabled.main+xml",
+                DocumentKind::Spreadsheet,
+            ),
+        ];
+        for (prefix, content_type, kind) in cases {
+            let mut value = package(prefix, content_type);
+            value
+                .entries
+                .push(file(&format!("{prefix}/vbaProject.bin"), b"macro"));
+            let report = analyze_ooxml(&value, &pack, Limits::default());
+            assert_eq!(report.kind, Some(kind), "{content_type}: {report:?}");
+            assert!(
+                report
+                    .features
+                    .iter()
+                    .any(|feature| feature.id == "OOXML-MACRO"),
+                "{content_type}: {report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_renamed_vba_project_is_found_by_content_type_or_relationship() {
+        let pack = crate::pack::current();
+        let mut by_content_type = package(
+            "word",
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+        );
+        let content_types = by_content_type
+            .entries
+            .iter_mut()
+            .find(|entry| entry.name == "[Content_Types].xml")
+            .expect("content types");
+        let xml = String::from_utf8(content_types.data.clone()).expect("content types XML");
+        content_types.data = xml.replace(
+            "</Types>",
+            r#"<Override PartName="/word/renamed.bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>"#,
+        ).into_bytes();
+        by_content_type
+            .entries
+            .push(file("word/renamed.bin", b"macro"));
+
+        let mut by_relationship = package(
+            "word",
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+        );
+        by_relationship.entries.extend([
+            file("word/other-name.bin", b"macro"),
+            file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships><Relationship Id="rIdVba" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="other-name.bin"/></Relationships>"#,
+            ),
+        ]);
+
+        for value in [&by_content_type, &by_relationship] {
+            let report = analyze_ooxml(value, &pack, Limits::default());
+            assert!(
+                report
+                    .features
+                    .iter()
+                    .any(|feature| feature.id == "OOXML-MACRO"),
+                "{report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn active_features_survive_an_unrecognized_main_part_type() {
+        let pack = crate::pack::current();
+        let mut value = package("word", "application/vnd.example.unknown.main+xml");
+        value.entries.extend([
+            file("word/vbaProject.bin", b"macro"),
+            file("word/activeX/activeX1.bin", b"control"),
+            // An undeclared, innocently named member is still inspected by bytes.
+            file(
+                "word/media/preview.dat",
+                b"MZ\x90\x00\x03\x00\x00\x00\x04\x00",
+            ),
+        ]);
+        let report = analyze_ooxml(&value, &pack, Limits::default());
+        assert_eq!(report.kind, None, "{report:?}");
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.kind == ReasonKind::Unsupported));
+        for id in ["OOXML-MACRO", "OOXML-ACTIVEX", "OOXML-EMBEDDED-PROGRAM"] {
+            assert!(
+                report.features.iter().any(|feature| feature.id == id),
+                "{id}: {report:?}"
+            );
+        }
     }
 
     #[test]
