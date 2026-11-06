@@ -78,6 +78,8 @@ def proxy_for(url, env_proxies=None):
     proxy = proxies.get(parts.scheme)
     if not proxy:
         return None
+    if proxy.strip().lower().startswith("https:"):
+        raise Unsupported("an https proxy")
     p = urllib.parse.urlsplit(proxy if "://" in proxy else "http://" + proxy)
     if parts.scheme != "https" or p.scheme != "http" or not p.hostname:
         raise Unsupported(f"a {p.scheme or 'plain'} proxy for a {parts.scheme} URL")
