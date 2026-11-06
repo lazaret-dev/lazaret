@@ -125,6 +125,27 @@ Before enabling or changing that pool, confirm every item in this checklist:
 - [ ] tag pushes, release workflow calls, manual dispatches and scheduled
       workflows resolve to GitHub-hosted labels in the routing-policy tests.
 
+Choose and record one runner-group policy; GitHub cannot combine both:
+
+- **Private-PR acceleration (the current workflow policy).** Keep the runner
+  group restricted to `lazaret-dev/lazaret`, but do not restrict it to
+  workflow files at `refs/heads/main`: a pull-request job executes the workflow
+  at `refs/pull/N/merge`, so that restriction would also block trusted PRs.
+  This mode therefore depends on *all* of the controller, external-contributor
+  approval, ephemeral-runner and network-isolation controls above. A workflow
+  expression that checks the PR author is only defense in depth; workflow YAML
+  from a fork is attacker-controlled.
+- **Trusted-ref-only pool.** Remove the self-hosted route from every
+  `pull_request` job and use the private pool only for trusted branch pushes.
+  The runner group can then allow only `.github/workflows/ci.yml` and
+  `.github/workflows/wheels.yml` at `refs/heads/main`. Pull requests use
+  GitHub-hosted runners in this mode.
+
+The first mode buys faster maintainer PR feedback; the second has the smaller
+authorization surface. Revisit the choice before enabling external
+contributions or adding an organization member who can open same-repository
+pull requests.
+
 The workflow file is defense in depth, not the only authorization boundary:
 the out-of-repository controller must reject an untrusted job before it creates
 or registers a runner, even if a pull request changes its own workflow YAML.
@@ -143,7 +164,7 @@ or registers a runner, even if a pull request changes its own workflow YAML.
 4. The tag triggers `.github/workflows/release.yml`:
    - `verify-tag` fails the release unless the tagged commit is on `main`, the tag is annotated (not a lightweight tag), and the versions committed at the tag match it;
    - the full test suite runs (`ci.yml`);
-   - `build-python` runs `wheels.yml`: the native engine's library for each of eight platforms (Linux x86-64 and ARM64 in PyPA's manylinux_2_28 and musllinux_1_2 images, macOS arm64 and x86-64, Windows x64 and ARM64), built with a pinned Rust, checked against its wheel's tag and the whole Python suite run on it on its platform; the sdist (with the engine's sources) and the eight platform wheels, built with Lazaret's own stdlib backend (stamped with the tagged commit's time) and checked against each other; each platform wheel installed with pip on its platform and run (the musl ones in their images), and the sdist built by pip on Linux (compiling the engine). There is no pure wheel: elsewhere pip builds from the sdist, which needs Rust. `build-npm` builds the native engine as WebAssembly with the same pinned Rust, runs the npm tests on it and packs the npm tarball (checked to carry `native/lazaret.wasm` and `native/NOTICE`);
+   - `build-python` runs `wheels.yml`: the native engine's library for each of eight platforms (Linux x86-64 and ARM64 in PyPA's manylinux_2_28 and musllinux_1_2 images, macOS arm64 and x86-64, Windows x64 and ARM64), built with a pinned Rust and checked against its wheel's tag. A release tag runs the whole Python suite against every library; pull requests do the same except that Intel macOS runs the native-engine tests and every recorded-output snapshot module. It builds the sdist (with the engine's sources) and the eight platform wheels with Lazaret's own stdlib backend (stamped with the tagged commit's time) and checks them against each other; each platform wheel is installed with pip on its platform and run (the musl ones in their images), and the sdist is built by pip on Linux (compiling the engine). There is no pure wheel: elsewhere pip builds from the sdist, which needs Rust. `build-npm` builds the native engine as WebAssembly with the same pinned Rust, runs the npm tests on it and packs the npm tarball (checked to carry `native/lazaret.wasm` and `native/NOTICE`);
    - only when **both** builds succeed do the publish jobs start, each waiting for your approval on its environment (`pypi`, `npm`).
 5. PyPI goes live as soon as its job finishes. npm is only *staged*: approve it with 2FA at https://www.npmjs.com/package/lazaret (the **Staged Packages** tab) or with `npm stage approve <stage-id>`. The run's summary page carries a reminder.
 6. - [ ] `python3 scripts/make_typosquat_stubs.py --check` still exits 0.
