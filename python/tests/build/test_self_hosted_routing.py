@@ -272,7 +272,8 @@ class SelfHostedRoutingTests(unittest.TestCase):
             releasing = f.read()
         for required in ("Published artifacts are built only on GitHub-hosted infrastructure",
                          "lazaret-tart", "fresh ephemeral JIT runner", "no access to the",
-                         "untrusted job before it creates"):
+                         "untrusted job before it creates", "refs/pull/N/merge",
+                         "Trusted-ref-only pool", "refs/heads/main"):
             self.assertIn(required, releasing)
 
     def test_ci_uses_the_release_compiler(self):
