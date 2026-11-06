@@ -113,6 +113,8 @@ def _proxy(host, environ):
     value = environ.get("HTTPS_PROXY") or environ.get("https_proxy")
     if not value:
         return None
+    if value.strip().lower().startswith("https:"):
+        raise TransportError("proxy", "only an http:// proxy is supported")
     no = environ.get("NO_PROXY") or environ.get("no_proxy")
     proxies = {"https": value}
     if no:
