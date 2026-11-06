@@ -363,6 +363,7 @@ pub struct VersionInfo {
 pub const MAX_FILENAME_BYTES: usize = 4_096;
 pub const MAX_MEDIA_TYPE_BYTES: usize = 256;
 pub const MAX_CONTAINER_PATH_BYTES: usize = 8_192;
+const MAX_NESTED_ARCHIVE_DEPTH: u64 = 32;
 
 /// One immutable, completely supplied attachment. Ranged inputs use
 /// [`RangedInput`] and the same [`InputIdentity`] in a later scan stage.
@@ -680,10 +681,11 @@ impl WorkBudget {
     }
 
     pub fn observe_depth(&mut self, depth: u64) -> Result<(), LimitReached> {
-        if depth > self.limits.depth {
+        let limit = self.limit(Resource::Depth);
+        if depth > limit {
             return Err(LimitReached {
                 resource: Resource::Depth,
-                limit: self.limits.depth,
+                limit,
                 attempted: depth,
             });
         }
@@ -702,7 +704,7 @@ impl WorkBudget {
             Resource::IncompleteReasons => self.limits.incomplete_reasons,
             Resource::EvidenceBytes => self.limits.evidence_bytes,
             Resource::TextCharacters => self.limits.text_characters,
-            Resource::Depth => self.limits.depth,
+            Resource::Depth => self.limits.depth.min(MAX_NESTED_ARCHIVE_DEPTH),
             Resource::RetainedBytes => self.limits.retained_bytes,
             Resource::Operations => self.limits.operations,
         }
@@ -1950,6 +1952,21 @@ mod tests {
         assert_eq!(budget.usage().max_depth, 5);
     }
 
+    #[test]
+    fn callers_cannot_raise_the_internal_archive_depth_cap() {
+        let mut budget = WorkBudget::new(limits(10_000));
+        assert!(budget.observe_depth(MAX_NESTED_ARCHIVE_DEPTH).is_ok());
+        assert_eq!(
+            budget.observe_depth(MAX_NESTED_ARCHIVE_DEPTH + 1),
+            Err(LimitReached {
+                resource: Resource::Depth,
+                limit: MAX_NESTED_ARCHIVE_DEPTH,
+                attempted: MAX_NESTED_ARCHIVE_DEPTH + 1,
+            })
+        );
+        assert_eq!(budget.usage().max_depth, MAX_NESTED_ARCHIVE_DEPTH);
+    }
+
     struct Cancelled;
     impl Cancellation for Cancelled {
         fn is_cancelled(&self) -> bool {
@@ -2280,6 +2297,63 @@ mod tests {
         assert!(report.findings.iter().any(|finding| {
             finding.rule_id == "SC-NESTED-ARCHIVE"
                 && finding.message.contains("word/media/after.dat")
+        }));
+    }
+
+    #[test]
+    fn deeply_nested_archives_stop_at_the_internal_cap_on_a_small_stack() {
+        let mut nested = stored_zip(&[("payload.bin", b"inert")]);
+        for _ in 0..1_100 {
+            nested = stored_zip(&[("next.zip", &nested)]);
+        }
+        let bytes = stored_zip(&[
+            (
+                "[Content_Types].xml",
+                br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/document.xml", b"<document/>"),
+            ("word/embedded/deep.zip", &nested),
+        ]);
+
+        let report = std::thread::Builder::new()
+            .name("ir-37-small-stack".to_string())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
+                let mut work_limits = limits(100_000_000);
+                work_limits.depth = 10_000;
+                let mut context = ScanContext::new(work_limits, &NeverCancelled);
+                scanner
+                    .scan_whole(
+                        WholeAttachment {
+                            identity: InputIdentity([37; 16]),
+                            bytes: &bytes,
+                            filename: Some("deep.docx"),
+                            declared_media_type: Some(
+                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            ),
+                            container_path: None,
+                        },
+                        &mut context,
+                    )
+                    .expect("bounded scan")
+            })
+            .expect("small-stack thread")
+            .join()
+            .expect("scan must not overflow the native stack");
+
+        assert_eq!(report.usage.max_depth, MAX_NESTED_ARCHIVE_DEPTH);
+        assert!(report.incomplete.iter().any(|reason| {
+            reason.kind == IncompleteKind::LimitExhausted
+                && reason.analyzer == Some("nested-container")
+                && reason
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("depth limit 32 would be exceeded by 33"))
         }));
     }
 
