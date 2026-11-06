@@ -6,7 +6,7 @@
 
 use crate::pack::Pack;
 use lazaret_archive::{Archive, Entry, Format};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -352,6 +352,7 @@ fn xml_tags(data: &[u8], limits: Limits) -> Result<Vec<XmlTag>, ReasonKind> {
             .map_err(|_| ReasonKind::Malformed)?
             .to_string();
         let mut attrs = Vec::new();
+        let mut attribute_names = HashSet::new();
         let self_closing = loop {
             while body.get(cursor).is_some_and(u8::is_ascii_whitespace) {
                 cursor += 1;
@@ -379,7 +380,7 @@ fn xml_tags(data: &[u8], limits: Limits) -> Result<Vec<XmlTag>, ReasonKind> {
             let key = std::str::from_utf8(&body[start..cursor])
                 .map_err(|_| ReasonKind::Malformed)?
                 .to_string();
-            if attrs.iter().any(|(existing, _)| existing == &key) {
+            if !attribute_names.insert(key.clone()) {
                 return Err(ReasonKind::Malformed);
             }
             while body.get(cursor).is_some_and(u8::is_ascii_whitespace) {
@@ -1676,6 +1677,29 @@ mod tests {
             ),
             Err(ReasonKind::Malformed)
         ));
+    }
+
+    #[test]
+    fn duplicate_detection_is_linear_for_a_large_single_tag() {
+        use std::fmt::Write;
+        use std::time::{Duration, Instant};
+
+        let mut xml = String::with_capacity(1_200_000);
+        xml.push_str("<Relationship");
+        for index in 0..100_000 {
+            write!(&mut xml, " a{index}=\"\"").expect("write attribute");
+        }
+        xml.push_str(" a99999=\"duplicate\"/>");
+
+        let started = Instant::now();
+        let result = xml_tags(xml.as_bytes(), Limits::default());
+        let elapsed = started.elapsed();
+
+        assert!(matches!(result, Err(ReasonKind::Malformed)));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "100,000 attributes took {elapsed:?}"
+        );
     }
 
     #[test]
