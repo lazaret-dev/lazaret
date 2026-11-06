@@ -5,9 +5,12 @@
 # the Rust-first refactor the package has no engine without it, so there is
 # no pure (py3-none-any) wheel: where no platform wheel fits, pip builds one
 # from the sdist, compiling the engine with cargo. Each platform's library
-# is built, checked and tested on that platform, the nine files are built
-# from one checkout, each platform wheel is installed with pip on its
-# platform and run, and on Linux x86-64 pip installs the sdist too. release.yml calls this workflow and publishes what
+# is built, checked and tested on that platform. Release tags run the whole
+# Python suite against every library. Pull requests do the same except on
+# Intel macOS, where the native-engine tests and every recorded-output
+# snapshot module run instead. The nine files are built from one checkout,
+# each platform wheel is installed with pip on its platform and run, and on
+# Linux x86-64 pip installs the sdist too. release.yml calls this workflow and publishes what
 # the `dist` job uploads (artifact python-dist). It also runs on pull
 # requests and pushes to main that change what goes into a wheel, so a
 # release never meets a platform build for the first time.
@@ -191,11 +194,13 @@ jobs:
   # August 2027; after that it becomes a cross build on Apple silicon, checked
   # by its headers only; the ARM64 Windows DLL on windows-11-arm). The
   # deployment targets are the tags' minimums. Apple silicon runs the full
-  # Python suite; Intel builds and loads the native library and runs a focused
-  # engine/snapshot smoke set, while the install job below also installs and
-  # executes the finished Intel wheel. This keeps Intel compatibility without
-  # duplicating the hour-long macOS suite. The Windows DLLs link the C runtime
-  # statically: machines without the Visual C++ redistributable can load them.
+  # Python suite. Intel runs the full suite for a release tag; pull requests
+  # build and load the native library and run the native-engine tests plus all
+  # recorded-output snapshot modules. The install job below also installs and
+  # executes the finished Intel wheel. This keeps PR coverage bounded without
+  # releasing an Intel wheel that never ran the full suite. The Windows DLLs
+  # link the C runtime statically: machines without the Visual C++
+  # redistributable can load them.
   macos-windows:
     name: library (${{ matrix.tag }})
     # The native ARM64 Mac library uses our disposable Apple-silicon pool for
@@ -219,8 +224,9 @@ jobs:
         fromJSON('["self-hosted","macOS","ARM64","lazaret-tart"]') ||
         matrix.runner
       }}
-    # The full Python suite takes about 53 minutes on the Tart macOS image;
-    # Intel's focused lane has a smaller per-matrix timeout.
+    # The full Python suite takes about 53 minutes on the Tart macOS image.
+    # Intel also needs the full allowance when a release tag selects its full
+    # profile; its pull-request smoke profile normally finishes much sooner.
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -239,7 +245,7 @@ jobs:
             library: liblazaret_native.dylib
             deployment-target: "10.12"
             test-profile: intel-smoke
-            timeout: 30
+            timeout: 90
           - tag: win_amd64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
@@ -263,6 +269,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment-target }}
       RUSTFLAGS: ${{ matrix.rustflags }}
       LAZARET_NATIVE_LIB: ${{ github.workspace }}/rust/target/${{ matrix.target }}/release/${{ matrix.library }}
+      TEST_PROFILE: ${{ matrix.tag == 'macosx_10_12_x86_64' && startsWith(github.ref, 'refs/tags/') && 'full' || matrix.test-profile }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -283,19 +290,19 @@ jobs:
       - name: Check it against its tag, and load it
         run: python scripts/check_native_library.py "$LAZARET_NATIVE_LIB" "$TAG" --load
       - name: The full Python suite on this library (its recorded outputs among them)
-        if: matrix.test-profile == 'full'
+        if: env.TEST_PROFILE == 'full'
         working-directory: python
         run: python -m unittest discover -s tests -t .
       - name: Intel native-engine and recorded-output smoke tests
-        if: matrix.test-profile == 'intel-smoke'
+        if: env.TEST_PROFILE == 'intel-smoke'
         working-directory: python
-        run: >-
-          python -m unittest
-          tests.scanner.test_engine_scan_file
-          tests.scanner.test_jsparse
-          tests.architecture.test_snapshot_scanfile
-          tests.architecture.test_snapshot_js_parse
-          tests.architecture.test_snapshot_small
+        run: |
+          snapshots=()
+          for path in tests/architecture/test_snapshot_*.py; do
+            module=${path%.py}
+            snapshots+=("${module//\//.}")
+          done
+          python -m unittest tests.scanner.test_engine_scan_file tests.scanner.test_jsparse "${snapshots[@]}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-${{ matrix.tag }}
