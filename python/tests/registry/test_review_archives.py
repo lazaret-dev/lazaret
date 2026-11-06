@@ -131,6 +131,21 @@ def long_pax_10_sparse_sdist(extents, digits=256):
     return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
 
 
+def pax_10_sparse_lines(*lines):
+    """A PAX 1.0 sparse member with the exact numeric lines supplied."""
+    sparse_map = ("\n".join(lines) + "\n").encode()
+    sparse_map += b"\0" * (-len(sparse_map) % tarfile.BLOCKSIZE)
+    info = tarfile.TarInfo("placeholder")
+    info.size = len(sparse_map)
+    info.pax_headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.name": "x-1.0/setup.py",
+        "GNU.sparse.realsize": "0",
+    }
+    return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
+
+
 def old_gnu_sparse_sdist(extension_blocks):
     """An old-GNU sparse member with empty chained extension blocks."""
     info = tarfile.TarInfo("x-1.0/setup.py")
@@ -507,13 +522,25 @@ class LinkTests(unittest.TestCase):
 
     def test_a_link_target_past_the_retention_bound_fails_closed(self):
         root = "x-1.0/"
-        raw = (tar_member(root + "docs/notes.txt", self.NOTES)
+        filler = b"filler"
+        raw = (tar_member(root + "docs/filler.txt", filler)
+               + tar_member(root + "docs/notes.txt", self.NOTES)
                + tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "docs/notes.txt")
                + b"\0" * 1024)
-        with mock.patch.object(repo, "MAX_TAR_LINK_CACHE", len(self.NOTES) - 1):
+        with mock.patch.object(repo, "MAX_TAR_LINK_CACHE", len(filler)):
             members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
         linked = [m for m in members if m[0] == "setup.py"]
-        self.assertEqual([(m[3], "retention bound" in m.detail) for m in linked], [("corrupt", True)])
+        self.assertEqual([(m[3], "not retained" in m.detail) for m in linked], [("total", True)])
+
+    def test_an_oversized_link_with_different_name_checks_is_incomplete(self):
+        root = "x-1.0/"
+        payload = b"import os\n" + b"#" * (repo.MAX_MEMBER + 1 - len(b"import os\n"))
+        raw = (tar_member(root + "blob.dat", payload)
+               + tar_member(root + "evil.pth", b"", tarfile.SYMTYPE, "blob.dat")
+               + b"\0" * 1024)
+        result = scan_bytes(gzip.compress(raw), artifact="sdist", eco="pypi")
+        self.assertEqual(result["verdict"], "INCOMPLETE", result["issues"])
+        self.assertIn("SC-TRUNCATED", rules(result))
 
     def test_a_forward_symlink_uses_the_later_target(self):
         root = "x-1.0/"
@@ -829,6 +856,26 @@ class TarResourceLimitTests(unittest.TestCase):
         data = long_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS, digits=1)
         members = list(repo.iter_archive(data, "tgz", "sdist"))
         self.assertTrue(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+
+    def test_pax_10_sparse_numbers_are_bounded_on_the_first_and_later_lines(self):
+        accepted = (
+            pax_10_sparse_lines("0" * 31 + "1", "0", "0"),
+            pax_10_sparse_lines("1", "0" * 32, "0"),
+        )
+        for data in accepted:
+            with self.subTest(case="32 bytes"):
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertTrue(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+
+        refused = (
+            pax_10_sparse_lines("0" * 32 + "1", "0", "0"),
+            pax_10_sparse_lines("1", "0" * 33, "0"),
+        )
+        for data in refused:
+            with self.subTest(case="33 bytes"):
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertTrue(any(m[3] == "corrupt" and "numeric field longer" in m.detail
+                                    for m in members), members)
 
     def test_maximum_pax_10_sparse_map_is_parsed_in_linear_time(self):
         data = long_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS, digits=480)

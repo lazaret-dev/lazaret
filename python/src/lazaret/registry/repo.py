@@ -1358,6 +1358,11 @@ class Member(tuple):
         self.detail = detail
         return self
 
+    rel = property(lambda self: self[0])
+    size = property(lambda self: self[1])
+    raw = property(lambda self: self[2])
+    reason = property(lambda self: self[3])
+
 
 _DRIVE_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
 
@@ -1940,6 +1945,17 @@ def _zip_tail_start(tail, start):
     return max(0, min(len(tail) - 65_557, end - cd_size - 1024))
 
 
+def _oversized_checks(rel, first, size=None):
+    """Name/content-sensitive streaming checks an oversized member needs.
+
+    Link aliases may change all three decisions.  A retained result is safe to
+    reuse only when the target and alias have the same tuple.
+    """
+    ext = os.path.splitext(posixpath.basename(rel))[1].lower()
+    model = first[:4] == b"PK\x03\x04" and lazaret.model_sniff(rel, first[:512])
+    return ext == ".pth", bool(model), bool(_wants_walk(rel, first, size))
+
+
 def _oversized_member(rel, first, more):
     """FP-MODEL-FILES: an oversized member (`first`: its first MAX_MEMBER + 1 bytes; `more(n)`: the next bytes, b"" at
     its end) read on, once, as its stream passes, when its first bytes are a zip model file's (a checkpoint, an
@@ -1948,9 +1964,9 @@ def _oversized_member(rel, first, more):
     unless it is a sound, video, image or font to its end (its structure walked as the stream passes: the engine's
     media_stream) -> (pieces or None, {"lines", "cuts"} or None, the walk's end or None); (None, None, None) when it
     is none of them, and nothing more is read."""
-    keep = _ZipModelKeep() if first[:4] == b"PK\x03\x04" and lazaret.model_sniff(rel, first[:512]) else None
-    pth = os.path.splitext(posixpath.basename(rel))[1].lower() == ".pth"
-    walk = {"state": None, "offset": 0, "end": None} if _wants_walk(rel, first) else None
+    pth, model, media = _oversized_checks(rel, first)
+    keep = _ZipModelKeep() if model else None
+    walk = {"state": None, "offset": 0, "end": None} if media else None
     if keep is None and not pth and walk is None:
         return None, None, None
     state, lines, cuts = None, [], []
@@ -1989,10 +2005,10 @@ def _oversized_member(rel, first, more):
             (walk["end"] if walk is not None else None))
 
 
-def _wants_walk(rel, first):
+def _wants_walk(rel, first, size=None):
     """FP-OPAQUE-MEDIA: whether an oversized member's first bytes call for its structure to be walked (they would
     make it an opaque blob, and they start a format the engine walks)."""
-    return lazaret.classify_needs_whole(rel, first[:SAMPLE], len(first), "repo")
+    return lazaret.classify_needs_whole(rel, first[:SAMPLE], len(first) if size is None else size, "repo")
 
 
 def _tar_sparse_map(info):
@@ -2233,7 +2249,6 @@ def _iter_tar(data, container, artifact, budget, anomalies):
                     target_positions.setdefault(rel, []).append((m.offset, m.offset_data))
                     retained = len(big[2])
                     if target_cache_bytes + retained <= MAX_TAR_LINK_CACHE:
-                        budget.charge(retained)
                         target_contents[m.offset_data] = (big, len(raw))
                         target_cache_bytes += retained
                     else:
@@ -2244,7 +2259,6 @@ def _iter_tar(data, container, artifact, budget, anomalies):
             if artifact != "npm":
                 target_positions.setdefault(rel, []).append((m.offset, m.offset_data))
                 if target_cache_bytes + len(raw) <= MAX_TAR_LINK_CACHE:
-                    budget.charge(len(raw))
                     target_contents[m.offset_data] = (member, len(raw))
                     target_cache_bytes += len(raw)
                 else:
@@ -2401,12 +2415,12 @@ def _resolve_tar_links(artifact, links, seen, budget, anomalies, target_position
             if retained is None:
                 for link_rel in links_to:
                     last = link_rel
-                    yield Member(link_rel, 0, b"", "corrupt",
-                                 f"the target of {link_rel} exceeds the {MAX_TAR_LINK_CACHE:,}-byte "
-                                 "tar-link retention bound")
+                    yield Member(link_rel, 0, b"", "total",
+                                 f"the target of {link_rel} was not retained within the "
+                                 f"{MAX_TAR_LINK_CACHE:,}-byte tar-link cache limit")
                 continue
             member, scan_bytes = retained
-            if member[3] == "corrupt":
+            if member.reason == "corrupt":
                 for link_rel in links_to:
                     last = link_rel
                     yield Member(link_rel, 0, b"", "corrupt",
@@ -2417,18 +2431,25 @@ def _resolve_tar_links(artifact, links, seen, budget, anomalies, target_position
                 budget.check()
                 budget.charge(scan_bytes)       # one installer-visible file, and one path's scan work
                 _note_member(seen, link_rel, anomalies)
-                if member[3] == "member":
-                    big = Member(link_rel, SAMPLE, member[2], "member")
+                if member.reason == "member":
+                    # The target was streamed only once.  Its saved .pth,
+                    # model and media answers cannot be relabelled when the
+                    # alias's name would select a different streaming check.
+                    if _oversized_checks(member.rel, member.raw, scan_bytes) \
+                            != _oversized_checks(link_rel, member.raw, scan_bytes):
+                        yield Member(link_rel, 0, b"", "total",
+                                     f"the oversized target of {link_rel} was not retained under "
+                                     "the alias's name-sensitive checks")
+                        continue
+                    big = Member(link_rel, member.size, member.raw, "member")
                     big.model = getattr(member, "model", None)
                     big.pth = getattr(member, "pth", None)
                     big.media = getattr(member, "media", None)
                     yield big
                 else:
-                    yield Member(link_rel, member[1], member[2], None)
+                    yield Member(link_rel, member.size, member.raw, None)
     except ArchiveLimit as lim:
         yield Member(last, 0, b"", lim.reason, lim.detail)
-    except (tarfile.TarError, EOFError, OSError, zlib.error, lzma.LZMAError, ValueError) as exc:
-        yield Member(last, 0, b"", "corrupt", f"links could not be resolved ({type(exc).__name__})")
 
 
 def _zip_is_symlink(info):
