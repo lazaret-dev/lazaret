@@ -100,6 +100,40 @@ def pax_metadata_archive(entries):
     return gzip.compress(raw + b"\0" * 1024)
 
 
+def oversized_pax_10_sparse_sdist(extents):
+    """A PAX 1.0 sparse member whose declared map is refused immediately."""
+    sparse_map = f"{extents}\n".encode()
+    sparse_map += b"\0" * (-len(sparse_map) % tarfile.BLOCKSIZE)
+    info = tarfile.TarInfo("placeholder")
+    info.size = len(sparse_map)
+    info.pax_headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.name": "x-1.0/setup.py",
+        "GNU.sparse.realsize": "1",
+    }
+    return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
+
+
+def old_gnu_sparse_sdist(extension_blocks):
+    """An old-GNU sparse member with empty chained extension blocks."""
+    info = tarfile.TarInfo("x-1.0/setup.py")
+    info.type, info.size = tarfile.GNUTYPE_SPARSE, 1
+    header = bytearray(info.tobuf(tarfile.GNU_FORMAT))
+    header[482] = 1 if extension_blocks else 0
+    header[483:495] = tarfile.itn(1, 12, tarfile.GNU_FORMAT)
+    header[148:156] = b"        "
+    checksum = tarfile.calc_chksums(header)[0]
+    header[148:156] = bytes(f"{checksum:06o}\0 ", "ascii")
+    extensions = []
+    for number in range(extension_blocks):
+        block = bytearray(tarfile.BLOCKSIZE)
+        block[504] = number + 1 < extension_blocks
+        extensions.append(bytes(block))
+    raw = bytes(header) + b"".join(extensions) + b"x" + b"\0" * 511 + b"\0" * 1024
+    return gzip.compress(raw)
+
+
 def overlapping_sparse_sdist(sparse_format, first, second):
     """setup.py whose two sparse extents cover the same complete file."""
     assert len(first) == len(second)
@@ -700,6 +734,25 @@ class TarResourceLimitTests(unittest.TestCase):
         complete = [m[0] for m in members if m[3] is None]
         self.assertEqual(complete, ["a0.py", "a1.py"])
         self.assertTrue(any(m[3] == "corrupt" and "tar metadata" in m.detail for m in members), members)
+
+    def test_pax_10_sparse_extent_count_is_bounded_before_the_map_is_built(self):
+        data = oversized_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS + 1)
+        members = list(repo.iter_archive(data, "tgz", "sdist"))
+        self.assertFalse(any(m[3] is None for m in members), members)
+        self.assertTrue(any(
+            m[3] == "corrupt" and "sparse map declares 4,097 extents" in m.detail
+            for m in members
+        ), members)
+
+    def test_old_gnu_sparse_extension_blocks_share_the_metadata_byte_bound(self):
+        data = old_gnu_sparse_sdist(2)
+        with mock.patch.object(repo, "MAX_TAR_METADATA_TOTAL", tarfile.BLOCKSIZE):
+            members = list(repo.iter_archive(data, "tgz", "sdist"))
+        self.assertFalse(any(m[3] is None for m in members), members)
+        self.assertTrue(any(
+            m[3] == "corrupt" and "1,024 bytes so far" in m.detail
+            for m in members
+        ), members)
 
 
 class SparseAndAliasBudgetTests(unittest.TestCase):
