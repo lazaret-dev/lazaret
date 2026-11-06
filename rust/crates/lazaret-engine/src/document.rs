@@ -207,7 +207,7 @@ impl XmlTag {
     fn attribute(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()
-            .find(|(key, _)| key.rsplit(':').next().unwrap_or(key) == name)
+            .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     }
 }
@@ -379,6 +379,9 @@ fn xml_tags(data: &[u8], limits: Limits) -> Result<Vec<XmlTag>, ReasonKind> {
             let key = std::str::from_utf8(&body[start..cursor])
                 .map_err(|_| ReasonKind::Malformed)?
                 .to_string();
+            if attrs.iter().any(|(existing, _)| existing == &key) {
+                return Err(ReasonKind::Malformed);
+            }
             while body.get(cursor).is_some_and(u8::is_ascii_whitespace) {
                 cursor += 1;
             }
@@ -1452,6 +1455,49 @@ mod tests {
         assert!(kinds.contains(&FeatureKind::ActiveX));
         assert!(kinds.contains(&FeatureKind::EmbeddedObject));
         assert!(kinds.contains(&FeatureKind::ExternalRelationship));
+    }
+
+    #[test]
+    fn namespace_declarations_cannot_hide_relationship_attributes() {
+        let pack = crate::pack::current();
+        let mut value = package(
+            "word",
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+        );
+        value.entries.push(file(
+            "word/_rels/document.xml.rels",
+            br#"<Relationships>
+                <Relationship Id="rIdExternal" xmlns:TargetMode="urn:decoy" Type="image" TargetMode="External" Target="https://example.invalid/a.png"/>
+                <Relationship Id="rIdVba" xmlns:Type="urn:decoy" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="renamed.bin"/>
+            </Relationships>"#,
+        ));
+
+        let report = analyze_ooxml(&value, &pack, Limits::default());
+        assert!(
+            report
+                .features
+                .iter()
+                .any(|feature| feature.id == "OOXML-EXTERNAL-RELATIONSHIP"),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .features
+                .iter()
+                .any(|feature| feature.id == "OOXML-MACRO"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_xml_attributes_are_malformed() {
+        assert!(matches!(
+            xml_tags(
+                br#"<Relationships><Relationship Id="one" Id="two"/></Relationships>"#,
+                Limits::default(),
+            ),
+            Err(ReasonKind::Malformed)
+        ));
     }
 
     #[test]
