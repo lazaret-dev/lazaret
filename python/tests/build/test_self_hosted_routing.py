@@ -15,7 +15,7 @@ import unittest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 TOKEN = re.compile(
     r"\s*(?:(?P<string>'[^'\\]*')|(?P<operator>&&|\|\||==|!=|[!(),])|"
-    r"(?P<name>[A-Za-z_][A-Za-z0-9_.]*))"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_.-]*))"
 )
 
 
@@ -35,6 +35,13 @@ def runner_expression(section):
     if match is None:
         raise AssertionError("job has no multiline runs-on expression")
     return " ".join(match.group(1).split())
+
+
+def environment_expression(section, name):
+    match = re.search(rf"(?m)^      {re.escape(name)}: \$\{{\{{ (.*?) \}}\}}$", section)
+    if match is None:
+        raise AssertionError(f"job has no {name} expression")
+    return match.group(1)
 
 
 class Expression:
@@ -132,7 +139,7 @@ class Expression:
 
 
 def route(expression, *, event, ref, actor="johnabooth-afk", head="lazaret-dev/lazaret",
-          os_name="macos-latest", tag="macosx_11_0_arm64", fallback="macos-15"):
+          os_name="macos-latest", tag="macosx_11_0_arm64", fallback="macos-15", profile="full"):
     """Evaluate the small GitHub-expression subset the routing policy uses."""
     values = {
         "github.event.pull_request.head.repo.full_name": head,
@@ -143,6 +150,7 @@ def route(expression, *, event, ref, actor="johnabooth-afk", head="lazaret-dev/l
         "matrix.runner": fallback,
         "matrix.os": os_name,
         "matrix.tag": tag,
+        "matrix.test-profile": profile,
     }
     return Expression(expression, values).parse()
 
@@ -200,6 +208,23 @@ class SelfHostedRoutingTests(unittest.TestCase):
         for name in ("macos-windows", "install"):
             section = job(text, name)
             self.assert_wheel_policy(runner_expression(section))
+
+    def test_an_intel_release_tag_selects_the_full_suite(self):
+        section = job(workflow("wheels.yml"), "macos-windows")
+        expression = environment_expression(section, "TEST_PROFILE")
+        intel = {"tag": "macosx_10_12_x86_64", "profile": "intel-smoke"}
+        self.assertEqual(route(expression, event="pull_request", ref="refs/pull/50/merge", **intel),
+                         "intel-smoke")
+        self.assertEqual(route(expression, event="push", ref="refs/heads/main", **intel), "intel-smoke")
+        self.assertEqual(route(expression, event="push", ref="refs/tags/v0.1.9", **intel), "full")
+        self.assertEqual(route(expression, event="workflow_call", ref="refs/tags/v0.1.9", **intel), "full")
+        self.assertEqual(route(expression, event="pull_request", ref="refs/pull/50/merge",
+                               tag="macosx_11_0_arm64", profile="full"), "full")
+
+        # A text-presence assertion would miss a guard wired into the wrong
+        # expression. Prove the truth table rejects losing the tag decision.
+        mutation = expression.replace("startsWith(github.ref, 'refs/tags/') && ", "", 1)
+        self.assertNotEqual(route(mutation, event="push", ref="refs/heads/main", **intel), "intel-smoke")
 
     def test_release_calls_both_hosted_workflows(self):
         release = workflow("release.yml")
