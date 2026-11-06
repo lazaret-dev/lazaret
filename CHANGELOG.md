@@ -84,10 +84,9 @@ The F-05 loss audit also retainsthe protected reading for Node `os.userInfo().ho
   declarations. Every limit it reaches ends as an incomplete reason, never a quiet pass. ZIP reading moves into
   `lazaret-archive` as a format of its own (#48; below). No command, no Python function and no WebAssembly export
   reaches this code, so no verdict in a release moves: it is groundwork for a mail-gateway scanner
-  (`docs/MAIL_GATEWAY_REQUIREMENTS.md`). Review found gaps to close before anything calls it: an `xmlns:`
-  declaration placed before an attribute hides it (IR-18), a package whose main part is typed by a `Default`
-  content type skips the feature checks (IR-33), and the preflight can drop a binary finding, discard macro evidence,
-  miss a zip under an Office-looking name, and recurse on the native stack (IR-34 to IR-37).
+  (`docs/MAIL_GATEWAY_REQUIREMENTS.md`). Review gaps in namespace-decoy attributes, default content types and
+  unbounded archive depth were fixed before release. Review items remain before anything calls it: the preflight can
+  drop a binary finding, discard macro evidence and miss a zip under an Office-looking name.
 - **Taint: a call followed into the helper it names (Q-4; the engine's, for both packages; rule set 2.100.0).** Project mode, Python. The intra-file pass read a call as text, so `param = x.get_param('id')` after
   `x = Wrapper(request)` carried nothing: the receiver holds no request data, but `get_param` returns
   `self.request.args.get(name)`. A helper defined in the file, or in another file of the project, that returns
@@ -1281,16 +1280,16 @@ The F-05 loss audit also retainsthe protected reading for Node `os.userInfo().ho
 
 ### Changed
 
-- **The network boundary, tightened (#34, #35, IR-04; the Python registry code and pratique; no rule-set change).**
-  A proxy setting that names an `https:` proxy, which Lazaret does not support, is refused before any connection is
-  made, from the environment and from the system's settings alike, and so is a malformed `https:` form in each place
-  that reads a proxy; the refusal does not repeat the proxy's credentials, a `NO_PROXY` match still means a direct
-  connection, and the forms urllib accepts behave as before. Every urllib opener in the package goes through the one boundary. A
+- **The network boundary, tightened (#34, #35; the Python registry code and pratique; no rule-set change).**
+  The native client passes a well-formed `https://` proxy to Python's transport, which reaches that proxy over TLS.
+  A malformed `https:` proxy setting is refused everywhere a proxy is read; the refusal does not repeat the proxy's
+  credentials, a `NO_PROXY` match still means a direct connection, and the forms urllib accepts behave as before.
+  Every urllib opener in the package goes through the one boundary. A
   redirect whose target carries credentials in its URL is refused before the request to it. The guard's errors, its
   terminal output and its JSON no longer show a signed URL's query values or fragment, and a malformed URL still
   shows neither its user information nor its query. pratique bounds the cumulative size of a response's
   informational (1xx) heads, which now share the final head's limit.
-- **Tar and compressed archives are read as the installer reads them, within bounds (#32, #53, #57, IR-01, IR-05;
+- **Tar and compressed archives are read as the installer reads them, within bounds (#32, #53, #57;
   the registry's archive reading; no rule-set change).** A chain of links is followed to the end and every name an
   installer would see is kept; a link cycle or a dangling target is incomplete, as are overlapping sparse extents and
   a nonzero zero-length sparse marker, in every sparse encoding; sparse holes count toward the total budget, and so
@@ -1300,8 +1299,8 @@ The F-05 loss audit also retainsthe protected reading for Node `os.userInfo().ho
   is read in the first, bounded pass, where it used to be read again by a second pass with no bounds; a target past
   the retention bound fails closed. A streaming LZMA decoder's memory is bounded (`.tar.xz` and auto-detected LZMA),
   and an oversized sparse `.pth` file and the first read of a member stop between chunks when the scan is
-  cancelled. A PAX 1.0 sparse map is parsed in linear time, and a number field longer than 32 bytes is refused
-  (IR-29). The extent cap is still per member, not per archive (IR-30, open).
+  cancelled. A PAX 1.0 sparse map is parsed in linear time, and a number field longer than 32 bytes is refused. The
+  extent cap is still per member, not per archive.
 - **ZIP reading is the archive crate's (#48; `lazaret-archive`).** The reader moves out of the engine and keeps its
   refusals: ambiguous or duplicate entries, encrypted entries, unknown methods and flags, special modes and names
   with a NUL. Declared sizes are charged against the budget before anything is inflated, and the size and CRC-32 are
@@ -1312,12 +1311,12 @@ The F-05 loss audit also retainsthe protected reading for Node `os.userInfo().ho
   The guard follows an HTTP 308 redirect on Python 3.10.
 - **pnpm 12's trusted registry credentials (#41).** A listing of pnpm's settings no longer replaces the credential a
   trusted settings file holds for a registry.
-- **pratique is vendored from its main branch, and `scripts/sync_pratique.py` checks it (#49, #50, #57; IR-09,
-  IR-23, IR-27).** The vendored commit is one on pratique's default branch: `sync_pratique.py --verify` now fails
+- **pratique is vendored from its main branch, and `scripts/sync_pratique.py` checks it (#49, #50, #57).** The
+  vendored commit is one on pratique's default branch: `sync_pratique.py --verify` now fails
   on a commit that is only on a side branch. Later re-vendors take pratique's fixes for tests that hung on Windows
   ARM64 and ran past the 45-second cap on the Mac runner. The embedded dashboard engine is rebuilt with each.
-- **For contributors: how releases are built and routed, and how CI runs (#40, #41, #44, #46, #51; IR-02, IR-03,
-  IR-06, IR-07, IR-13, IR-24).** A `v*` tag builds every wheel and package on GitHub's hosted runners; pull
+- **For contributors: how releases are built and routed, and how CI runs (#40, #41, #44, #46, #51).** A `v*` tag
+  builds every wheel and package on GitHub's hosted runners; pull
   requests from the maintainer's own branches may route to the trusted macOS pool, and forks, other authors,
   Dependabot, schedules and manual runs go to hosted runners. `test_self_hosted_routing.py` evaluates the workflows'
   routing expressions against each kind of event and fails on a routing mutation. The Intel macOS wheel runs the full
