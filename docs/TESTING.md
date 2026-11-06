@@ -467,8 +467,11 @@ native client where its engine library is installed). Run the set before
 and after a detection change and before a release, as the benchmark: no
 release may be SUSPICIOUS, and every verdict or strong finding that moves
 is read. 0.1.8 makes the nine SUSPICIOUS on it, and 0.1.9 none of its 1,703
-releases: on rule set 2.70.0 (Oct 14, `bench.py all`), 43 WARN and 1
-INCOMPLETE (sharp's 16 MB libvips library, counted as unscanned code). When
+releases: on rule set 2.114.0 (Nov 6, `bench.py all`, the release run), 44
+WARN and 2 INCOMPLETE (joblib's model files compressed with bzip2, lzma and
+xz, which the reader cannot decompress; and, as of Oct 14, sharp's 16 MB
+libvips library, counted as unscanned code), 1,657 OK; 0.1.8 on the same
+run: 9 SUSPICIOUS, 48 WARN, 1 INCOMPLETE. When
 the crates joined it (rule set 2.33.0) the npm and PyPI releases gave 32
 WARN and the crates 16 (13 for the prebuilt libraries and objects they
 ship, the windows and winapi import libraries, ring's and aws-lc-sys's
@@ -489,6 +492,57 @@ package is what this set exists to catch. A fourth count pins extensions
 from Open VSX, and an ecosystem given no count, or 0, keeps its pins.
 `popular.py pin npm:vite@8.3.2 crates:syn …` adds or moves single
 releases, and `popular.py check` validates the file.
+
+**What the popular set flags.** Every release in this set is a widely used,
+benign package, so what Lazaret finds in it is a behaviour that an attack
+also uses, in code that has a reason to. The gate is that none is SUSPICIOUS
+(the guard blocks SUSPICIOUS by default, so one on a popular package breaks
+installs), that every WARN is read, and that every verdict or strong finding
+that moves is read. Lazaret 0.1.9 on Nov 6 (rule set 2.114.0): 0 SUSPICIOUS,
+44 WARN, 2 INCOMPLETE, 1,657 OK of 1,703. What it flags is of four kinds.
+
+- *Code that runs what it receives, or what it decodes.* The nine releases
+  0.1.8 made SUSPICIOUS were this, in five shapes (B-1): a list reversed with
+  `[::-1]` and then run (sympy's `lambdify` and IPython's completer,
+  SC-EVAL-DECODE); library code whose job is to send a credential
+  (kubernetes' in-cluster config sends the service account token to the API
+  server, and `future`'s urllib backport sends proxy credentials, SC-USE-RISK);
+  loaders and runners that fetch code and run it (Monaco's AMD loader fetches
+  a URL it is given and runs it; vitest's VM runner; vite's dev server, with
+  es-module-lexer's `(0, eval)` helper beside a `Buffer.from` decode and a
+  warm-up request to its own URL in a bundle that reads the environment);
+  coverage's `a1_coverage.pth`, which runs `exec` on a literal that starts
+  coverage when `COVERAGE_PROCESS_START` is set (SC-PTH-EXEC; 0.1.7 flagged it
+  too); and numba's jitclass, which reads its own source back
+  (SC-IMPORT-RISK; 0.1.7 too). In 0.1.9 seven of the nine are OK (vitest,
+  monaco-editor, numba, future, sympy, ipython, kubernetes) and two are WARN
+  (vite and coverage): the shape is still a sign, and no longer a verdict.
+- *Code that ships code it does not show.* Prebuilt libraries and objects (the
+  windows and winapi import libraries, ring's and aws-lc-sys's assembly,
+  wit-bindgen's WebAssembly, 13 of the crates' 16 WARN when they joined),
+  binaries, and base64 or hex that decodes to something that runs: SC-BINARY,
+  SC-HEXSTR, SC-OPAQUE-BLOB, SC-NESTED-ARCHIVE and SC-B64 (which since rule set
+  2.39.0 passes over data that decodes to WebAssembly or an image).
+- *Install-time hooks.* When the set's npm and PyPI releases were first
+  counted (Oct 3, 31 WARN of 429), most were install scripts, binaries and
+  base64 blobs: what a build tool legitimately does at install, and what an
+  attack does too.
+- *A release too big or too opaque to read.* INCOMPLETE is not a pass: the
+  guard refuses an install it cannot check. joblib's compressed model files
+  and sharp's libvips are the two.
+
+The releases named in the run records as WARN on Nov 6 include celery 5.6.3,
+vite 8.3.2, coverage 7.16.2 and the `openssl` crate 0.10.81; the whole list,
+with each release's reasons, is the run's `popular.jsonl` (`verdict`, `weak`
+and `strong` per release) and is tabulated in the release's bench report.
+Beyond this set, on Ubuntu's 4,104 Go modules and crates the run has 2
+SUSPICIOUS, 44 WARN and 3 INCOMPLETE, and on Go's standard library 2 WARN and
+1 INCOMPLETE. The two SUSPICIOUS are known false positives of the Go reader's
+(FP-GO-INIT-FUNCVALUE): containers/storage's archive code and
+mvdan.cc/fdroidcl's `clean.go`, which SC-IMPORT-RISK reads as deleting the
+user's files when a program that imports them starts. John chose on Oct 30 to
+ship 0.1.9 with them and fix them after (work paused at the tag
+`fp-go-r4-wip-paused`).
 
 **The extensions (E-1's fourth part).** `popular.py pin --top 0,0,0,400
 --cache DIR` takes the first 400 names of the extensions' list (`vscode`

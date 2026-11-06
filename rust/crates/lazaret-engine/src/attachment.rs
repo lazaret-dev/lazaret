@@ -363,6 +363,7 @@ pub struct VersionInfo {
 pub const MAX_FILENAME_BYTES: usize = 4_096;
 pub const MAX_MEDIA_TYPE_BYTES: usize = 256;
 pub const MAX_CONTAINER_PATH_BYTES: usize = 8_192;
+const MAX_NESTED_ARCHIVE_DEPTH: u64 = 32;
 
 /// One immutable, completely supplied attachment. Ranged inputs use
 /// [`RangedInput`] and the same [`InputIdentity`] in a later scan stage.
@@ -680,10 +681,11 @@ impl WorkBudget {
     }
 
     pub fn observe_depth(&mut self, depth: u64) -> Result<(), LimitReached> {
-        if depth > self.limits.depth {
+        let limit = self.limit(Resource::Depth);
+        if depth > limit {
             return Err(LimitReached {
                 resource: Resource::Depth,
-                limit: self.limits.depth,
+                limit,
                 attempted: depth,
             });
         }
@@ -702,7 +704,7 @@ impl WorkBudget {
             Resource::IncompleteReasons => self.limits.incomplete_reasons,
             Resource::EvidenceBytes => self.limits.evidence_bytes,
             Resource::TextCharacters => self.limits.text_characters,
-            Resource::Depth => self.limits.depth,
+            Resource::Depth => self.limits.depth.min(MAX_NESTED_ARCHIVE_DEPTH),
             Resource::RetainedBytes => self.limits.retained_bytes,
             Resource::Operations => self.limits.operations,
         }
@@ -1199,6 +1201,211 @@ fn archive_incomplete_kind(error: &lazaret_archive::Error) -> IncompleteKind {
     }
 }
 
+fn scan_ooxml_member_preflight(
+    pack: &Pack,
+    archive: &lazaret_archive::Archive,
+    context: &mut ScanContext<'_>,
+    report: &mut AttachmentReport,
+    evidence: ByteRange,
+) -> Result<(), StopReason> {
+    scan_archive_member_preflight(pack, archive, "", 1, true, context, report, evidence)
+}
+
+fn scan_archive_member_preflight(
+    pack: &Pack,
+    archive: &lazaret_archive::Archive,
+    prefix: &str,
+    depth: u64,
+    document_members: bool,
+    context: &mut ScanContext<'_>,
+    report: &mut AttachmentReport,
+    evidence: ByteRange,
+) -> Result<(), StopReason> {
+    context.observe_depth(depth)?;
+    for entry in archive.entries.iter().filter(|entry| entry.is_file()) {
+        context.checkpoint()?;
+        context.charge(Resource::Operations, 1)?;
+        let separator_length = usize::from(!prefix.is_empty()) * 2;
+        let path_length = prefix
+            .len()
+            .checked_add(separator_length)
+            .and_then(|length| length.checked_add(entry.name.len()));
+        if path_length.is_none_or(|length| length > MAX_CONTAINER_PATH_BYTES) {
+            push_reason(
+                report,
+                context,
+                IncompleteReason {
+                    kind: IncompleteKind::LimitExhausted,
+                    analyzer: Some("nested-container"),
+                    detail: Some("nested member path exceeds the retained-path limit".to_string()),
+                },
+            );
+            continue;
+        }
+        let member_path = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{prefix}!/{}", entry.name)
+        };
+        let path = pystr::u(&member_path);
+        let classified = crate::binary::classify_more(
+            pack,
+            &path,
+            &entry.data,
+            entry.data.len() as u64,
+            "mail",
+            true,
+            false,
+            crate::binary::More::Whole(&entry.data),
+        );
+        let issues = match classified {
+            crate::binary::Classified::Issue(issue) => vec![issue],
+            crate::binary::Classified::Issues(issues) => issues,
+            crate::binary::Classified::Quiet => Vec::new(),
+            crate::binary::Classified::Need | crate::binary::Classified::Wrapper => {
+                push_reason(
+                    report,
+                    context,
+                    IncompleteReason {
+                        kind: IncompleteKind::InternalEngineFailure,
+                        analyzer: Some("document-member-preflight"),
+                        detail: Some(format!(
+                            "whole bytes for {} did not complete byte classification",
+                            member_path
+                        )),
+                    },
+                );
+                Vec::new()
+            }
+        };
+        for issue in issues {
+            let Some(mut finding) = typed_issue(&issue, evidence) else {
+                push_reason(
+                    report,
+                    context,
+                    IncompleteReason {
+                        kind: IncompleteKind::InternalEngineFailure,
+                        analyzer: Some("document-member-preflight"),
+                        detail: Some(format!(
+                            "byte classification for {} returned an invalid finding",
+                            member_path
+                        )),
+                    },
+                );
+                continue;
+            };
+            // The document analyzer already reports native programs with the
+            // member path. Keep the generic preflight for the other byte-first
+            // classes without emitting a second finding for the same program.
+            if document_members && finding.rule_id == "SC-BINARY" {
+                continue;
+            }
+            let nested = finding.rule_id == "SC-NESTED-ARCHIVE";
+            finding.message = format!("in {member_path}: {}", finding.message);
+            push_finding(report, context, finding)?;
+            if nested {
+                scan_nested_archive(
+                    pack,
+                    &entry.data,
+                    &member_path,
+                    depth.saturating_add(1),
+                    context,
+                    report,
+                    evidence,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scan_nested_archive(
+    pack: &Pack,
+    bytes: &[u8],
+    path: &str,
+    depth: u64,
+    context: &mut ScanContext<'_>,
+    report: &mut AttachmentReport,
+    evidence: ByteRange,
+) -> Result<(), StopReason> {
+    if let Err(stop) = context.observe_depth(depth) {
+        match stop {
+            StopReason::Cancelled => return Err(stop),
+            StopReason::Limit(limit) => {
+                push_reason(
+                    report,
+                    context,
+                    IncompleteReason {
+                        kind: IncompleteKind::LimitExhausted,
+                        analyzer: Some("nested-container"),
+                        detail: Some(format!(
+                            "{} depth limit {} would be exceeded by {}",
+                            path, limit.limit, limit.attempted
+                        )),
+                    },
+                );
+                return Ok(());
+            }
+        }
+    }
+    context.checkpoint()?;
+    context.charge(Resource::Operations, 1)?;
+    let limits = lazaret_archive::Limits {
+        max_entries: usize::try_from(context.remaining(Resource::Members)).unwrap_or(usize::MAX),
+        max_member_size: context.remaining(Resource::DecodedBytes),
+        max_total_size: context.remaining(Resource::DecodedBytes),
+        max_name_size: MAX_CONTAINER_PATH_BYTES,
+        max_metadata_size: context.remaining(Resource::DecodedBytes).min(1024 * 1024),
+    };
+    let archive = match lazaret_archive::extract_with_limits(bytes, limits) {
+        Ok(archive) => archive,
+        Err(error) => {
+            push_reason(
+                report,
+                context,
+                IncompleteReason {
+                    kind: archive_incomplete_kind(&error),
+                    analyzer: Some("nested-container"),
+                    detail: Some(format!("{path}: {error}")),
+                },
+            );
+            return Ok(());
+        }
+    };
+    let decoded = archive
+        .entries
+        .iter()
+        .try_fold(0u64, |total, entry| total.checked_add(entry.len() as u64));
+    let Some(decoded) = decoded else {
+        push_reason(
+            report,
+            context,
+            IncompleteReason {
+                kind: IncompleteKind::LimitExhausted,
+                analyzer: Some("nested-container"),
+                detail: Some(format!("{path}: extracted size overflowed")),
+            },
+        );
+        return Ok(());
+    };
+    context.charge(Resource::Members, archive.entries.len() as u64)?;
+    context.charge(Resource::DecodedBytes, decoded)?;
+    if archive.is_path_ambiguous() {
+        push_reason(
+            report,
+            context,
+            IncompleteReason {
+                kind: IncompleteKind::StructurallyAmbiguous,
+                analyzer: Some("nested-container"),
+                detail: Some(format!("{path}: archive member paths are ambiguous")),
+            },
+        );
+    }
+    scan_archive_member_preflight(
+        pack, &archive, path, depth, false, context, report, evidence,
+    )
+}
+
 fn scan_ooxml(
     pack: &Pack,
     attachment: &WholeAttachment<'_>,
@@ -1295,11 +1502,12 @@ fn scan_ooxml(
     let analysis_limits = document_limits(context);
     context.charge(Resource::Members, archive.entries.len() as u64)?;
     context.charge(Resource::DecodedBytes, decoded)?;
-    let value = crate::document::analyze_ooxml(&archive, pack, analysis_limits);
     let evidence = ByteRange {
         offset: 0,
         length: attachment.bytes.len().min(4) as u64,
     };
+    scan_ooxml_member_preflight(pack, &archive, context, report, evidence)?;
+    let value = crate::document::analyze_ooxml(&archive, pack, analysis_limits);
     retain_document_report(&value, context, report, evidence)?;
     if let Some(detected) = value.kind.filter(|_| value.is_confirmed()) {
         for (source, claimed) in claims {
@@ -1744,6 +1952,21 @@ mod tests {
         assert_eq!(budget.usage().max_depth, 5);
     }
 
+    #[test]
+    fn callers_cannot_raise_the_internal_archive_depth_cap() {
+        let mut budget = WorkBudget::new(limits(10_000));
+        assert!(budget.observe_depth(MAX_NESTED_ARCHIVE_DEPTH).is_ok());
+        assert_eq!(
+            budget.observe_depth(MAX_NESTED_ARCHIVE_DEPTH + 1),
+            Err(LimitReached {
+                resource: Resource::Depth,
+                limit: MAX_NESTED_ARCHIVE_DEPTH,
+                attempted: MAX_NESTED_ARCHIVE_DEPTH + 1,
+            })
+        );
+        assert_eq!(budget.usage().max_depth, MAX_NESTED_ARCHIVE_DEPTH);
+    }
+
     struct Cancelled;
     impl Cancellation for Cancelled {
         fn is_cancelled(&self) -> bool {
@@ -1952,16 +2175,25 @@ mod tests {
     }
 
     #[test]
-    fn ooxml_structure_not_extension_confirms_type_and_surfaces_features() {
+    fn ooxml_structure_confirms_macro_type_and_surfaces_renamed_active_content() {
         let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
-        let content_types = br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+        let content_types = br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.ms-word.document.macroEnabled.main+xml"/><Override PartName="/word/renamed.dat" ContentType="application/vnd.ms-office.vbaProject"/></Types>"#;
         let relationships = br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
         let external = br#"<Relationships><Relationship Id="rId2" Type="image" TargetMode="External" Target="https://example.invalid/a.png"/></Relationships>"#;
+        let nested = stored_zip(&[(
+            "payload.exe",
+            b"MZ\x90\x00\x03\x00\x00\x00\x04\x00",
+        )]);
         let bytes = stored_zip(&[
             ("[Content_Types].xml", content_types),
             ("_rels/.rels", relationships),
             ("word/document.xml", b"<document/>"),
-            ("word/vbaProject.bin", b"macro"),
+            ("word/renamed.dat", b"macro"),
+            (
+                "word/media/preview.dat",
+                b"MZ\x90\x00\x03\x00\x00\x00\x04\x00",
+            ),
+            ("word/media/thumbnail.dat", &nested),
             ("word/_rels/document.xml.rels", external),
         ]);
         let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
@@ -1970,10 +2202,8 @@ mod tests {
                 WholeAttachment {
                     identity: InputIdentity([22; 16]),
                     bytes: &bytes,
-                    filename: Some("invoice.docx"),
-                    declared_media_type: Some(
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    ),
+                    filename: Some("invoice.docm"),
+                    declared_media_type: Some("application/vnd.ms-word.document.macroEnabled.12"),
                     container_path: None,
                 },
                 &mut context,
@@ -1991,11 +2221,140 @@ mod tests {
             .iter()
             .any(|finding| finding.rule_id == "OOXML-MACRO"));
         assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "OOXML-EMBEDDED-PROGRAM"
+                && finding.class == SignalClass::ExecutableOrLoadableProgram
+                && finding.message.contains("word/media/preview.dat")
+        }));
+        assert!(report.findings.iter().any(|finding| {
             finding.rule_id == "OOXML-EXTERNAL-RELATIONSHIP"
                 && finding.class == SignalClass::ExternalReference
         }));
-        assert_eq!(report.usage.members, 5);
+        assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "SC-NESTED-ARCHIVE"
+                && finding.class == SignalClass::EmbeddedOrNestedContainer
+                && finding.message.contains("word/media/thumbnail.dat")
+        }));
+        assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "SC-BINARY"
+                && finding.class == SignalClass::ExecutableOrLoadableProgram
+                && finding
+                    .message
+                    .contains("word/media/thumbnail.dat!/payload.exe")
+        }));
+        assert!(!report
+            .incomplete
+            .iter()
+            .any(|reason| reason.analyzer == Some("nested-container")));
+        assert_eq!(report.usage.members, 8);
+        assert_eq!(report.usage.max_depth, 2);
         assert!(report.usage.decoded_bytes > 0);
+    }
+
+    #[test]
+    fn nested_office_archive_respects_depth_without_hiding_later_members() {
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
+        let inner = stored_zip(&[("payload.bin", b"inert")]);
+        let outer = stored_zip(&[("inner.zip", &inner)]);
+        let bytes = stored_zip(&[
+            (
+                "[Content_Types].xml",
+                br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/document.xml", b"<document/>"),
+            ("word/embedded/outer.zip", &outer),
+            ("word/media/after.dat", b"PK\x03\x04not-a-complete-zip"),
+        ]);
+        let mut work_limits = limits(10_000_000);
+        work_limits.depth = 2;
+        let mut context = ScanContext::new(work_limits, &NeverCancelled);
+        let report = scanner
+            .scan_whole(
+                WholeAttachment {
+                    identity: InputIdentity([24; 16]),
+                    bytes: &bytes,
+                    filename: Some("depth.docx"),
+                    declared_media_type: Some(
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ),
+                    container_path: None,
+                },
+                &mut context,
+            )
+            .unwrap();
+
+        assert_eq!(report.usage.max_depth, 2);
+        assert!(report.incomplete.iter().any(|reason| {
+            reason.kind == IncompleteKind::LimitExhausted
+                && reason.analyzer == Some("nested-container")
+                && reason.detail.as_deref().is_some_and(|detail| {
+                    detail.contains("word/embedded/outer.zip!/inner.zip")
+                })
+        }));
+        assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "SC-NESTED-ARCHIVE"
+                && finding.message.contains("word/media/after.dat")
+        }));
+    }
+
+    #[test]
+    fn deeply_nested_archives_stop_at_the_internal_cap_on_a_small_stack() {
+        let mut nested = stored_zip(&[("payload.bin", b"inert")]);
+        for _ in 0..1_100 {
+            nested = stored_zip(&[("next.zip", &nested)]);
+        }
+        let bytes = stored_zip(&[
+            (
+                "[Content_Types].xml",
+                br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/document.xml", b"<document/>"),
+            ("word/embedded/deep.zip", &nested),
+        ]);
+
+        let report = std::thread::Builder::new()
+            .name("ir-37-small-stack".to_string())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
+                let mut work_limits = limits(100_000_000);
+                work_limits.depth = 10_000;
+                let mut context = ScanContext::new(work_limits, &NeverCancelled);
+                scanner
+                    .scan_whole(
+                        WholeAttachment {
+                            identity: InputIdentity([37; 16]),
+                            bytes: &bytes,
+                            filename: Some("deep.docx"),
+                            declared_media_type: Some(
+                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            ),
+                            container_path: None,
+                        },
+                        &mut context,
+                    )
+                    .expect("bounded scan")
+            })
+            .expect("small-stack thread")
+            .join()
+            .expect("scan must not overflow the native stack");
+
+        assert_eq!(report.usage.max_depth, MAX_NESTED_ARCHIVE_DEPTH);
+        assert!(report.incomplete.iter().any(|reason| {
+            reason.kind == IncompleteKind::LimitExhausted
+                && reason.analyzer == Some("nested-container")
+                && reason
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("depth limit 32 would be exceeded by 33"))
+        }));
     }
 
     #[test]
@@ -2028,6 +2387,53 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.rule_id == "ATTACHMENT-DOCUMENT-TYPE-MISMATCH"));
+    }
+
+    #[test]
+    fn ooxml_member_preflight_obeys_the_shared_depth_limit() {
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
+        let bytes = stored_zip(&[
+            (
+                "[Content_Types].xml",
+                br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/document.xml", b"<document/>"),
+        ]);
+        let attachment = WholeAttachment {
+            identity: InputIdentity([24; 16]),
+            bytes: &bytes,
+            filename: Some("report.docx"),
+            declared_media_type: None,
+            container_path: None,
+        };
+
+        let mut exact_limits = limits(10_000_000);
+        exact_limits.depth = 1;
+        let mut exact = ScanContext::new(exact_limits, &NeverCancelled);
+        let exact_report = scanner.scan_whole(attachment, &mut exact).unwrap();
+        assert_eq!(exact_report.usage.max_depth, 1);
+        assert!(exact_report
+            .detected_formats
+            .iter()
+            .any(|format| format.kind == DetectedFormatKind::WordprocessingDocument));
+
+        let mut over_limits = exact_limits;
+        over_limits.depth = 0;
+        let mut over = ScanContext::new(over_limits, &NeverCancelled);
+        let over_report = scanner.scan_whole(attachment, &mut over).unwrap();
+        assert!(!over_report.is_complete());
+        assert!(over_report.incomplete.iter().any(|reason| {
+            reason.kind == IncompleteKind::LimitExhausted
+                && reason.analyzer == Some("document")
+                && reason
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("Depth"))
+        }));
     }
 
     #[test]

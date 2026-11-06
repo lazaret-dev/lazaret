@@ -472,6 +472,10 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 PYC = b"\x55\x0d\x0d\x0a" + b"\x00" * 12               # (a 3.12 magic; flags 0: timestamp-based)
 PYC_UNCHECKED = b"\xf3\x0d\x0d\x0a" + b"\x01\x00\x00\x00" + b"\x00" * 8
 MTS = (b"\x47" + b"\x00" * 187) * 3
+# Stable opaque binary bytes.  Random bytes can accidentally form a valid
+# pickle/model stream, which violates this test's explicit no-model fixture
+# contract and makes the generated-tree parity check nondeterministic.
+OPAQUE_BINARY = b"\x00\xff\xfe\xfd" * 75
 
 
 def file_body(rng, name):
@@ -498,7 +502,7 @@ def file_body(rng, name):
     if pick < 0.2:
         return rng.choice([b"#!/usr/bin/env node\nconsole.log(1)\n", b"#!/bin/sh\necho hi\n", b"#!/usr/bin/python3\nx=1\n"])
     if pick < 0.4:
-        return rng.choice([ELF, PNG, b"PK\x03\x04" + b"\x00" * 26, os.urandom(300)])
+        return rng.choice([ELF, PNG, b"PK\x03\x04" + b"\x00" * 26, OPAQUE_BINARY])
     if pick < 0.6:
         return rng.choice([b"KEY=value\n", b"\xff\xfe" + "A=1\n".encode("utf-16-le"), b'{"generatedBy": "lazaret-cli-1"}',
                            b"\x00binary config", b"[x]\ny = 2\n"])

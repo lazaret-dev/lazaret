@@ -100,6 +100,71 @@ def pax_metadata_archive(entries):
     return gzip.compress(raw + b"\0" * 1024)
 
 
+def oversized_pax_10_sparse_sdist(extents):
+    """A PAX 1.0 sparse member whose declared map is refused immediately."""
+    sparse_map = f"{extents}\n".encode()
+    sparse_map += b"\0" * (-len(sparse_map) % tarfile.BLOCKSIZE)
+    info = tarfile.TarInfo("placeholder")
+    info.size = len(sparse_map)
+    info.pax_headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.name": "x-1.0/setup.py",
+        "GNU.sparse.realsize": "1",
+    }
+    return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
+
+
+def long_pax_10_sparse_sdist(extents, digits=256):
+    """A valid maximum-width PAX 1.0 map that exposes quadratic line splitting."""
+    zero = "0" * digits
+    sparse_map = (f"{extents}\n" + (f"{zero}\n{zero}\n" * extents)).encode()
+    sparse_map += b"\0" * (-len(sparse_map) % tarfile.BLOCKSIZE)
+    info = tarfile.TarInfo("placeholder")
+    info.size = len(sparse_map)
+    info.pax_headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.name": "x-1.0/setup.py",
+        "GNU.sparse.realsize": "0",
+    }
+    return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
+
+
+def pax_10_sparse_lines(*lines):
+    """A PAX 1.0 sparse member with the exact numeric lines supplied."""
+    sparse_map = ("\n".join(lines) + "\n").encode()
+    sparse_map += b"\0" * (-len(sparse_map) % tarfile.BLOCKSIZE)
+    info = tarfile.TarInfo("placeholder")
+    info.size = len(sparse_map)
+    info.pax_headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.name": "x-1.0/setup.py",
+        "GNU.sparse.realsize": "0",
+    }
+    return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
+
+
+def old_gnu_sparse_sdist(extension_blocks):
+    """An old-GNU sparse member with empty chained extension blocks."""
+    info = tarfile.TarInfo("x-1.0/setup.py")
+    info.type, info.size = tarfile.GNUTYPE_SPARSE, 1
+    header = bytearray(info.tobuf(tarfile.GNU_FORMAT))
+    header[482] = 1 if extension_blocks else 0
+    header[483:495] = tarfile.itn(1, 12, tarfile.GNU_FORMAT)
+    header[148:156] = b"        "
+    checksum = tarfile.calc_chksums(header)[0]
+    header[148:156] = bytes(f"{checksum:06o}\0 ", "ascii")
+    extensions = []
+    for number in range(extension_blocks):
+        block = bytearray(tarfile.BLOCKSIZE)
+        block[504] = number + 1 < extension_blocks
+        extensions.append(bytes(block))
+    raw = bytes(header) + b"".join(extensions) + b"x" + b"\0" * 511 + b"\0" * 1024
+    return gzip.compress(raw)
+
+
 def overlapping_sparse_sdist(sparse_format, first, second):
     """setup.py whose two sparse extents cover the same complete file."""
     assert len(first) == len(second)
@@ -447,6 +512,83 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
         self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
 
+    def test_link_targets_come_from_the_bounded_first_pass(self):
+        with mock.patch.object(repo.tarfile, "open",
+                               side_effect=AssertionError("link resolution reopened the tar")):
+            members = list(repo.iter_archive(
+                self.sdist(tarfile.SYMTYPE, "docs/notes.txt"), "tgz", "sdist"))
+        linked = [m for m in members if m[0] == "setup.py" and m[3] is None]
+        self.assertEqual([bytes(m[2]) for m in linked], [self.NOTES])
+
+    def test_a_link_target_past_the_retention_bound_fails_closed(self):
+        root = "x-1.0/"
+        filler = b"filler"
+        raw = (tar_member(root + "docs/filler.txt", filler)
+               + tar_member(root + "docs/notes.txt", self.NOTES)
+               + tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "docs/notes.txt")
+               + b"\0" * 1024)
+        with mock.patch.object(repo, "MAX_TAR_LINK_CACHE", len(filler)):
+            members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
+        linked = [m for m in members if m[0] == "setup.py"]
+        self.assertEqual([(m[3], "not retained" in m.detail) for m in linked], [("total", True)])
+
+    def test_an_oversized_link_with_different_name_checks_is_incomplete(self):
+        root = "x-1.0/"
+        payload = b"import os\n" + b"#" * (repo.MAX_MEMBER + 1 - len(b"import os\n"))
+        raw = (tar_member(root + "blob.dat", payload)
+               + tar_member(root + "evil.pth", b"", tarfile.SYMTYPE, "blob.dat")
+               + b"\0" * 1024)
+        result = scan_bytes(gzip.compress(raw), artifact="sdist", eco="pypi")
+        self.assertEqual(result["verdict"], "INCOMPLETE", result["issues"])
+        self.assertIn("SC-TRUNCATED", rules(result))
+
+    def test_a_forward_symlink_uses_the_later_target(self):
+        root = "x-1.0/"
+        raw = (tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "payload.py")
+               + tar_member(root + "payload.py", self.NOTES) + b"\0" * 1024)
+        members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
+        linked = [m for m in members if m[0] == "setup.py" and m[3] is None]
+        self.assertEqual([bytes(m[2]) for m in linked], [self.NOTES])
+
+    def test_hard_and_symbolic_links_choose_the_installers_duplicate(self):
+        root = "x-1.0/"
+        first, last = b"first = 1\n", b"last = 2\n"
+        for kind, expected in ((tarfile.LNKTYPE, first), (tarfile.SYMTYPE, last)):
+            with self.subTest(kind=kind):
+                target = root + "payload.py" if kind == tarfile.LNKTYPE else "payload.py"
+                raw = (tar_member(root + "payload.py", first)
+                       + tar_member(root + "setup.py", b"", kind, target)
+                       + tar_member(root + "payload.py", last) + b"\0" * 1024)
+                members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
+                linked = [m for m in members if m[0] == "setup.py" and m[3] is None]
+                self.assertEqual([bytes(m[2]) for m in linked], [expected])
+
+    def test_sparse_link_target_is_cached_as_installed_with_holes(self):
+        root, payload, logical_size = "x-1.0/", b"tail\n", 4096
+        hole = logical_size - len(payload)
+        info = tarfile.TarInfo(root + "payload.py")
+        info.size = len(payload)
+        info.pax_headers = {"GNU.sparse.map": f"{hole},{len(payload)}",
+                            "GNU.sparse.size": str(logical_size)}
+        sparse = info.tobuf(tarfile.PAX_FORMAT) + payload
+        sparse += b"\0" * (-len(sparse) % tarfile.BLOCKSIZE)
+        raw = (sparse + tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "payload.py")
+               + b"\0" * 1024)
+        members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
+        linked = [m for m in members if m[0] == "setup.py" and m[3] is None]
+        self.assertEqual(len(linked), 1)
+        self.assertEqual(bytes(linked[0][2]), b"\0" * hole + payload)
+
+    def test_cargo_link_uses_bytes_from_an_odd_type_entry(self):
+        root = "x-1.0.0/"
+        disguised = tar_member(root + "fake-header.rs", b"decoy\n")
+        raw = (typed_member(root + "payload.rs", disguised, tarfile.CHRTYPE)
+               + tar_member(root + "build.rs", b"", tarfile.LNKTYPE, root + "payload.rs")
+               + b"\0" * 1024)
+        members = list(repo.iter_archive(gzip.compress(raw), "tgz", "crate"))
+        linked = [m for m in members if m[0] == "build.rs" and m[3] is None]
+        self.assertEqual([bytes(m[2]) for m in linked], [disguised])
+
     def test_long_link_chains_are_fully_resolved(self):
         for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
             for intermediates in (8, 9):             # both sides of the former eight-hop boundary
@@ -700,6 +842,59 @@ class TarResourceLimitTests(unittest.TestCase):
         complete = [m[0] for m in members if m[3] is None]
         self.assertEqual(complete, ["a0.py", "a1.py"])
         self.assertTrue(any(m[3] == "corrupt" and "tar metadata" in m.detail for m in members), members)
+
+    def test_pax_10_sparse_extent_count_is_bounded_before_the_map_is_built(self):
+        data = oversized_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS + 1)
+        members = list(repo.iter_archive(data, "tgz", "sdist"))
+        self.assertFalse(any(m[3] is None for m in members), members)
+        self.assertTrue(any(
+            m[3] == "corrupt" and "sparse map declares 4,097 extents" in m.detail
+            for m in members
+        ), members)
+
+    def test_pax_10_sparse_extent_limit_accepts_4096(self):
+        data = long_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS, digits=1)
+        members = list(repo.iter_archive(data, "tgz", "sdist"))
+        self.assertTrue(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+
+    def test_pax_10_sparse_numbers_are_bounded_on_the_first_and_later_lines(self):
+        accepted = (
+            pax_10_sparse_lines("0" * 31 + "1", "0", "0"),
+            pax_10_sparse_lines("1", "0" * 32, "0"),
+        )
+        for data in accepted:
+            with self.subTest(case="32 bytes"):
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertTrue(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+
+        refused = (
+            pax_10_sparse_lines("0" * 32 + "1", "0", "0"),
+            pax_10_sparse_lines("1", "0" * 33, "0"),
+        )
+        for data in refused:
+            with self.subTest(case="33 bytes"):
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertTrue(any(m[3] == "corrupt" and "numeric field longer" in m.detail
+                                    for m in members), members)
+
+    def test_maximum_pax_10_sparse_map_is_parsed_in_linear_time(self):
+        data = long_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS, digits=480)
+        started = time.perf_counter()
+        members = list(repo.iter_archive(data, "tgz", "sdist"))
+        elapsed = time.perf_counter() - started
+        self.assertTrue(any(m[3] == "corrupt" and "numeric field longer" in m.detail
+                            for m in members), members)
+        self.assertLess(elapsed, 1.0, f"bounded sparse map took {elapsed:.3f}s")
+
+    def test_old_gnu_sparse_extension_blocks_share_the_metadata_byte_bound(self):
+        data = old_gnu_sparse_sdist(2)
+        with mock.patch.object(repo, "MAX_TAR_METADATA_TOTAL", tarfile.BLOCKSIZE):
+            members = list(repo.iter_archive(data, "tgz", "sdist"))
+        self.assertFalse(any(m[3] is None for m in members), members)
+        self.assertTrue(any(
+            m[3] == "corrupt" and "1,024 bytes so far" in m.detail
+            for m in members
+        ), members)
 
 
 class SparseAndAliasBudgetTests(unittest.TestCase):

@@ -6,7 +6,7 @@
 
 use crate::pack::Pack;
 use lazaret_archive::{Archive, Entry, Format};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -207,7 +207,7 @@ impl XmlTag {
     fn attribute(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()
-            .find(|(key, _)| key.rsplit(':').next().unwrap_or(key) == name)
+            .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     }
 }
@@ -352,6 +352,7 @@ fn xml_tags(data: &[u8], limits: Limits) -> Result<Vec<XmlTag>, ReasonKind> {
             .map_err(|_| ReasonKind::Malformed)?
             .to_string();
         let mut attrs = Vec::new();
+        let mut attribute_names = HashSet::new();
         let self_closing = loop {
             while body.get(cursor).is_some_and(u8::is_ascii_whitespace) {
                 cursor += 1;
@@ -379,6 +380,9 @@ fn xml_tags(data: &[u8], limits: Limits) -> Result<Vec<XmlTag>, ReasonKind> {
             let key = std::str::from_utf8(&body[start..cursor])
                 .map_err(|_| ReasonKind::Malformed)?
                 .to_string();
+            if !attribute_names.insert(key.clone()) {
+                return Err(ReasonKind::Malformed);
+            }
             while body.get(cursor).is_some_and(u8::is_ascii_whitespace) {
                 cursor += 1;
             }
@@ -488,9 +492,30 @@ fn main_kind(content_type: &str) -> Option<DocumentKind> {
     let lower = content_type.to_ascii_lowercase();
     if lower.contains("wordprocessingml") && lower.ends_with(".main+xml") {
         Some(DocumentKind::Wordprocessing)
+    } else if matches!(
+        lower.as_str(),
+        "application/vnd.ms-word.document.macroenabled.main+xml"
+            | "application/vnd.ms-word.template.macroenabledtemplate.main+xml"
+    ) {
+        Some(DocumentKind::Wordprocessing)
     } else if lower.contains("spreadsheetml") && lower.ends_with(".main+xml") {
         Some(DocumentKind::Spreadsheet)
+    } else if matches!(
+        lower.as_str(),
+        "application/vnd.ms-excel.sheet.macroenabled.main+xml"
+            | "application/vnd.ms-excel.template.macroenabled.main+xml"
+            | "application/vnd.ms-excel.addin.macroenabled.main+xml"
+    ) {
+        Some(DocumentKind::Spreadsheet)
     } else if lower.contains("presentationml") && lower.ends_with(".main+xml") {
+        Some(DocumentKind::Presentation)
+    } else if matches!(
+        lower.as_str(),
+        "application/vnd.ms-powerpoint.presentation.macroenabled.main+xml"
+            | "application/vnd.ms-powerpoint.slideshow.macroenabled.main+xml"
+            | "application/vnd.ms-powerpoint.template.macroenabled.main+xml"
+            | "application/vnd.ms-powerpoint.addin.macroenabled.main+xml"
+    ) {
         Some(DocumentKind::Presentation)
     } else {
         None
@@ -527,6 +552,23 @@ fn ooxml_feature(
             },
         );
     }
+}
+
+fn part_extension(part: &str) -> Option<&str> {
+    let name = part.rsplit('/').next()?;
+    let (_, extension) = name.rsplit_once('.')?;
+    (!extension.is_empty()).then_some(extension)
+}
+
+fn part_content_type<'a>(
+    part: &str,
+    overrides: &'a BTreeMap<String, String>,
+    defaults: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    overrides.get(part).map(String::as_str).or_else(|| {
+        let extension = part_extension(part)?.to_ascii_lowercase();
+        defaults.get(&extension).map(String::as_str)
+    })
 }
 
 /// Identify and inspect an extracted Office Open XML package.
@@ -591,8 +633,7 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
         );
     }
 
-    let (Some(content_types), Some(root_relationships)) = (content_types, root_relationships)
-    else {
+    if content_types.is_none() || root_relationships.is_none() {
         add_reason(
             &mut report,
             limits,
@@ -600,68 +641,118 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
             "package",
             Some("OOXML package metadata is incomplete".to_string()),
         );
-        return report;
-    };
+    }
 
-    let content_tags = match xml_tags(&content_types.data, limits) {
-        Ok(tags) => tags,
-        Err(kind) => {
-            xml_failure(&mut report, limits, "content-types", kind);
-            return report;
-        }
+    let content_tags = match content_types {
+        Some(content_types) => match xml_tags(&content_types.data, limits) {
+            Ok(tags) => tags,
+            Err(kind) => {
+                xml_failure(&mut report, limits, "content-types", kind);
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
     };
     report.operations_examined = report
         .operations_examined
         .saturating_add(content_tags.len() as u64);
     let mut overrides = BTreeMap::<String, String>::new();
-    for tag in content_tags
-        .iter()
-        .filter(|tag| tag.local_name() == "Override")
-    {
-        let (Some(part), Some(content_type)) =
-            (tag.attribute("PartName"), tag.attribute("ContentType"))
-        else {
-            add_reason(
-                &mut report,
-                limits,
-                ReasonKind::Malformed,
-                "content-types",
-                Some("an Override is missing PartName or ContentType".to_string()),
-            );
-            continue;
-        };
-        let part = match relationship_target(part) {
-            Ok(part) => part,
-            Err(kind) => {
-                add_reason(
-                    &mut report,
-                    limits,
-                    kind,
-                    "content-types",
-                    Some("an Override has a non-canonical PartName".to_string()),
-                );
-                continue;
+    let mut defaults = BTreeMap::<String, String>::new();
+    for tag in &content_tags {
+        match tag.local_name() {
+            "Override" => {
+                let (Some(part), Some(content_type)) =
+                    (tag.attribute("PartName"), tag.attribute("ContentType"))
+                else {
+                    add_reason(
+                        &mut report,
+                        limits,
+                        ReasonKind::Malformed,
+                        "content-types",
+                        Some("an Override is missing PartName or ContentType".to_string()),
+                    );
+                    continue;
+                };
+                let part = match relationship_target(part) {
+                    Ok(part) => part,
+                    Err(kind) => {
+                        add_reason(
+                            &mut report,
+                            limits,
+                            kind,
+                            "content-types",
+                            Some("an Override has a non-canonical PartName".to_string()),
+                        );
+                        continue;
+                    }
+                };
+                if let Some(previous) = overrides.insert(part.clone(), content_type.to_string()) {
+                    if previous != content_type {
+                        add_reason(
+                            &mut report,
+                            limits,
+                            ReasonKind::Ambiguous,
+                            "content-types",
+                            Some(format!("the part /{part} has conflicting content types")),
+                        );
+                    }
+                }
             }
-        };
-        if let Some(previous) = overrides.insert(part.clone(), content_type.to_string()) {
-            if previous != content_type {
-                add_reason(
-                    &mut report,
-                    limits,
-                    ReasonKind::Ambiguous,
-                    "content-types",
-                    Some(format!("the part /{part} has conflicting content types")),
-                );
+            "Default" => {
+                let (Some(extension), Some(content_type)) =
+                    (tag.attribute("Extension"), tag.attribute("ContentType"))
+                else {
+                    add_reason(
+                        &mut report,
+                        limits,
+                        ReasonKind::Malformed,
+                        "content-types",
+                        Some("a Default is missing Extension or ContentType".to_string()),
+                    );
+                    continue;
+                };
+                if extension.is_empty()
+                    || extension.contains(['/', '\\'])
+                    || extension.contains('.')
+                {
+                    add_reason(
+                        &mut report,
+                        limits,
+                        ReasonKind::Malformed,
+                        "content-types",
+                        Some("a Default has a non-canonical Extension".to_string()),
+                    );
+                    continue;
+                }
+                let extension = extension.to_ascii_lowercase();
+                if let Some(previous) = defaults.insert(extension.clone(), content_type.to_string())
+                {
+                    if previous != content_type {
+                        add_reason(
+                            &mut report,
+                            limits,
+                            ReasonKind::Ambiguous,
+                            "content-types",
+                            Some(format!(
+                                "the extension .{extension} has conflicting content types"
+                            )),
+                        );
+                    }
+                }
             }
+            _ => {}
         }
     }
 
-    let relationship_tags = match xml_tags(&root_relationships.data, limits) {
-        Ok(tags) => tags,
-        Err(kind) => {
-            xml_failure(&mut report, limits, "root-relationships", kind);
-            return report;
-        }
+    let relationship_tags = match root_relationships {
+        Some(root_relationships) => match xml_tags(&root_relationships.data, limits) {
+            Ok(tags) => tags,
+            Err(kind) => {
+                xml_failure(&mut report, limits, "root-relationships", kind);
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
     };
     report.operations_examined = report
         .operations_examined
@@ -734,7 +825,9 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
             ),
         }
     }
-    if main_targets.len() != 1 {
+    let main_part = if main_targets.len() == 1 {
+        main_targets.pop()
+    } else {
         add_reason(
             &mut report,
             limits,
@@ -749,57 +842,70 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
                 main_targets.len()
             )),
         );
-        return report;
+        None
+    };
+
+    if let Some(main_part) = main_part {
+        report.main_part = Some(main_part.clone());
+        if let Some(content_type) = part_content_type(&main_part, &overrides, &defaults) {
+            if let Some(kind) = main_kind(content_type) {
+                report.kind = Some(kind);
+                if !main_part.starts_with(expected_prefix(kind)) {
+                    add_reason(
+                        &mut report,
+                        limits,
+                        ReasonKind::Ambiguous,
+                        "main-part",
+                        Some(format!(
+                            "the {:?} main part is outside {}",
+                            kind,
+                            expected_prefix(kind)
+                        )),
+                    );
+                }
+            } else {
+                add_reason(
+                    &mut report,
+                    limits,
+                    ReasonKind::Unsupported,
+                    "main-part",
+                    Some(format!("unsupported main-part content type {content_type}")),
+                );
+            }
+        } else {
+            add_reason(
+                &mut report,
+                limits,
+                ReasonKind::Malformed,
+                "content-types",
+                Some(format!("the main part /{main_part} has no content type")),
+            );
+        }
+        if !members.contains_key(main_part.as_str()) {
+            add_reason(
+                &mut report,
+                limits,
+                ReasonKind::Malformed,
+                "main-part",
+                Some(format!("the main part /{main_part} is missing")),
+            );
+        }
     }
 
-    let main_part = main_targets.pop().expect("one target");
-    report.main_part = Some(main_part.clone());
-    let Some(content_type) = overrides.get(&main_part) else {
-        add_reason(
-            &mut report,
-            limits,
-            ReasonKind::Malformed,
-            "content-types",
-            Some(format!(
-                "the main part /{main_part} has no content-type override"
-            )),
-        );
-        return report;
-    };
-    let Some(kind) = main_kind(content_type) else {
-        add_reason(
-            &mut report,
-            limits,
-            ReasonKind::Unsupported,
-            "main-part",
-            Some(format!("unsupported main-part content type {content_type}")),
-        );
-        return report;
-    };
-    report.kind = Some(kind);
-    if !main_part.starts_with(expected_prefix(kind)) {
-        add_reason(
-            &mut report,
-            limits,
-            ReasonKind::Ambiguous,
-            "main-part",
-            Some(format!(
-                "the {:?} main part is outside {}",
-                kind,
-                expected_prefix(kind)
-            )),
-        );
-    }
-    if !members.contains_key(main_part.as_str()) {
-        add_reason(
-            &mut report,
-            limits,
-            ReasonKind::Malformed,
-            "main-part",
-            Some(format!("the main part /{main_part} is missing")),
-        );
-    }
-
+    let vba_parts: BTreeSet<_> = overrides
+        .iter()
+        .filter(|(_, content_type)| {
+            content_type.eq_ignore_ascii_case("application/vnd.ms-office.vbaProject")
+        })
+        .map(|(part, _)| part.to_ascii_lowercase())
+        .collect();
+    let vba_extensions: BTreeSet<_> = defaults
+        .iter()
+        .filter(|(_, content_type)| {
+            content_type.eq_ignore_ascii_case("application/vnd.ms-office.vbaProject")
+        })
+        .map(|(extension, _)| extension.as_str())
+        .collect();
     let mut seen = BTreeSet::new();
     for entry in archive
         .entries
@@ -809,7 +915,9 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
     {
         report.operations_examined = report.operations_examined.saturating_add(1);
         let lower = entry.name.to_ascii_lowercase();
-        if lower.ends_with("/vbaproject.bin") {
+        let extension_is_vba =
+            part_extension(&lower).is_some_and(|extension| vba_extensions.contains(extension));
+        if lower.ends_with("/vbaproject.bin") || vba_parts.contains(&lower) || extension_is_vba {
             ooxml_feature(
                 &mut report,
                 limits,
@@ -865,6 +973,21 @@ pub fn analyze_ooxml(archive: &Archive, pack: &Pack, limits: Limits) -> Document
         };
         report.operations_examined = report.operations_examined.saturating_add(tags.len() as u64);
         for tag in tags.iter().filter(|tag| tag.local_name() == "Relationship") {
+            let relation_type = tag.attribute("Type").unwrap_or_default();
+            if relation_type.to_ascii_lowercase().ends_with("/vbaproject") {
+                let detail = tag
+                    .attribute("Target")
+                    .map(|target| clipped(target, limits.max_detail_bytes));
+                ooxml_feature(
+                    &mut report,
+                    limits,
+                    &mut seen,
+                    FeatureKind::Macro,
+                    "OOXML-MACRO",
+                    &entry.name,
+                    detail,
+                );
+            }
             if !tag
                 .attribute("TargetMode")
                 .is_some_and(|mode| mode.eq_ignore_ascii_case("external"))
@@ -1412,6 +1535,303 @@ mod tests {
     }
 
     #[test]
+    fn review3_main_part_typed_by_default_extension_still_inspected() {
+        let pack = crate::pack::current();
+        let value = archive(vec![
+            file(
+                "[Content_Types].xml",
+                br#"<Types><Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            file(
+                "_rels/.rels",
+                br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            file("word/document.xml", b"<main/>"),
+            file("word/activeX/control.bin", b"control"),
+        ]);
+
+        let report = analyze_ooxml(&value, &pack, Limits::default());
+        assert_eq!(
+            report.kind,
+            Some(DocumentKind::Wordprocessing),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .features
+                .iter()
+                .any(|feature| feature.id == "OOXML-ACTIVEX"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn review3_two_main_relationships_still_inspected() {
+        let pack = crate::pack::current();
+        let mut value = package(
+            "word",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+        );
+        let relationships = value
+            .entries
+            .iter_mut()
+            .find(|entry| entry.name == "_rels/.rels")
+            .expect("root relationships");
+        relationships.data = br#"<Relationships>
+            <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+            <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/other.xml"/>
+        </Relationships>"#
+            .to_vec();
+        value
+            .entries
+            .push(file("word/embeddings/program.bin", b"MZ\x90\x00\x03\x00"));
+
+        let report = analyze_ooxml(&value, &pack, Limits::default());
+        assert!(
+            report
+                .reasons
+                .iter()
+                .any(|reason| reason.kind == ReasonKind::Ambiguous),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .features
+                .iter()
+                .any(|feature| feature.id == "OOXML-EMBEDDED-OBJECT"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn vba_typed_by_default_extension_is_detected() {
+        let pack = crate::pack::current();
+        let mut value = package(
+            "word",
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+        );
+        let content_types = value
+            .entries
+            .iter_mut()
+            .find(|entry| entry.name == "[Content_Types].xml")
+            .expect("content types");
+        let xml = String::from_utf8(content_types.data.clone()).expect("content types XML");
+        content_types.data = xml
+            .replace(
+                "</Types>",
+                r#"<Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>"#,
+            )
+            .into_bytes();
+        value
+            .entries
+            .push(file("word/unexpected-name.bin", b"macro"));
+
+        let report = analyze_ooxml(&value, &pack, Limits::default());
+        assert!(
+            report
+                .features
+                .iter()
+                .any(|feature| feature.id == "OOXML-MACRO"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn namespace_declarations_cannot_hide_relationship_attributes() {
+        let pack = crate::pack::current();
+        let mut value = package(
+            "word",
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+        );
+        value.entries.push(file(
+            "word/_rels/document.xml.rels",
+            br#"<Relationships>
+                <Relationship Id="rIdExternal" xmlns:TargetMode="urn:decoy" Type="image" TargetMode="External" Target="https://example.invalid/a.png"/>
+                <Relationship Id="rIdVba" xmlns:Type="urn:decoy" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="renamed.bin"/>
+            </Relationships>"#,
+        ));
+
+        let report = analyze_ooxml(&value, &pack, Limits::default());
+        assert!(
+            report
+                .features
+                .iter()
+                .any(|feature| feature.id == "OOXML-EXTERNAL-RELATIONSHIP"),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .features
+                .iter()
+                .any(|feature| feature.id == "OOXML-MACRO"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_xml_attributes_are_malformed() {
+        assert!(matches!(
+            xml_tags(
+                br#"<Relationships><Relationship Id="one" Id="two"/></Relationships>"#,
+                Limits::default(),
+            ),
+            Err(ReasonKind::Malformed)
+        ));
+    }
+
+    #[test]
+    fn duplicate_detection_is_linear_for_a_large_single_tag() {
+        use std::fmt::Write;
+        use std::time::{Duration, Instant};
+
+        let mut xml = String::with_capacity(1_200_000);
+        xml.push_str("<Relationship");
+        for index in 0..100_000 {
+            write!(&mut xml, " a{index}=\"\"").expect("write attribute");
+        }
+        xml.push_str(" a99999=\"duplicate\"/>");
+
+        let started = Instant::now();
+        let result = xml_tags(xml.as_bytes(), Limits::default());
+        let elapsed = started.elapsed();
+
+        assert!(matches!(result, Err(ReasonKind::Malformed)));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "100,000 attributes took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn macro_enabled_office_main_parts_are_inspected() {
+        let pack = crate::pack::current();
+        let cases = [
+            (
+                "word",
+                "application/vnd.ms-word.document.macroEnabled.main+xml",
+                DocumentKind::Wordprocessing,
+            ),
+            (
+                "xl",
+                "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+                DocumentKind::Spreadsheet,
+            ),
+            (
+                "ppt",
+                "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
+                DocumentKind::Presentation,
+            ),
+            (
+                "word",
+                "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
+                DocumentKind::Wordprocessing,
+            ),
+            (
+                "xl",
+                "application/vnd.ms-excel.template.macroEnabled.main+xml",
+                DocumentKind::Spreadsheet,
+            ),
+            (
+                "ppt",
+                "application/vnd.ms-powerpoint.template.macroEnabled.main+xml",
+                DocumentKind::Presentation,
+            ),
+            (
+                "xl",
+                "application/vnd.ms-excel.addin.macroEnabled.main+xml",
+                DocumentKind::Spreadsheet,
+            ),
+        ];
+        for (prefix, content_type, kind) in cases {
+            let mut value = package(prefix, content_type);
+            value
+                .entries
+                .push(file(&format!("{prefix}/vbaProject.bin"), b"macro"));
+            let report = analyze_ooxml(&value, &pack, Limits::default());
+            assert_eq!(report.kind, Some(kind), "{content_type}: {report:?}");
+            assert!(
+                report
+                    .features
+                    .iter()
+                    .any(|feature| feature.id == "OOXML-MACRO"),
+                "{content_type}: {report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_renamed_vba_project_is_found_by_content_type_or_relationship() {
+        let pack = crate::pack::current();
+        let mut by_content_type = package(
+            "word",
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+        );
+        let content_types = by_content_type
+            .entries
+            .iter_mut()
+            .find(|entry| entry.name == "[Content_Types].xml")
+            .expect("content types");
+        let xml = String::from_utf8(content_types.data.clone()).expect("content types XML");
+        content_types.data = xml.replace(
+            "</Types>",
+            r#"<Override PartName="/word/renamed.bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>"#,
+        ).into_bytes();
+        by_content_type
+            .entries
+            .push(file("word/renamed.bin", b"macro"));
+
+        let mut by_relationship = package(
+            "word",
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+        );
+        by_relationship.entries.extend([
+            file("word/other-name.bin", b"macro"),
+            file(
+                "word/_rels/document.xml.rels",
+                br#"<Relationships><Relationship Id="rIdVba" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="other-name.bin"/></Relationships>"#,
+            ),
+        ]);
+
+        for value in [&by_content_type, &by_relationship] {
+            let report = analyze_ooxml(value, &pack, Limits::default());
+            assert!(
+                report
+                    .features
+                    .iter()
+                    .any(|feature| feature.id == "OOXML-MACRO"),
+                "{report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn active_features_survive_an_unrecognized_main_part_type() {
+        let pack = crate::pack::current();
+        let mut value = package("word", "application/vnd.example.unknown.main+xml");
+        value.entries.extend([
+            file("word/vbaProject.bin", b"macro"),
+            file("word/activeX/activeX1.bin", b"control"),
+            // An undeclared, innocently named member is still inspected by bytes.
+            file(
+                "word/media/preview.dat",
+                b"MZ\x90\x00\x03\x00\x00\x00\x04\x00",
+            ),
+        ]);
+        let report = analyze_ooxml(&value, &pack, Limits::default());
+        assert_eq!(report.kind, None, "{report:?}");
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.kind == ReasonKind::Unsupported));
+        for id in ["OOXML-MACRO", "OOXML-ACTIVEX", "OOXML-EMBEDDED-PROGRAM"] {
+            assert!(
+                report.features.iter().any(|feature| feature.id == id),
+                "{id}: {report:?}"
+            );
+        }
+    }
+
+    #[test]
     fn missing_or_cross_family_main_parts_are_not_confirmed() {
         let pack = crate::pack::current();
         let mut missing = package(
@@ -1554,6 +1974,7 @@ mod tests {
                 br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
             ),
             file("word/document.xml", b"<document/>"),
+            file("word/activeX/control.bin", b"control"),
         ]);
         let report = analyze_ooxml(&value, &pack, Limits::default());
         assert!(!report.is_confirmed(), "{report:?}");
@@ -1561,5 +1982,12 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.kind == ReasonKind::Malformed));
+        assert!(
+            report
+                .features
+                .iter()
+                .any(|feature| feature.id == "OOXML-ACTIVEX"),
+            "{report:?}"
+        );
     }
 }

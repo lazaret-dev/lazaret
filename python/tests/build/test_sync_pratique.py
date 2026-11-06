@@ -199,6 +199,15 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual((self.dest / "src" / "lib.rs").read_text(encoding="utf-8"), "pub fn f() {}\n")
         self.assertEqual(self.s.recorded_commit(), self.commits[0])
 
+    def test_an_official_checkout_refuses_a_branch_only_commit(self):
+        self.git("remote", "add", "origin", self.s.UPSTREAM)
+        self.git("update-ref", "refs/remotes/origin/main", self.commits[0])
+        self.assertEqual(self.main([str(self.repo), "--rev", self.commits[1]]), 1)
+        self.assertFalse(self.dest.exists())
+        self.git("update-ref", "refs/remotes/origin/main", self.commits[1])
+        self.assertEqual(self.main([str(self.repo), "--rev", self.commits[1]]), 0)
+        self.assertEqual(self.s.recorded_commit(), self.commits[1])
+
     def test_what_stops_a_commit(self):
         for what, rev in (("no such revision", "nonexistent"), ("an option", "--output=x")):
             with self.subTest(what=what):

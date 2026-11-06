@@ -714,6 +714,16 @@ class ProxyFor(unittest.TestCase):
                 with self.subTest(env, url=url), self.assertRaises(keepalive.Unsupported):
                     keepalive.proxy_for(url, env)
 
+    def test_malformed_https_proxies_are_refused_before_auth_is_built(self):
+        malformed = ("https:user:secret@proxy:8443", "https:/user:secret@proxy:8443",
+                     "https:///user:secret@proxy:8443", " HTTPS:USER:secret@proxy:8443 ")
+        with mock.patch("urllib.request.proxy_bypass", return_value=False):
+            for proxy in malformed:
+                with self.subTest(proxy=proxy), mock.patch.object(keepalive.base64, "b64encode") as encoded, \
+                        self.assertRaises(keepalive.Unsupported):
+                    keepalive.proxy_for("https://pypi.org/", {"https": proxy})
+                encoded.assert_not_called()
+
     def test_a_proxy_for_the_other_scheme_is_not_this_urls(self):
         with mock.patch("urllib.request.proxy_bypass", return_value=False):
             self.assertIsNone(keepalive.proxy_for("https://pypi.org/", {"http": "http://proxy:3128"}))

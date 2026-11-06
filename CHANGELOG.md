@@ -7,7 +7,51 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [0.1.9] — 2026-10-30
+## [0.1.9] — 2026-11-06
+
+0.1.9 reads more of what a team installs, and it is measured on sets anyone with the dataset can rebuild. Go
+modules, Rust crates and VS Code extensions get the scan that npm and PyPI releases already had (`lazaret guard go`,
+`guard cargo` and `guard code`; `lazaret-registry scan go:…`, `crates:…` and `openvsx:…`). A repository can be
+scanned at a commit (`lazaret scan github:owner/repo`), `lazaret hook` checks what is about to be committed,
+`--verify-secrets` asks a leaked secret's own service whether it is still live, and the registry's default transport
+is Lazaret's own HTTPS client (pratique). On the benchmark 0.1.9 holds 0.1.8's strictest-verdict rate (the same 439
+of 514) and the gain is elsewhere: none of the 1,703 popular releases is SUSPICIOUS, where 0.1.8 made nine of them
+SUSPICIOUS (vite, vitest, monaco-editor, coverage, numba, future, sympy, ipython and kubernetes) and the guard
+blocked them by default. The last week, October 31 to November 6, went to the boundaries: the network client,
+archive reading, deadlines, and how releases are built and routed (below, under Changed). The registry's rule set is
+2.114.0, so stored verdicts are scanned again.
+
+Where the numbers stand at release (the final run, November 6, on rule set 2.114.0, with 0.1.8 run again on the same
+sets. The benchmark's 514 malicious releases and the 1,703 popular releases are in-sample; the holdout is 750 other
+malicious releases of the same dataset, read only in aggregate):
+
+| | 0.1.9 | 0.1.8 |
+| --- | --- | --- |
+| Malicious releases SUSPICIOUS (in-sample, 514) | 85.4% (439) | 85.4% (439) |
+| ... SUSPICIOUS or WARN | 91.6% (471) | 90.9% (467) |
+| Holdout, SUSPICIOUS (750) | 82.4% (618) | 81.9% (614) |
+| Holdout, SUSPICIOUS or WARN | 89.1% (668) | 88.0% (660) |
+| Popular releases SUSPICIOUS · SUSPICIOUS or WARN (1,703) | none · 2.6% (44) | 0.5% (9) · 3.3% (57) |
+| Go modules and crates SUSPICIOUS: Ubuntu's 4,104 · Go's standard library (18) | 2 · none | not read |
+
+The benchmark and the holdout are rebuilt from the dataset by `scripts/datadog.py` (October 15), not the September
+draws, so their counts differ from the earlier tables (516 became 514, 745 became 750) and the percentages are not
+the earlier tables' to compare: on the September 516, 0.1.9 was 88.0% SUSPICIOUS (454) on October 10, and that run is
+not repeated on this engine. Both releases are measured on the rebuilt sets here. The popular releases 0.1.9 still
+flags are 44 WARN and 2 INCOMPLETE (a release it could not read all of: sharp's 16 MB libvips library, and joblib's
+bzip2, lzma and xz model files), and `docs/TESTING.md` says what the warnings are for. Ubuntu's two SUSPICIOUS Go
+modules are containers/storage and mvdan.cc/fdroidcl: known false positives of the Go reader's (FP-GO-INIT-FUNCVALUE,
+which says their code deletes the user's files when a program that imports them starts), shipped with and left to be
+fixed after 0.1.9. 0.1.8 does not read Go or Rust code, so its row there is not a score.
+
+Not rerun on this engine, last measured on October 10 or earlier and carried only as dated: the registry's dependency
+history on the benchmark (91.3%, 471 of 516), `lazaret guard` end to end (247 of 300 malicious npm releases blocked,
+none of 219 popular), the fake-credentials test (95% found, 6 decoys flagged) and the lockfile test (1,278 of 1,278
+advisories). BenchmarkPython was +0.614 when Q-4 landed (rule set 2.100.0, below), not the +0.22 an earlier version of
+this table carried.
+
+**Deletion check and path readers (RA-6, F-05; rule sets 2.95.0 to 2.102.0).** The paragraphs below were written as
+the work landed.
 
 RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and Rust models and reads shell deletion commands. Removing a home directory or its personal files, a filesystem/drive root, or repositories selected through recursive `.git` globs adds “deletes the user's files”: CRITICAL at install/build/import, MAJOR when found only in use-time code. Relative build/dist/fixture cleanup, created temporary directories and named application-cache subtrees are excluded. Unknown paths alone are not evidence of deletion of user files. The check is static; no target path is accessed.
 
@@ -29,23 +73,20 @@ Path assembly checks a conservative MAX_TEXT bound before allocating intermediat
 
 The F-05 loss audit also retainsthe protected reading for Node `os.userInfo().homedir` and the conventional XDG config/data roots when a later slash no longer resets `path.join` to `/`. These are conservative named-root readings; arbitrary environment values remain unknown.
 
-Where the numbers stand (rerun October 10 on this engine: the benchmark's 516 malicious releases and 429
-popular packages are in-sample; the holdout is 745 other malicious releases of the same dataset, read only in
-aggregate):
-
-| | 0.1.9 | 0.1.8 |
-| --- | --- | --- |
-| Malicious releases SUSPICIOUS (in-sample) | 88.0% (454 of 516) | 87.0% (449) |
-| ... with the registry's dependency history (live registry data) | 91.3% (471) | 90.3% (466) |
-| ... SUSPICIOUS or WARN | 91.7% (473) | 91.1% (470) |
-| Holdout, SUSPICIOUS | 85.8% (639 of 745) | 85.4% (636) |
-| Holdout releases that share no code with the benchmark, SUSPICIOUS | 80.3% (399 of 497) | 79.5% (395) |
-| Popular packages SUSPICIOUS · SUSPICIOUS or WARN | none · 6.1% (26 of 429) | none · 7.2% (31) |
-| `lazaret guard`, end to end: malicious npm releases blocked (of 300) · popular (of 219) | 247 · none | 241 · none |
-| Fake credentials found · decoys flagged; BenchmarkPython; SCA advisories matched | 95% · 6; +0.22; 1,278 of 1,278 | the same |
-
 ### Added
 
+- **For contributors: the engine can read a mail attachment's structure, and nothing calls it yet (#47, #52; the
+  engine only; no rule-set change).** `lazaret-engine` gains `attachment.rs`, a typed scan of one attachment that
+  checks its leading bytes against the type its name and media type claim, and looks inside a nested archive and
+  every part of an Office package; and `document.rs`, a bounded reader of OOXML (Word, Excel and PowerPoint, their
+  macro-enabled and template forms) and PDF structure, which reports VBA macros (found by part name and by
+  relationship type), ActiveX, embedded objects and external relationships, and refuses DOCTYPE and ENTITY
+  declarations. Every limit it reaches ends as an incomplete reason, never a quiet pass. ZIP reading moves into
+  `lazaret-archive` as a format of its own (#48; below). No command, no Python function and no WebAssembly export
+  reaches this code, so no verdict in a release moves: it is groundwork for a mail-gateway scanner
+  (`docs/MAIL_GATEWAY_REQUIREMENTS.md`). Review gaps in namespace-decoy attributes, default content types and
+  unbounded archive depth were fixed before release. Review items remain before anything calls it: the preflight can
+  drop a binary finding, discard macro evidence and miss a zip under an Office-looking name.
 - **Taint: a call followed into the helper it names (Q-4; the engine's, for both packages; rule set 2.100.0).** Project mode, Python. The intra-file pass read a call as text, so `param = x.get_param('id')` after
   `x = Wrapper(request)` carried nothing: the receiver holds no request data, but `get_param` returns
   `self.request.args.get(name)`. A helper defined in the file, or in another file of the project, that returns
@@ -1239,6 +1280,51 @@ aggregate):
 
 ### Changed
 
+- **The network boundary, tightened (#34, #35; the Python registry code and pratique; no rule-set change).**
+  The native client passes a well-formed `https://` proxy to Python's transport, which reaches that proxy over TLS.
+  A malformed `https:` proxy setting is refused everywhere a proxy is read; the refusal does not repeat the proxy's
+  credentials, a `NO_PROXY` match still means a direct connection, and the forms urllib accepts behave as before.
+  Every urllib opener in the package goes through the one boundary. A
+  redirect whose target carries credentials in its URL is refused before the request to it. The guard's errors, its
+  terminal output and its JSON no longer show a signed URL's query values or fragment, and a malformed URL still
+  shows neither its user information nor its query. pratique bounds the cumulative size of a response's
+  informational (1xx) heads, which now share the final head's limit.
+- **Tar and compressed archives are read as the installer reads them, within bounds (#32, #53, #57;
+  the registry's archive reading; no rule-set change).** A chain of links is followed to the end and every name an
+  installer would see is kept; a link cycle or a dangling target is incomplete, as are overlapping sparse extents and
+  a nonzero zero-length sparse marker, in every sparse encoding; sparse holes count toward the total budget, and so
+  does the work of scanning a link's aliases. Extension metadata (PAX headers) is bounded before `tarfile` parses it,
+  with a cumulative bound, and the sparse map's size is bounded before it is allocated, on Python 3.10 to 3.14: the
+  reviewer's PAX 1.0 probe (an 8 KiB gzip) went from +31 MiB of memory to +0.3 MiB and ends corrupt. A link's target
+  is read in the first, bounded pass, where it used to be read again by a second pass with no bounds; a target past
+  the retention bound fails closed. A streaming LZMA decoder's memory is bounded (`.tar.xz` and auto-detected LZMA),
+  and an oversized sparse `.pth` file and the first read of a member stop between chunks when the scan is
+  cancelled. A PAX 1.0 sparse map is parsed in linear time, and a number field longer than 32 bytes is refused. The
+  extent cap is still per member, not per archive.
+- **ZIP reading is the archive crate's (#48; `lazaret-archive`).** The reader moves out of the engine and keeps its
+  refusals: ambiguous or duplicate entries, encrypted entries, unknown methods and flags, special modes and names
+  with a NUL. Declared sizes are charged against the budget before anything is inflated, and the size and CRC-32 are
+  checked after. One check is stricter: the CRC-32 in the local header must match the central directory's.
+- **A source request that runs out of time says so, and the guard follows a 308 on Python 3.10 (#39, #43).** A POST
+  made while reading a repository source keeps the deadline it ran out of, and a timeout equal to the budget that is
+  left is classified as a timeout on a coarse clock: every timeout path ends in a source error, and none fails open.
+  The guard follows an HTTP 308 redirect on Python 3.10.
+- **pnpm 12's trusted registry credentials (#41).** A listing of pnpm's settings no longer replaces the credential a
+  trusted settings file holds for a registry.
+- **pratique is vendored from its main branch, and `scripts/sync_pratique.py` checks it (#49, #50, #57).** The
+  vendored commit is one on pratique's default branch: `sync_pratique.py --verify` now fails
+  on a commit that is only on a side branch. Later re-vendors take pratique's fixes for tests that hung on Windows
+  ARM64 and ran past the 45-second cap on the Mac runner. The embedded dashboard engine is rebuilt with each.
+- **For contributors: how releases are built and routed, and how CI runs (#40, #41, #44, #46, #51).** A `v*` tag
+  builds every wheel and package on GitHub's hosted runners; pull
+  requests from the maintainer's own branches may route to the trusted macOS pool, and forks, other authors,
+  Dependabot, schedules and manual runs go to hosted runners. `test_self_hosted_routing.py` evaluates the workflows'
+  routing expressions against each kind of event and fails on a routing mutation. The Intel macOS wheel runs the full
+  Python suite on a tag, and every snapshot module on a pull request. Linux runs Python 3.10 to 3.14 on every
+  pull request, with macOS and Windows covered weekly. A push to `integration` no longer runs duplicate CI, pinned
+  action updates are consolidated, and the pinned Rust toolchain is used on every CI lane. `docs/RELEASING.md` says
+  where each artifact is built and lists the settings that keep a fork from reaching the pool. Several test fixtures
+  now use a fixed clock and measure CPU time, so a slow runner does not fail them.
 - **Scan-all lists a repository's own workflow hygiene as INFO (SCANALL-HYGIENE; John's decision of Oct 21, "INFO
   in scan-all only"; no rule-set change — Python registry code).** Scan-all reads random new repositories for hostile
   ones; an action not pinned, a workflow's token permissions, a cache in a release and an OIDC token where

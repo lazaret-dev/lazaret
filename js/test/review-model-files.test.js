@@ -5,6 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, openSync, writeSync, ftruncateSync, closeSync,
   statSync } from "node:fs";
 import * as zlib from "node:zlib";
@@ -243,7 +244,12 @@ function bigCheckpoint(pkl, sizes, more = []) {
 /** The parts as a sparse file (its runs of zeros holes). */
 function writeParts(path, parts) {
   mkdirSync(dirname(path), { recursive: true });
-  const fd = openSync(path, "w");
+  writeFileSync(path, Buffer.alloc(0));
+  if (process.platform === "win32") {
+    const sparse = spawnSync("fsutil", ["sparse", "setflag", path], { encoding: "utf8", windowsHide: true });
+    assert.equal(sparse.status, 0, `fsutil could not mark ${path} sparse: ${sparse.stderr || sparse.stdout}`);
+  }
+  const fd = openSync(path, "r+");
   let at = 0;
   try {
     for (const p of parts) {

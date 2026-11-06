@@ -382,6 +382,13 @@ MAX_ARCHIVE_TOTAL = 500 * 1024 * 1024
 # metadata below bounds that are generous for paths, links and git comments.
 MAX_TAR_METADATA_BLOCK = 256 << 10
 MAX_TAR_METADATA_TOTAL = 4 << 20
+MAX_TAR_SPARSE_EXTENTS = 4096
+MAX_TAR_SPARSE_NUMBER_BYTES = 32
+# Link targets are retained from the one bounded tar pass, rather than
+# reopening the archive with tarfile's unbounded TarInfo.  Real link targets
+# are small; an archive that needs more retained data fails closed for its
+# aliases instead of turning link resolution into another archive parser.
+MAX_TAR_LINK_CACHE = MAX_MEMBER
 # The ZIP preflight and tar decoders accept a dictionary through 64 MiB (xz
 # -9 / 7-Zip ultra).  liblzma's memlimit includes decoder bookkeeping as well
 # as the dictionary, so give the streaming tar decoder 8 MiB of overhead.
@@ -1193,14 +1200,31 @@ class _TarReader(tarfile.TarFile):
 class _BoundedTarInfo(tarfile.TarInfo):
     """TarInfo whose extension metadata is bounded before tarfile reads it."""
 
-    def _check_metadata(self, tarfile_):
-        size = self.size
+    def _charge_metadata(self, tarfile_, size):
         total = tarfile_.__dict__.get("_lazaret_metadata_bytes", 0) + max(size, 0)
         if size < 0 or size > MAX_TAR_METADATA_BLOCK or total > MAX_TAR_METADATA_TOTAL:
             detail = (f"tar metadata is {size:,} bytes in one block and {total:,} bytes so far "
                       f"(limits {MAX_TAR_METADATA_BLOCK:,} and {MAX_TAR_METADATA_TOTAL:,})")
             raise ArchiveLimit("corrupt", detail)
         tarfile_.__dict__["_lazaret_metadata_bytes"] = total
+
+    def _check_metadata(self, tarfile_):
+        self._charge_metadata(tarfile_, self.size)
+
+    def _read_sparse_block(self, tarfile_):
+        self._charge_metadata(tarfile_, tarfile.BLOCKSIZE)
+        block = tarfile_.fileobj.read(tarfile.BLOCKSIZE)
+        if len(block) != tarfile.BLOCKSIZE:
+            raise tarfile.InvalidHeaderError("invalid sparse header")
+        return block
+
+    @staticmethod
+    def _check_sparse_extent_count(count):
+        if count < 0 or count > MAX_TAR_SPARSE_EXTENTS:
+            raise ArchiveLimit(
+                "corrupt",
+                f"tar sparse map declares {count:,} extents (limit {MAX_TAR_SPARSE_EXTENTS:,})",
+            )
 
     def _proc_pax(self, tarfile_):
         self._check_metadata(tarfile_)
@@ -1209,6 +1233,89 @@ class _BoundedTarInfo(tarfile.TarInfo):
     def _proc_gnulong(self, tarfile_):
         self._check_metadata(tarfile_)
         return super()._proc_gnulong(tarfile_)
+
+    def _proc_sparse(self, tarfile_):
+        """Read old-GNU extension blocks without letting them grow a list first."""
+        structs, isextended, origsize = self._sparse_structs
+        del self._sparse_structs
+        self._check_sparse_extent_count(len(structs))
+        while isextended:
+            block = self._read_sparse_block(tarfile_)
+            pos = 0
+            for _ in range(21):
+                try:
+                    offset = tarfile.nti(block[pos:pos + 12])
+                    numbytes = tarfile.nti(block[pos + 12:pos + 24])
+                except ValueError:
+                    break
+                if offset and numbytes:
+                    self._check_sparse_extent_count(len(structs) + 1)
+                    structs.append((offset, numbytes))
+                pos += 24
+            isextended = bool(block[504])
+        self.sparse = structs
+        self.offset_data = tarfile_.fileobj.tell()
+        tarfile_.offset = self.offset_data + self._block(self.size)
+        self.size = origsize
+        return self
+
+    def _proc_gnusparse_10(self, next_, pax_headers, tarfile_):
+        """Read a PAX 1.0 sparse map under byte and extent-count bounds."""
+        block = self._read_sparse_block(tarfile_)
+        fields_raw, separator, remainder = block.partition(b"\n")
+        if not separator:
+            raise tarfile.InvalidHeaderError("invalid sparse header")
+        if len(fields_raw) > MAX_TAR_SPARSE_NUMBER_BYTES:
+            raise ArchiveLimit(
+                "corrupt",
+                f"tar sparse map has a numeric field longer than "
+                f"{MAX_TAR_SPARSE_NUMBER_BYTES:,} bytes",
+            )
+        try:
+            fields = int(fields_raw)
+        except ValueError:
+            raise tarfile.InvalidHeaderError("invalid sparse header") from None
+        self._check_sparse_extent_count(fields)
+
+        # Do not repeatedly split/copy the shrinking remainder.  A legal map
+        # can hold thousands of long numeric fields; bytes.split(..., 1) made
+        # parsing that bounded input quadratic.
+        pending = bytearray(remainder)
+        cursor = 0
+
+        def line():
+            nonlocal cursor
+            while True:
+                end = pending.find(b"\n", cursor)
+                if end >= 0:
+                    if end - cursor > MAX_TAR_SPARSE_NUMBER_BYTES:
+                        raise ArchiveLimit(
+                            "corrupt",
+                            f"tar sparse map has a numeric field longer than "
+                            f"{MAX_TAR_SPARSE_NUMBER_BYTES:,} bytes",
+                        )
+                    value = bytes(pending[cursor:end])
+                    cursor = end + 1
+                    return value
+                if len(pending) - cursor > MAX_TAR_SPARSE_NUMBER_BYTES:
+                    raise ArchiveLimit(
+                        "corrupt",
+                        f"tar sparse map has a numeric field longer than "
+                        f"{MAX_TAR_SPARSE_NUMBER_BYTES:,} bytes",
+                    )
+                if cursor:
+                    del pending[:cursor]
+                    cursor = 0
+                pending.extend(self._read_sparse_block(tarfile_))
+
+        sparse = []
+        while len(sparse) < fields * 2:
+            try:
+                sparse.append(int(line()))
+            except ValueError:
+                raise tarfile.InvalidHeaderError("invalid sparse header") from None
+        next_.offset_data = tarfile_.fileobj.tell()
+        next_.sparse = list(zip(sparse[::2], sparse[1::2]))
 
 
 class _PipTarInfo(_BoundedTarInfo):
@@ -1250,6 +1357,11 @@ class Member(tuple):
         self = super().__new__(cls, (rel, size, raw, reason))
         self.detail = detail
         return self
+
+    rel = property(lambda self: self[0])
+    size = property(lambda self: self[1])
+    raw = property(lambda self: self[2])
+    reason = property(lambda self: self[3])
 
 
 _DRIVE_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
@@ -1833,6 +1945,17 @@ def _zip_tail_start(tail, start):
     return max(0, min(len(tail) - 65_557, end - cd_size - 1024))
 
 
+def _oversized_checks(rel, first, size=None):
+    """Name/content-sensitive streaming checks an oversized member needs.
+
+    Link aliases may change all three decisions.  A retained result is safe to
+    reuse only when the target and alias have the same tuple.
+    """
+    ext = os.path.splitext(posixpath.basename(rel))[1].lower()
+    model = first[:4] == b"PK\x03\x04" and lazaret.model_sniff(rel, first[:512])
+    return ext == ".pth", bool(model), bool(_wants_walk(rel, first, size))
+
+
 def _oversized_member(rel, first, more):
     """FP-MODEL-FILES: an oversized member (`first`: its first MAX_MEMBER + 1 bytes; `more(n)`: the next bytes, b"" at
     its end) read on, once, as its stream passes, when its first bytes are a zip model file's (a checkpoint, an
@@ -1841,9 +1964,9 @@ def _oversized_member(rel, first, more):
     unless it is a sound, video, image or font to its end (its structure walked as the stream passes: the engine's
     media_stream) -> (pieces or None, {"lines", "cuts"} or None, the walk's end or None); (None, None, None) when it
     is none of them, and nothing more is read."""
-    keep = _ZipModelKeep() if first[:4] == b"PK\x03\x04" and lazaret.model_sniff(rel, first[:512]) else None
-    pth = os.path.splitext(posixpath.basename(rel))[1].lower() == ".pth"
-    walk = {"state": None, "offset": 0, "end": None} if _wants_walk(rel, first) else None
+    pth, model, media = _oversized_checks(rel, first)
+    keep = _ZipModelKeep() if model else None
+    walk = {"state": None, "offset": 0, "end": None} if media else None
     if keep is None and not pth and walk is None:
         return None, None, None
     state, lines, cuts = None, [], []
@@ -1882,10 +2005,10 @@ def _oversized_member(rel, first, more):
             (walk["end"] if walk is not None else None))
 
 
-def _wants_walk(rel, first):
+def _wants_walk(rel, first, size=None):
     """FP-OPAQUE-MEDIA: whether an oversized member's first bytes call for its structure to be walked (they would
     make it an opaque blob, and they start a format the engine walks)."""
-    return lazaret.classify_needs_whole(rel, first[:SAMPLE], len(first), "repo")
+    return lazaret.classify_needs_whole(rel, first[:SAMPLE], len(first) if size is None else size, "repo")
 
 
 def _tar_sparse_map(info):
@@ -2058,6 +2181,7 @@ def _iter_tar(data, container, artifact, budget, anomalies):
         yield Member(last, 0, b"", "corrupt", f"not a readable tar archive ({type(exc).__name__})")
         return
     seen, links, offsets, count = {}, [], [], 0
+    target_positions, target_contents, target_cache_bytes = {}, {}, 0
     read = {}                                          # the regular files tarfile read, by where their data is
     pip_names, placed = [], []                         # (an sdist: where pip writes each member, BR-4)
     try:
@@ -2081,7 +2205,7 @@ def _iter_tar(data, container, artifact, budget, anomalies):
                     if count > MAX_FILES:
                         yield Member(rel or m.name, 0, b"", "files")
                         return
-                    links.append((m.name, m.linkname, m.issym(), rel, problem))
+                    links.append((m.name, m.linkname, m.issym(), rel, problem, m.offset))
                 continue
             if not m.isfile():
                 continue
@@ -2102,8 +2226,12 @@ def _iter_tar(data, container, artifact, budget, anomalies):
             last = rel
             sparse_problem, sparse_holes = _tar_sparse_map(m)
             if sparse_problem:
-                yield Member(rel, 0, b"", "corrupt",
-                             f"{rel} has an ambiguous sparse map ({sparse_problem})")
+                member = Member(rel, 0, b"", "corrupt",
+                                f"{rel} has an ambiguous sparse map ({sparse_problem})")
+                if artifact != "npm":
+                    target_positions.setdefault(rel, []).append((m.offset, m.offset_data))
+                    target_contents[m.offset_data] = (member, 0)
+                yield member
                 continue
             budget.check()
             budget.charge(sparse_holes)       # zero bytes the installer materializes, absent from the tar stream
@@ -2117,9 +2245,25 @@ def _iter_tar(data, container, artifact, budget, anomalies):
                     budget.check()
                     return f.read(n)
                 big.model, big.pth, big.media = _oversized_member(rel, raw, more)
+                if artifact != "npm":
+                    target_positions.setdefault(rel, []).append((m.offset, m.offset_data))
+                    retained = len(big[2])
+                    if target_cache_bytes + retained <= MAX_TAR_LINK_CACHE:
+                        target_contents[m.offset_data] = (big, len(raw))
+                        target_cache_bytes += retained
+                    else:
+                        target_contents[m.offset_data] = None
                 yield big
                 continue
-            yield Member(rel, len(raw), raw, None)
+            member = Member(rel, len(raw), raw, None)
+            if artifact != "npm":
+                target_positions.setdefault(rel, []).append((m.offset, m.offset_data))
+                if target_cache_bytes + len(raw) <= MAX_TAR_LINK_CACHE:
+                    target_contents[m.offset_data] = (member, len(raw))
+                    target_cache_bytes += len(raw)
+                else:
+                    target_contents[m.offset_data] = None
+            yield member
     except ArchiveLimit as lim:
         yield Member(last, 0, b"", lim.reason, lim.detail)
         return
@@ -2164,7 +2308,9 @@ def _iter_tar(data, container, artifact, budget, anomalies):
             for _where, detail in _npmtar.disagreements(tee.node.finish(), read):
                 yield Member("(archive)", 0, b"", "corrupt", detail)
     if links:
-        yield from _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies)
+        yield from _resolve_tar_links(
+            artifact, links, seen, budget, anomalies, target_positions, target_contents
+        )
 
 
 def _link_target(member_name, linkname, symbolic):
@@ -2180,7 +2326,8 @@ def _link_target(member_name, linkname, symbolic):
 
 
 def _link_plan(links, artifact, anomalies):
-    """({regular-target rel: [link rel, ...]}, [(bad link rel, reason)]).
+    """({regular-target rel: [(link rel, symbolic, offset), ...]},
+    [(bad link rel, reason)]).
 
     Resolve the whole link graph once, with path compression.  A publisher can
     otherwise hide an executable name behind a chain longer than a small hop
@@ -2188,7 +2335,7 @@ def _link_plan(links, artifact, anomalies):
     members instead of silently omitting installer-visible paths.
     """
     by_rel = {}
-    for name, linkname, symbolic, rel, problem in links:
+    for name, linkname, symbolic, rel, problem, offset in links:
         if problem or rel is None:
             if problem:
                 anomalies.append(("path", name, problem))
@@ -2202,7 +2349,7 @@ def _link_plan(links, artifact, anomalies):
         if tproblem or trel is None:
             anomalies.append(("link", rel, f"link to {linkname!r} points outside the archive"))
             continue
-        by_rel[rel] = trel
+        by_rel[rel] = (trel, symbolic, offset)
     resolved = {}
     for start in by_rel:
         if start in resolved:
@@ -2223,7 +2370,7 @@ def _link_plan(links, artifact, anomalies):
                 break
             positions[current] = len(path)
             path.append(current)
-            current = by_rel[current]
+            current = by_rel[current][0]
         for rel in path:
             resolved[rel] = result
 
@@ -2233,11 +2380,12 @@ def _link_plan(links, artifact, anomalies):
         if problem:
             problems.append((rel, problem))
         else:
-            plan.setdefault(target, []).append(rel)
+            _target, symbolic, offset = by_rel[rel]
+            plan.setdefault(target, []).append((rel, symbolic, offset))
     return plan, problems
 
 
-def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies):
+def _resolve_tar_links(artifact, links, seen, budget, anomalies, target_positions, target_contents):
     plan, problems = _link_plan(links, artifact, anomalies)
     last = "(archive)"
     try:
@@ -2247,62 +2395,61 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies):
             yield Member(link_rel, 0, b"", "corrupt", f"{link_rel} cannot be resolved because {problem}")
         if not plan:
             return
-        reader = _Inflater(data, codec, budget)
-        tf = tarfile.open(fileobj=reader, mode="r|", ignore_zeros=True)
-        for m in tf:
-            budget.check()
-            if not m.isfile():
-                continue
-            rel, _problem = canonical_member_path(m.name, artifact)
-            if rel not in plan:
-                continue
-            links_to = plan.pop(rel)
+        selected = {}
+        for target, links_to in plan.items():
+            occurrences = target_positions.get(target, ())
+            for link_rel, symbolic, link_offset in links_to:
+                position = (occurrences[-1][1] if symbolic and occurrences else
+                            next((data_offset for header_offset, data_offset in reversed(occurrences)
+                                  if header_offset < link_offset), None))
+                if position is None:
+                    last = link_rel
+                    yield Member(link_rel, 0, b"", "corrupt",
+                                 f"{link_rel} points through the archive to {target}, which is not a regular file")
+                    continue
+                selected.setdefault(position, []).append(link_rel)
+
+        for position, links_to in sorted(selected.items()):
             last = links_to[0]
-            sparse_problem, sparse_holes = _tar_sparse_map(m)
-            if sparse_problem:
+            retained = target_contents.get(position)
+            if retained is None:
+                for link_rel in links_to:
+                    last = link_rel
+                    yield Member(link_rel, 0, b"", "total",
+                                 f"the target of {link_rel} was not retained within the "
+                                 f"{MAX_TAR_LINK_CACHE:,}-byte tar-link cache limit")
+                continue
+            member, scan_bytes = retained
+            if member.reason == "corrupt":
                 for link_rel in links_to:
                     last = link_rel
                     yield Member(link_rel, 0, b"", "corrupt",
-                                 f"the target of {link_rel} has an ambiguous sparse map ({sparse_problem})")
-                if not plan:
-                    return
+                                 f"the target of {link_rel} is corrupt ({member.detail})")
                 continue
-            budget.check()
-            budget.charge(sparse_holes)
-            f = tf.extractfile(m)
-            raw = _tar_member_prefix(f, MAX_MEMBER + 1, budget)
-            # (the target read on once for all its links: as a .pth file when one of them is named so)
-            name = next((n for n in links_to if n.lower().endswith(".pth")), links_to[0])
-            if len(raw) > MAX_MEMBER:
-                def more(n):
-                    budget.check()
-                    return f.read(n)
-                read_as = _oversized_member(name, raw, more)
-            else:
-                read_as = (None, None, None)
             for link_rel in links_to:
                 last = link_rel
                 budget.check()
-                budget.charge(len(raw))       # one installer-visible file, and one path's scan work
+                budget.charge(scan_bytes)       # one installer-visible file, and one path's scan work
                 _note_member(seen, link_rel, anomalies)
-                if len(raw) > MAX_MEMBER:
-                    big = Member(link_rel, SAMPLE, raw[:SAMPLE], "member")
-                    big.model, big.pth, big.media = read_as
+                if member.reason == "member":
+                    # The target was streamed only once.  Its saved .pth,
+                    # model and media answers cannot be relabelled when the
+                    # alias's name would select a different streaming check.
+                    if _oversized_checks(member.rel, member.raw, scan_bytes) \
+                            != _oversized_checks(link_rel, member.raw, scan_bytes):
+                        yield Member(link_rel, 0, b"", "total",
+                                     f"the oversized target of {link_rel} was not retained under "
+                                     "the alias's name-sensitive checks")
+                        continue
+                    big = Member(link_rel, member.size, member.raw, "member")
+                    big.model = getattr(member, "model", None)
+                    big.pth = getattr(member, "pth", None)
+                    big.media = getattr(member, "media", None)
                     yield big
                 else:
-                    yield Member(link_rel, len(raw), raw, None)
-            if not plan:
-                return
-        for target, links_to in plan.items():
-            for link_rel in links_to:
-                last = link_rel
-                budget.check()
-                yield Member(link_rel, 0, b"", "corrupt",
-                             f"{link_rel} points through the archive to {target}, which is not a regular file")
+                    yield Member(link_rel, member.size, member.raw, None)
     except ArchiveLimit as lim:
         yield Member(last, 0, b"", lim.reason, lim.detail)
-    except (tarfile.TarError, EOFError, OSError, zlib.error, lzma.LZMAError, ValueError) as exc:
-        yield Member(last, 0, b"", "corrupt", f"links could not be resolved ({type(exc).__name__})")
 
 
 def _zip_is_symlink(info):
