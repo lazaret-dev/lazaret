@@ -369,6 +369,46 @@ class RunTests(unittest.TestCase):
             self.assertEqual(len(reads), 4)
         self.assertEqual(self.manifest(out, "benchmark"), bench)
 
+    def test_canonical_run_validates_the_draw_and_writes_sets_and_provenance(self):
+        out, sets = self.tmp / "canonical", self.tmp / "bench" / "sets516.json"
+        dataset = self.d.Dataset(self.dataset, self.sha)
+        try:
+            groups = self.d.samples_by_package(dataset.paths())
+        finally:
+            dataset.close()
+        chosen = self.d.draw(groups, self.d.BENCHMARK_SEED, self.d.SIZES["benchmark"])
+        with mock.patch.object(self.d, "AUDIT_BENCHMARK", len(chosen)), \
+                mock.patch.object(self.d, "AUDIT_DRAW_PREFIX", self.d.fingerprint(chosen)[:16]), \
+                mock.patch.object(self.d, "AUDIT_EMPTY_IDS", ()):
+            code, said = self.run_script(self.dataset, out, "--canonical", "--sets-file", sets,
+                                         "--results", "runs516", "--report", "reports516")
+        self.assertEqual(code, 0, said)
+        self.assertIn(f"canonical denominator: {len(chosen)} scanned, {len(chosen)} selected", said)
+        conf = json.loads(sets.read_text(encoding="utf-8"))
+        self.assertEqual((conf["schema"], conf["results"], conf["report"]), (1, "runs516", "reports516"))
+        entry = conf["sets"][0]
+        self.assertEqual((entry["name"], entry["selected"]), ("benchmark", len(chosen)))
+        provenance = json.loads(pathlib.Path(entry["provenance"]).read_text(encoding="utf-8"))
+        self.assertEqual((provenance["commit"], provenance["draw"], provenance["selected"],
+                          provenance["scanned"], provenance["skipped_ids"]),
+                         (self.sha, self.d.fingerprint(chosen), len(chosen), len(chosen), []))
+        self.assertEqual(provenance["manifest_sha256"], self.d.sha256_file(pathlib.Path(entry["manifest"])))
+        self.assertEqual(provenance["skipped_sha256"], self.d.sha256_file(pathlib.Path(entry["skipped"])))
+        harness = _support.load_script(BENCH, "bench_for_canonical_datadog_tests")
+        loaded = harness.load_sets(sets)["sets"][0]
+        self.assertEqual((loaded["name"], loaded["selected"], loaded["manifest"]),
+                         ("benchmark", len(chosen), pathlib.Path(entry["manifest"])))
+
+        with mock.patch.object(self.d, "AUDIT_BENCHMARK", len(chosen)), \
+                mock.patch.object(self.d, "AUDIT_DRAW_PREFIX", self.d.fingerprint(chosen)[:16]), \
+                mock.patch.object(self.d, "AUDIT_EMPTY_IDS", ()):
+            self.assertEqual(self.run_script(self.dataset, out, "--canonical", "--sets-file", sets)[0], 0)
+
+    def test_canonical_mode_refuses_a_holdout(self):
+        code, said = self.run_script(self.dataset, self.tmp / "canonical", "--canonical", "--only", "holdout")
+        self.assertEqual(code, 2)
+        self.assertIn("canonical set is the audit benchmark", said)
+
     def test_releases_of_older_rules_are_made_again(self):
         out = self.tmp / "corpus"
         args = (self.dataset, out, "--commit", self.sha[:8], "--only", "benchmark")
