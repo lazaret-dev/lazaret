@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<title>Lazaret: quarantine for your dependencies</title>
+<meta name="description" content="Static security analysis for Python, JavaScript, TypeScript and SQL, plus supply-chain and credential checks for Go and Rust. Zero dependencies.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header wrap">
+  <a class="brand" href="/" aria-label="Lazaret home">
+    <svg class="flag" viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="3" width="2.5" height="27" rx="1"></rect><path class="cloth" d="M7.5 5h19v13h-19z"></path></svg>
+    <span>lazaret</span>
+  </a>
+  <nav aria-label="Project links">
+    <a href="https://github.com/lazaret-dev/lazaret">Source</a>
+    <a href="https://pypi.org/project/lazaret/">PyPI</a>
+    <a href="https://www.npmjs.com/package/lazaret">npm</a>
+  </nav>
+</header>
+
+<main id="main">
+  <section class="hero wrap">
+    <div class="hero-text">
+      <h1>Quarantine for your dependencies.</h1>
+      <p class="lede">Lazaret provides static security analysis for Python, JavaScript, TypeScript and SQL, plus supply-chain and credential checks for Go and Rust. It also inspects packages from npm, PyPI, Go and Rust, editor extensions, and every install before it runs—flagging hidden payloads, leaked secrets, injection bugs and known-vulnerable versions.</p>
+      <div class="install">
+        <code><span class="prompt" aria-hidden="true">$ </span>pip install lazaret</code>
+        <p>Python 3.10 or later. Nothing else gets installed.</p>
+        <p>The project scanner is on npm too, with no dependencies: <code>npx lazaret check .</code> (Node 22 or later). The Python package includes both the scanner and MCP server; npm provides the scanner and commit-time hook but no MCP server in 0.1.10. You do not need both packages. Full MCP capability from either package is planned for 0.2.0.</p>
+      </div>
+      <p class="origin">A lazaret was the harbor station where arriving ships and cargo were held and inspected before they could enter port. Ships in quarantine flew a yellow flag.</p>
+    </div>
+
+    <figure class="manifest" aria-labelledby="manifest-caption">
+      <div class="manifest-bar"><code>$ lazaret-registry scan …</code></div>
+      <table>
+        <caption id="manifest-caption">Four releases from the September 2026 benchmark, scanned from their archives. The two held were published to attack their installers (from a leading open dataset of malicious packages) and are gone from the registries.</caption>
+        <thead><tr><th scope="col">Package</th><th scope="col">Verdict</th><th scope="col">Finding</th></tr></thead>
+        <tbody>
+          <tr><td>npm:chalk@6.0.1</td><td><span class="verdict ok">OK</span></td><td></td></tr>
+          <tr class="held"><td>npm:react-zutils@1.0.1</td><td><span class="verdict suspicious">SUSPICIOUS</span></td><td><span class="rule">SC-INSTALL-HOOK</span> its install hook starts a script that contacts an ngrok address, hidden in strings it XOR-decodes as it runs</td></tr>
+          <tr><td>pypi:requests@2.34.2</td><td><span class="verdict ok">OK</span></td><td></td></tr>
+          <tr class="held"><td>pypi:requesxs@1.0.0</td><td><span class="verdict suspicious">SUSPICIOUS</span></td><td><span class="rule">SC-EVAL-DECODE</span> runs a payload it decodes <span class="rule">SC-TYPOSQUAT</span> one letter from “requests”</td></tr>
+        </tbody>
+      </table>
+    </figure>
+  </section>
+
+  <section class="plain wrap" aria-labelledby="plain-heading">
+    <h2 id="plain-heading">In plain English</h2>
+    <p class="lead">If you run technology rather than write code, this part is for you.</p>
+    <div class="plain-grid">
+      <div>
+        <h3>Your software is mostly other people's software</h3>
+        <p>Almost every application your teams build is assembled from hundreds of free, shared building blocks, called packages, that are downloaded automatically from public warehouses such as npm (for JavaScript) and PyPI (for Python). It is a restaurant kitchen that orders its ingredients from thousands of suppliers it has never met.</p>
+      </div>
+      <div>
+        <h3>Attackers poison the ingredients</h3>
+        <p>Criminals publish packages named one typo away from popular ones, or break into a real publisher's account and slip a booby trap into an update. When a developer's laptop or your build server downloads it, the trap runs there, with that person's passwords and access, usually before anyone has looked at it.</p>
+      </div>
+      <div>
+        <h3>Lazaret is the inspection dock</h3>
+        <p>Before a package is installed, Lazaret opens it and reads what its code would do. Would it send out passwords? Run hidden code? Delete files? Then it gives a verdict, and the install tool it sits in front of (<code>npm</code>, <code>pip</code>, <code>go</code>, <code>cargo</code> and others) stops on the bad ones, as the harbor did with a ship.</p>
+        <ul class="verdicts" aria-label="The four verdicts">
+          <li><span class="verdict ok">OK</span><span>Nothing unusual found.</span></li>
+          <li><span class="verdict warn">WARN</span><span>Something unusual that a person should know about. The install goes ahead.</span></li>
+          <li><span class="verdict suspicious">SUSPICIOUS</span><span>It behaves like an attack. The install is held.</span></li>
+          <li><span class="verdict incomplete">INCOMPLETE</span><span>Part of it could not be read, so it is not waved through.</span></li>
+        </ul>
+      </div>
+      <div>
+        <h3>It reads; it never runs</h3>
+        <p>Nothing in a package is installed or executed during inspection. Lazaret reads the files in memory, so inspecting a booby-trapped package cannot set the trap off.</p>
+        <h3>What your team does</h3>
+        <p>Put <code>lazaret guard</code> in front of the install command developers already use, for example <code>lazaret guard npm install express</code>. Run a scan in your build pipeline. Add the commit hook if you want to catch a leaked password before it is saved. It is free and open source, needs no account, and has no dependencies of its own.</p>
+      </div>
+    </div>
+
+    <h3 class="faq-title">Questions leaders ask</h3>
+    <div class="faq">
+      <div>
+        <h3>We already run a vulnerability scanner. Isn't that this?</h3>
+        <p>Not quite. Tools such as <code>npm audit</code>, Dependabot and pip-audit compare your packages with lists of problems that someone has already found and published. A package that was poisoned this morning is on no list yet. Lazaret reads the package itself to see what it does, and it also does the list check, so you get both.</p>
+      </div>
+      <div>
+        <h3>Will it block our developers for no reason?</h3>
+        <p>That is the cost we watch most closely. Before every release we run it over the latest versions of 1,703 of the most downloaded packages, and none may be held. Version 0.1.9 holds none of them. Version 0.1.8 held nine by mistake, among them vite and vitest, and that was fixed. <a href="#popular-heading">What it still warns about, and why</a>.</p>
+      </div>
+      <div>
+        <h3>How much does it catch?</h3>
+        <p>On the canonical audit draw from an open dataset, it holds 454 of 516 selected malicious releases (88.0%), or 454 of the 513 that contain files to scan (88.5%). Counting releases flagged for review, it finds 478 of 516 selected (92.6%), or 478 of 513 scanned (93.2%). On 750 others that no detector was written from, the figures are 82% and 89%. No scanner catches everything: three selected releases in the canonical draw are empty, and some attacks fetch their payload after install, from outside the package. Treat Lazaret as one layer of defense, not the only one.</p>
+      </div>
+      <div>
+        <h3>Does it send our code anywhere?</h3>
+        <p>Scanning your code happens on your own machine. It contacts the public registries to download the packages you ask it to inspect. One feature talks to outside services, and only when you ask for it: <code>--verify-secrets</code> checks whether a leaked key is still live by asking the service that issued it, and says which providers it will ask before it does.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="checks wrap" aria-labelledby="checks-heading">
+    <h2 id="checks-heading">What it checks</h2>
+    <dl>
+      <div>
+        <dt>Your code</dt>
+        <dd>Rules for Python, JavaScript, TypeScript and SQL, with taint tracking that follows untrusted input across functions and files into SQL, shell and template sinks, and Flask, Django, FastAPI and Express routes modeled. Go and Rust source is checked for credentials, token formats, Trojan Source characters, and hidden or encoded content. Reports as HTML, JSON, or SARIF for code scanning, with a quality gate for CI.</dd>
+        <dd class="cmd"><code>lazaret .</code></dd>
+      </div>
+      <div>
+        <dt>Your installed dependencies</dt>
+        <dd>Follows each install hook in <code>node_modules</code> and <code>site-packages</code> to the scripts it runs, and tests every file for what no library needs to do: sending credentials out, running what it downloads or decodes, starting itself at login, deleting the user's files. Vendored Go and Rust trees are read too.</dd>
+        <dd class="cmd"><code>lazaret . --deps</code></dd>
+      </div>
+      <div>
+        <dt>Published packages</dt>
+        <dd>Downloads npm, PyPI, Go module and crate archives, and VS Code extensions, scans them in memory without unpacking anything to disk, and gives each version a verdict. Reads what runs at install, at import and when the package is used, the strings it decodes as it runs, a value one file receives and another runs, who built a release and from which repository, and names one typo away from a popular package's.</dd>
+        <dd class="cmd"><code>lazaret-registry scan npm:left-pad</code></dd>
+      </div>
+      <div>
+        <dt>Installs, before they run</dt>
+        <dd>Put <code>lazaret guard</code> in front of npm, pnpm, yarn, Bun, pip, uv, go, cargo or your editor's extension installer: it resolves what would be installed, scans every package in memory, and installs nothing if one is suspicious, can't be checked, or is less than two days old.</dd>
+        <dd class="cmd"><code>lazaret guard npm install express</code></dd>
+      </div>
+      <div>
+        <dt>Secrets, and whether they are live</dt>
+        <dd>Finds credentials in code and config files, and, only when asked, checks with the issuing service whether a leaked key still works. The commit-time gate stops a credential, or an install hook that pipes a download into a shell, before it is committed.</dd>
+        <dd class="cmd"><code>lazaret hook</code></dd>
+      </div>
+      <div>
+        <dt>Known vulnerabilities</dt>
+        <dd>Matches the npm, PyPI, Go and Rust packages installed or pinned in a project, from eight lockfile formats including uv.lock, pylock.toml and bun.lock, against a CVE bundle built from OSV, CISA KEV and EPSS, and fails the build on versions with known-exploited vulnerabilities.</dd>
+        <dd class="cmd"><code>lazaret-sca . --bundle cve-bundle.json</code></dd>
+      </div>
+      <div>
+        <dt>Code your AI assistant writes</dt>
+        <dd>The Python package's MCP server lets Claude and other assistants scan a snippet before writing it to disk, or check the files they just changed. <code>pip install lazaret</code> supplies both this server and the project scanner; an npm installation is not also required. Installing only the npm package does not supply MCP in 0.1.10. Instruction files that tell an agent what to run are read for what they ask.</dd>
+        <dd class="cmd"><code>lazaret-mcp</code></dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="numbers wrap" aria-labelledby="numbers-heading">
+    <h2 id="numbers-heading">Measured on real malware</h2>
+    <p>Lazaret 0.1.9 and 0.1.8 were run on the same canonical audit draw, read statically: nothing was installed or run. Other tools' earlier measurements are labelled separately.</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th scope="col">What was measured</th><th scope="col">Lazaret 0.1.9</th><th scope="col">Comparison</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Malicious npm and PyPI releases held at the strictest verdict (516 selected; 513 scannable and three empty releases counted as misses)</th><td class="num">88.0% selected<br>88.5% scanned</td><td>0.1.8: 87.0% selected, 87.5% scanned<br>GuardDog: 71% (September, on an earlier sample)</td></tr>
+          <tr><th scope="row">Malicious releases held or flagged for review (the same canonical draw)</th><td class="num">92.6% selected<br>93.2% scanned</td><td>0.1.8: 91.1% selected, 91.6% scanned<br>GuardDog: 77% (September, on an earlier sample)</td></tr>
+          <tr><th scope="row">Other malicious releases that no detector was written from, held (750)</th><td class="num">82.4%</td><td>0.1.8: 81.9%<br>Other tools: not run</td></tr>
+          <tr><th scope="row">Popular releases held by mistake (1,703 of the most downloaded npm and PyPI packages and Rust crates)</th><td class="num">0</td><td>0.1.8: 9<br>GuardDog: 18 of September's 429</td></tr>
+          <tr><th scope="row">Malicious npm releases blocked at install, end to end (300) †</th><td class="num">247</td><td>Popular npm packages blocked by mistake: none of 219</td></tr>
+          <tr><th scope="row">Planted fake credentials found (99, of 33 types) †</th><td class="num">95%</td><td>Gitleaks 94%, detect-secrets 91%, TruffleHog 73%</td></tr>
+          <tr><th scope="row">Expected advisories matched in eight lockfile formats (1,278) †</th><td class="num">100%</td><td>pip-audit and npm audit each miss one</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="dagger">† Last measured on October 10, on an earlier build of 0.1.9, and not repeated for the release.</p>
+    <p class="note">The canonical draw selected 516 releases. Three contain no files—bolym 1.0, detectron2 0.6 and requestsx 0.1.2—so 513 artifacts were scanned and the empty releases count as misses in the selected denominator. Lazaret 0.1.8 and 0.1.9 scanned the same 513 IDs; eleven verdicts moved upward and none moved downward. The 750-release holdout was not read while detectors were written. GuardDog's figures are from September's earlier sample, and much of the dataset was found by GuardDog's own rules, which favors it. How it was measured, and the limits, are in the <a href="https://github.com/lazaret-dev/lazaret#comparison-vs-established-scanners">README</a>.</p>
+  </section>
+
+  <section class="popular wrap" aria-labelledby="popular-heading">
+    <h2 id="popular-heading">What it says about popular software</h2>
+    <p>Popular packages are almost never malware, but their code can look like an attack's: a loader that fetches a script and runs it, a client that sends a login token, a tool that starts itself every time Python does, a compiled program inside a source package. Lazaret reports that. Before each release it reads the latest versions of 1,703 of the most downloaded npm and PyPI packages and Rust crates, and none may be held.</p>
+    <ul class="figures" aria-label="Lazaret 0.1.9 on 1,703 popular releases">
+      <li><strong>0</strong><span>held (SUSPICIOUS)</span></li>
+      <li><strong>44</strong><span>warned</span></li>
+      <li><strong>2</strong><span>not readable in full</span></li>
+      <li><strong>1,657</strong><span>OK</span></li>
+    </ul>
+    <p>A warning says what the code does and leaves the decision to you. A hold is for code that does something no library needs. Version 0.1.8 held nine popular releases by mistake, and its install guard blocks what it holds by default, so installing them would have failed. These are the nine, and what 0.1.9 says about the same releases:</p>
+    <table>
+      <caption>The nine popular releases 0.1.8 held by mistake, and 0.1.9's verdict on the same releases.</caption>
+      <thead><tr><th scope="col">Package</th><th scope="col">What its code does</th><th scope="col">0.1.8</th><th scope="col">0.1.9</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">vite 8.3.2</th><td class="did">A development server. It evaluates text it has decoded, and calls its own address from a bundle that reads the environment.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict warn">WARN</span></td></tr>
+        <tr><th scope="row">vitest 5.0.3</th><td class="did">A test runner. It runs code it is given inside Node's virtual machine.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict ok">OK</span></td></tr>
+        <tr><th scope="row">monaco-editor 0.57.0</th><td class="did">A code editor for web pages. Its loader fetches a script from an address and runs it.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict ok">OK</span></td></tr>
+        <tr><th scope="row">coverage 7.16.2</th><td class="did">A test-coverage tool. A startup file runs code each time Python starts, when asked to measure.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict warn">WARN</span></td></tr>
+        <tr><th scope="row">numba 0.68.0</th><td class="did">A speed-up compiler for Python. It reads its own source back and runs it.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict ok">OK</span></td></tr>
+        <tr><th scope="row">future 1.0.0</th><td class="did">A Python 2 and 3 compatibility library. Its network code sends proxy credentials, as a network library must.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict ok">OK</span></td></tr>
+        <tr><th scope="row">sympy 1.14.0</th><td class="did">A maths library. It runs an expression it builds, from a list it reverses.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict ok">OK</span></td></tr>
+        <tr><th scope="row">ipython 9.17.1</th><td class="did">An interactive Python shell. Its tab-completion evaluates a list it reverses.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict ok">OK</span></td></tr>
+        <tr><th scope="row">kubernetes 36.0.3</th><td class="did">A client for Kubernetes clusters. It sends its service-account token to the cluster's API, which is its job.</td><td data-label="0.1.8"><span class="verdict suspicious">SUSPICIOUS</span></td><td data-label="0.1.9"><span class="verdict ok">OK</span></td></tr>
+      </tbody>
+    </table>
+    <p class="note">The 44 warnings are for things such as programs and prebuilt libraries shipped inside a package, data that decodes to something runnable, and scripts that run at install. The two releases it cannot read in full are a library of compressed model files and a 16 MB native library. Beyond this list, two Go modules in Ubuntu's archive are still held by a known false alarm in our Go reader, which we will fix after 0.1.9. We list them rather than hide them.</p>
+  </section>
+
+  <section class="new wrap" aria-labelledby="new-heading">
+    <h2 id="new-heading">New in 0.1.9</h2>
+    <ul>
+      <li>Go modules, Rust crates and VS Code extensions get the same inspection as npm and PyPI packages, and <code>lazaret guard</code> now sits in front of <code>go</code>, <code>cargo</code> and your editor's installer as well.</li>
+      <li>No popular release is held by mistake: none of 1,703, where 0.1.8 held nine.</li>
+      <li>A repository can be scanned at a given commit (<code>lazaret scan github:owner/repo</code>), and <code>lazaret hook</code> checks files as they are committed.</li>
+      <li><code>--verify-secrets</code> asks the service that issued a leaked key whether it is still live. It is opt-in, and it says who it will ask first.</li>
+      <li>New things it recognizes: code that deletes the user's files, instruction files that tell an AI agent what to run, workflows that send secrets out, look-alike packages from look-alike accounts, version numbers inflated to outrank a private package, and a release that suddenly brings risky behavior its predecessor did not have.</li>
+      <li>Registry traffic goes through Lazaret's own HTTPS client, written without third-party code, and a release's provenance (who built it, from which repository) is checked and reported.</li>
+      <li>Tar and zip archives are read more strictly and within memory limits, and proxy and redirect handling is tighter.</li>
+      <li>Native packages for Alpine and other musl Linux systems, and for Windows on ARM.</li>
+    </ul>
+    <p><a href="https://github.com/lazaret-dev/lazaret/blob/main/CHANGELOG.md">Everything that changed</a></p>
+  </section>
+
+  <section class="trust wrap" aria-labelledby="trust-heading">
+    <h2 id="trust-heading">Nothing to trust but the standard library</h2>
+    <p>A supply-chain tool with dependencies is itself a supply-chain risk. Lazaret has none. It runs on Python's standard library alone, builds without downloading anything, and its whole test suite runs on a stock interpreter. The npm package has no dependencies either, and the native engine is written with no external crates: even its regular-expression engine is its own, CPython's ported to Rust, with shortcuts that skip only work that can't match. So is its HTTPS client.</p>
+    <p>Releases are built reproducibly and published from CI with signed attestations, so any file on PyPI or npm can be traced to the exact commit and workflow that produced it. This page loads no scripts, fonts, or anything else from third parties, and its content security policy holds it to that.</p>
+  </section>
+</main>
+
+<footer class="site-footer wrap">
+  <p>Lazaret is open source under the Apache 2.0 license.</p>
+  <ul>
+    <li><a href="https://github.com/lazaret-dev/lazaret">Source on GitHub</a></li>
+    <li><a href="https://pypi.org/project/lazaret/">Lazaret on PyPI</a></li>
+    <li><a href="https://www.npmjs.com/package/lazaret">Lazaret on npm</a></li>
+    <li><a href="https://github.com/lazaret-dev/lazaret/blob/main/CHANGELOG.md">Changelog</a></li>
+    <li><a href="https://github.com/lazaret-dev/lazaret/blob/main/SECURITY.md">Report a vulnerability</a></li>
+  </ul>
+</footer>
+</body>
+</html>
