@@ -297,6 +297,7 @@ impl AttachmentScanner {
                 Vec::new()
             }
         };
+        let mut pending_binary_findings = Vec::new();
         for issue in issues {
             let Some(finding) = typed_issue(&issue, evidence) else {
                 push_reason(
@@ -312,25 +313,28 @@ impl AttachmentScanner {
                 );
                 return Ok(finish(report, context));
             };
-            if let Err(stop) = push_finding(&mut report, context, finding) {
-                record_stop(&mut report, context, "binary-preflight", stop);
-                return Ok(finish(report, context));
-            }
+            pending_binary_findings.push(finding);
         }
 
         if program.is_some() {
-            for finding in mismatch_findings(&attachment, evidence) {
-                if let Err(stop) = push_finding(&mut report, context, finding) {
-                    record_stop(&mut report, context, "binary-preflight", stop);
-                    return Ok(finish(report, context));
-                }
-            }
+            pending_binary_findings.extend(mismatch_findings(&attachment, evidence));
         }
 
         if self.profile.capabilities.contains(&Capability::Document) {
             set_coverage(&mut report, Capability::Document, CoverageState::Incomplete);
             if let Err(stop) = self.scan_documents(&attachment, context, &mut report) {
                 record_stop(&mut report, context, "document", stop);
+            }
+        }
+
+        // Retain the more specific structural document evidence before the
+        // generic whole-file classifier. A tight finding budget must not let
+        // the wrapper's SC-NESTED-ARCHIVE consume the slot that would have
+        // held a macro, ActiveX object, embedded program or external link.
+        for finding in pending_binary_findings {
+            if let Err(stop) = push_finding(&mut report, context, finding) {
+                record_stop(&mut report, context, "binary-preflight", stop);
+                break;
             }
         }
 
@@ -1204,11 +1208,21 @@ fn archive_incomplete_kind(error: &lazaret_archive::Error) -> IncompleteKind {
 fn scan_ooxml_member_preflight(
     pack: &Pack,
     archive: &lazaret_archive::Archive,
+    document_programs: &[&str],
     context: &mut ScanContext<'_>,
     report: &mut AttachmentReport,
     evidence: ByteRange,
 ) -> Result<(), StopReason> {
-    scan_archive_member_preflight(pack, archive, "", 1, true, context, report, evidence)
+    scan_archive_member_preflight(
+        pack,
+        archive,
+        "",
+        1,
+        document_programs,
+        context,
+        report,
+        evidence,
+    )
 }
 
 fn scan_archive_member_preflight(
@@ -1216,7 +1230,7 @@ fn scan_archive_member_preflight(
     archive: &lazaret_archive::Archive,
     prefix: &str,
     depth: u64,
-    document_members: bool,
+    document_programs: &[&str],
     context: &mut ScanContext<'_>,
     report: &mut AttachmentReport,
     evidence: ByteRange,
@@ -1278,6 +1292,7 @@ fn scan_archive_member_preflight(
                 Vec::new()
             }
         };
+        let nested_by_bytes = zip_magic(&entry.data);
         for issue in issues {
             let Some(mut finding) = typed_issue(&issue, evidence) else {
                 push_reason(
@@ -1294,26 +1309,31 @@ fn scan_archive_member_preflight(
                 );
                 continue;
             };
-            // The document analyzer already reports native programs with the
-            // member path. Keep the generic preflight for the other byte-first
-            // classes without emitting a second finding for the same program.
-            if document_members && finding.rule_id == "SC-BINARY" {
+            // A confirmed OOXML package reports each immediate native program
+            // with its member path. Suppress only that exact duplicate: a
+            // generic ZIP has no OOXML finding to replace SC-BINARY.
+            let document_reports_program = !document_programs.is_empty()
+                && finding.rule_id == "SC-BINARY"
+                && document_programs.contains(&member_path.as_str());
+            if document_reports_program {
                 continue;
             }
-            let nested = finding.rule_id == "SC-NESTED-ARCHIVE";
             finding.message = format!("in {member_path}: {}", finding.message);
             push_finding(report, context, finding)?;
-            if nested {
-                scan_nested_archive(
-                    pack,
-                    &entry.data,
-                    &member_path,
-                    depth.saturating_add(1),
-                    context,
-                    report,
-                    evidence,
-                )?;
-            }
+        }
+        // Recurse from the bytes, not the member's extension. Office-looking
+        // names and JAR names are still ZIP containers and cannot be allowed
+        // to hide the members that follow inside them.
+        if nested_by_bytes {
+            scan_nested_archive(
+                pack,
+                &entry.data,
+                &member_path,
+                depth.saturating_add(1),
+                context,
+                report,
+                evidence,
+            )?;
         }
     }
     Ok(())
@@ -1401,9 +1421,7 @@ fn scan_nested_archive(
             },
         );
     }
-    scan_archive_member_preflight(
-        pack, &archive, path, depth, false, context, report, evidence,
-    )
+    scan_archive_member_preflight(pack, &archive, path, depth, &[], context, report, evidence)
 }
 
 fn scan_ooxml(
@@ -1506,9 +1524,22 @@ fn scan_ooxml(
         offset: 0,
         length: attachment.bytes.len().min(4) as u64,
     };
-    scan_ooxml_member_preflight(pack, &archive, context, report, evidence)?;
     let value = crate::document::analyze_ooxml(&archive, pack, analysis_limits);
+    let document_programs: Vec<_> = value
+        .features
+        .iter()
+        .filter(|feature| feature.kind == crate::document::FeatureKind::EmbeddedProgram)
+        .filter_map(|feature| feature.member.as_deref())
+        .collect();
     retain_document_report(&value, context, report, evidence)?;
+    scan_ooxml_member_preflight(
+        pack,
+        &archive,
+        &document_programs,
+        context,
+        report,
+        evidence,
+    )?;
     if let Some(detected) = value.kind.filter(|_| value.is_confirmed()) {
         for (source, claimed) in claims {
             if claimed != detected {
@@ -2225,6 +2256,9 @@ mod tests {
                 && finding.class == SignalClass::ExecutableOrLoadableProgram
                 && finding.message.contains("word/media/preview.dat")
         }));
+        assert!(!report.findings.iter().any(|finding| {
+            finding.rule_id == "SC-BINARY" && finding.message.contains("word/media/preview.dat")
+        }));
         assert!(report.findings.iter().any(|finding| {
             finding.rule_id == "OOXML-EXTERNAL-RELATIONSHIP"
                 && finding.class == SignalClass::ExternalReference
@@ -2248,6 +2282,107 @@ mod tests {
         assert_eq!(report.usage.members, 8);
         assert_eq!(report.usage.max_depth, 2);
         assert!(report.usage.decoded_bytes > 0);
+    }
+
+    #[test]
+    fn generic_zip_member_program_is_not_dropped_by_document_preflight() {
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
+        let bytes = stored_zip(&[("invoice.pdf.exe", b"MZ\x90\x00\x03\x00\x00\x00\x04\x00")]);
+        let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
+        let report = scanner
+            .scan_whole(
+                WholeAttachment {
+                    identity: InputIdentity([34; 16]),
+                    bytes: &bytes,
+                    filename: Some("invoice.zip"),
+                    declared_media_type: Some("application/zip"),
+                    container_path: None,
+                },
+                &mut context,
+            )
+            .unwrap();
+
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.rule_id == "SC-BINARY" && finding.message.contains("invoice.pdf.exe")
+            }),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn zip_bytes_under_office_and_jar_names_are_recursed() {
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
+        let program = b"MZ\x90\x00\x03\x00\x00\x00\x04\x00";
+        for disguised_name in ["payload.xlsx", "payload.jar"] {
+            let disguised = stored_zip(&[("stage.exe", program)]);
+            let bytes = stored_zip(&[(disguised_name, &disguised)]);
+            let mut context = ScanContext::new(limits(10_000_000), &NeverCancelled);
+            let report = scanner
+                .scan_whole(
+                    WholeAttachment {
+                        identity: InputIdentity([35; 16]),
+                        bytes: &bytes,
+                        filename: Some("invoice.zip"),
+                        declared_media_type: Some("application/zip"),
+                        container_path: None,
+                    },
+                    &mut context,
+                )
+                .unwrap();
+
+            assert!(
+                report.findings.iter().any(|finding| {
+                    finding.rule_id == "SC-BINARY"
+                        && finding
+                            .message
+                            .contains(&format!("{disguised_name}!/stage.exe"))
+                }),
+                "{disguised_name}: {report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn office_features_are_retained_before_generic_member_findings() {
+        let scanner = AttachmentScanner::current(AnalysisProfile::mail_p1());
+        let nested = stored_zip(&[("payload.bin", b"inert")]);
+        let bytes = stored_zip(&[
+            (
+                "[Content_Types].xml",
+                br#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.ms-word.document.macroEnabled.main+xml"/><Override PartName="/word/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/document.xml", b"<document/>"),
+            ("word/media/nested.zip", &nested),
+            ("word/vbaProject.bin", b"macro"),
+        ]);
+        let mut work_limits = limits(10_000_000);
+        work_limits.findings = 1;
+        let mut context = ScanContext::new(work_limits, &NeverCancelled);
+        let report = scanner
+            .scan_whole(
+                WholeAttachment {
+                    identity: InputIdentity([36; 16]),
+                    bytes: &bytes,
+                    filename: Some("invoice.docm"),
+                    declared_media_type: Some("application/vnd.ms-word.document.macroEnabled.12"),
+                    container_path: None,
+                },
+                &mut context,
+            )
+            .unwrap();
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == "OOXML-MACRO"),
+            "{report:?}"
+        );
     }
 
     #[test]
