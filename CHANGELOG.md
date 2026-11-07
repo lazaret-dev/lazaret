@@ -14,30 +14,35 @@ modules, Rust crates and VS Code extensions get the scan that npm and PyPI relea
 `guard cargo` and `guard code`; `lazaret-registry scan go:…`, `crates:…` and `openvsx:…`). A repository can be
 scanned at a commit (`lazaret scan github:owner/repo`), `lazaret hook` checks what is about to be committed,
 `--verify-secrets` asks a leaked secret's own service whether it is still live, and the registry's default transport
-is Lazaret's own HTTPS client (pratique). On the benchmark 0.1.9 holds 0.1.8's strictest-verdict rate (the same 439
-of 514) and the gain is elsewhere: none of the 1,703 popular releases is SUSPICIOUS, where 0.1.8 made nine of them
+is Lazaret's own HTTPS client (pratique). On the audit benchmark 0.1.9 raises the strictest-verdict rate from 449
+to 454 of 516 selected releases, with no verdict moving down; none of the 1,703 popular releases is SUSPICIOUS,
+where 0.1.8 made nine of them
 SUSPICIOUS (vite, vitest, monaco-editor, coverage, numba, future, sympy, ipython and kubernetes) and the guard
 blocked them by default. The last week, October 31 to November 6, went to the boundaries: the network client,
 archive reading, deadlines, and how releases are built and routed (below, under Changed). The registry's rule set is
 2.114.0, so stored verdicts are scanned again.
 
 Where the numbers stand at release (the final run, November 6, on rule set 2.114.0, with 0.1.8 run again on the same
-sets. The benchmark's 514 malicious releases and the 1,703 popular releases are in-sample; the holdout is 750 other
-malicious releases of the same dataset, read only in aggregate):
+sets. The benchmark selects 516 malicious releases (513 scannable and three documented empty samples counted as
+misses) and the 1,703 popular releases are in-sample; the holdout is 750 other malicious releases of the same dataset,
+read only in aggregate):
 
 | | 0.1.9 | 0.1.8 |
 | --- | --- | --- |
-| Malicious releases SUSPICIOUS (in-sample, 514) | 85.4% (439) | 85.4% (439) |
-| ... SUSPICIOUS or WARN | 91.6% (471) | 90.9% (467) |
+| Malicious releases SUSPICIOUS (in-sample, 516 selected) | 88.0% (454) | 87.0% (449) |
+| ... SUSPICIOUS or WARN | 92.6% (478) | 91.1% (470) |
 | Holdout, SUSPICIOUS (750) | 82.4% (618) | 81.9% (614) |
 | Holdout, SUSPICIOUS or WARN | 89.1% (668) | 88.0% (660) |
 | Popular releases SUSPICIOUS · SUSPICIOUS or WARN (1,703) | none · 2.6% (44) | 0.5% (9) · 3.3% (57) |
 | Go modules and crates SUSPICIOUS: Ubuntu's 4,104 · Go's standard library (18) | 2 · none | not read |
 
-The benchmark and the holdout are rebuilt from the dataset by `scripts/datadog.py` (October 15), not the September
-draws, so their counts differ from the earlier tables (516 became 514, 745 became 750) and the percentages are not
-the earlier tables' to compare: on the September 516, 0.1.9 was 88.0% SUSPICIOUS (454) on October 10, and that run is
-not repeated on this engine. Both releases are measured on the rebuilt sets here. The popular releases 0.1.9 still
+The benchmark is the audit's deterministic September draw, rebuilt by `scripts/datadog.py` from dataset commit
+`b302ad0b`: 513 releases have files to scan, and its three known empty samples are counted as misses in the 516-release
+historical denominator. Both releases were run on those same 513 artifacts on November 6. Eleven verdicts moved, all
+upward; six strong rules were added, none disappeared or weakened, and there was no one-sided error. The October 15
+draw remains a supplementary snapshot: both releases called 439 of its 514 scannable releases SUSPICIOUS, but only
+262 scannable releases overlap the audit draw, so the percentages are not compared. The holdout is the October 15
+rebuild of 750 releases and both versions were run on it. The popular releases 0.1.9 still
 flags are 44 WARN and 2 INCOMPLETE (a release it could not read all of: sharp's 16 MB libvips library, and joblib's
 bzip2, lzma and xz model files), and `docs/TESTING.md` says what the warnings are for. Ubuntu's two SUSPICIOUS Go
 modules are containers/storage and mvdan.cc/fdroidcl: known false positives of the Go reader's (FP-GO-INIT-FUNCVALUE,
