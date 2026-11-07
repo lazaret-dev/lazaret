@@ -47,6 +47,7 @@ Do these in order. Everything here is one-time.
 6. **Domain (lazaret.dev).**
    - At the registrar: turn on auto-renew, the transfer lock, and 2FA on the registrar account. An expired maintainer domain is a known route to hijacking package-registry accounts.
    - Create `security@lazaret.dev` (a forward is fine). It's already referenced in `SECURITY.md`.
+   - The reviewed static site source is tracked in `website/`. Deploy that directory to the existing Cloudflare Pages project only after its repository change is reviewed. Do not commit `.wrangler/`, credentials or local environment files, and do not deploy an empty `404.html`; see `website/README.md`.
 
 7. **Reserve likely misspellings (typosquat defense). Blocking: do it right after the first publish (steps 3 and 4).**
    The names: `lazarat`, `lazarett`, `lazeret`. `lazarat` matters most: it's the likeliest misspelling, and it reads like "Lazarus RAT," which is exactly what an attacker would want to publish. As of 2026-09-25, twelve hours and more after 0.0.1 went live, all three were still unclaimed on both registries.

@@ -7,6 +7,15 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
+## [0.1.10] — 2026-11-07
+
+Documentation: the package pages and website describe language coverage accurately; the website's reviewed static
+source now lives in `website/`. The install documentation
+clarifies that the PyPI package includes both the scanner and MCP server while the npm package in 0.1.10 includes
+the scanner and commit-time hook but not MCP. Users do not need both packages: install the Python package for the
+complete current toolset. Full MCP capability from either package is planned for 0.2.0 (issue #83). There is no
+change to the engine or rules.
+
 ## [0.1.9] — 2026-11-06
 
 0.1.9 reads more of what a team installs, and it is measured on sets anyone with the dataset can rebuild. Go
