@@ -19,6 +19,13 @@ lazaret-sca . --bundle cve-bundle.json  # match installed npm, PyPI, Go and Rust
 lazaret-mcp                             # MCP server, so an AI assistant can scan code
 ```
 
+The PyPI package is the complete current distribution: it provides the project
+scanner and `lazaret-mcp`, so an npm installation is not also required. The npm
+package provides the project scanner and commit-time hook but no MCP server in
+0.1.10. Full MCP capability from either package is planned for 0.2.0
+([#83](https://github.com/lazaret-dev/lazaret/issues/83)). For Claude Code and
+Claude Desktop configuration, see [MCP setup](https://github.com/lazaret-dev/lazaret#mcp-setup-use-lazaret-to-test-changes).
+
 What it finds:
 
 - **Security:** SQL/command/code injection, SSTI, XXE, unsafe deserialization, XSS sinks, weak crypto, disabled TLS verification, hardcoded secrets (provider signatures and entropy, in code and in config files), and more, across 64 pattern rules plus supply-chain and coverage findings.

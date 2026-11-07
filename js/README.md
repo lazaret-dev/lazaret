@@ -23,10 +23,14 @@ for a project scan, `npx lazaret` and `python -m lazaret` are tested
 (`python/tests/architecture/test_js_parity.py`) to report the same issues
 (rule, file, line, severity, message), metrics, ratings, gate result and exit
 code, and write the same reports, byte for byte
-(`python/tests/architecture/test_report_engine.py`). Custom taint configs, registry auditing (`lazaret-registry`), the
-install guard, SCA and the MCP server come with the Python package (`pip
-install lazaret`). Through 0.1.7 this package ran JavaScript ports of the
-rules and tests; the findings are the same.
+(`python/tests/architecture/test_report_engine.py`). Custom taint configs,
+registry auditing (`lazaret-registry`), the install guard, SCA and the MCP
+server come with the Python package (`pip install lazaret`). Installing only
+this npm package does not install an MCP server. The Python package alone is
+sufficient for both project scanning and MCP; installing both packages is not
+required. Full MCP capability from either package is planned for 0.2.0
+([#83](https://github.com/lazaret-dev/lazaret/issues/83)). Through 0.1.7 this
+package ran JavaScript ports of the rules and tests; the findings are the same.
 
 ```
 npx lazaret check ./my-project
