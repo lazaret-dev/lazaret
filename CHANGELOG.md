@@ -15,7 +15,8 @@ modules, Rust crates and VS Code extensions get the scan that npm and PyPI relea
 scanned at a commit (`lazaret scan github:owner/repo`), `lazaret hook` checks what is about to be committed,
 `--verify-secrets` asks a leaked secret's own service whether it is still live, and the registry's default transport
 is Lazaret's own HTTPS client (pratique). On the audit benchmark 0.1.9 raises the strictest-verdict rate from 449
-to 454 of 516 selected releases, with no verdict moving down; none of the 1,703 popular releases is SUSPICIOUS,
+to 454 of 513 scanned releases (87.5% to 88.5%), or from 449 to 454 of 516 selected releases when the three empty
+releases count as misses (87.0% to 88.0%), with no verdict moving down; none of the 1,703 popular releases is SUSPICIOUS,
 where 0.1.8 made nine of them
 SUSPICIOUS (vite, vitest, monaco-editor, coverage, numba, future, sympy, ipython and kubernetes) and the guard
 blocked them by default. The last week, October 31 to November 6, went to the boundaries: the network client,
@@ -29,8 +30,8 @@ read only in aggregate):
 
 | | 0.1.9 | 0.1.8 |
 | --- | --- | --- |
-| Malicious releases SUSPICIOUS (in-sample, 516 selected) | 88.0% (454) | 87.0% (449) |
-| ... SUSPICIOUS or WARN | 92.6% (478) | 91.1% (470) |
+| Malicious releases SUSPICIOUS (in-sample; 513 scanned / 516 selected) | 88.5% (454/513) scanned · 88.0% (454/516) selected | 87.5% (449/513) scanned · 87.0% (449/516) selected |
+| ... SUSPICIOUS or WARN | 93.2% (478/513) scanned · 92.6% (478/516) selected | 91.6% (470/513) scanned · 91.1% (470/516) selected |
 | Holdout, SUSPICIOUS (750) | 82.4% (618) | 81.9% (614) |
 | Holdout, SUSPICIOUS or WARN | 89.1% (668) | 88.0% (660) |
 | Popular releases SUSPICIOUS · SUSPICIOUS or WARN (1,703) | none · 2.6% (44) | 0.5% (9) · 3.3% (57) |

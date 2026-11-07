@@ -454,10 +454,10 @@ Measured on one shared sample set in September 2026 and rerun for 0.1.7 and 0.1.
 
 | What was measured | Lazaret 0.1.9 | Lazaret 0.1.8 | Other tools on the same samples |
 |---|---|---|---|
-| Real malicious npm and PyPI releases caught at the strictest verdict (516 selected from a leading open dataset of malicious packages; 513 scannable and 3 empty releases counted as misses; in-sample for Lazaret) | **88.0%** SUSPICIOUS (454) | 87.0% (449) | GuardDog 71% high_risk |
+| Real malicious npm and PyPI releases caught at the strictest verdict (516 selected from a leading open dataset of malicious packages; 513 scannable and 3 empty releases counted as misses; in-sample for Lazaret) | **88.5%** SUSPICIOUS (454/513 scanned); **88.0%** (454/516 selected) | 87.5% (449/513 scanned); 87.0% (449/516 selected) | GuardDog 71% high_risk |
 | The same on a holdout: 750 other malicious releases of the dataset, none read while writing detectors | **82.4%** SUSPICIOUS (618) | 81.9% (614) | not run |
 | Popular releases flagged at that verdict (1,703: the latest releases of 1,205 popular npm and PyPI packages and of the 498 most-downloaded crates that the set takes) | **none** | 9 (0.5%) | GuardDog 4.2% (18 of the 429 packages of September's set) |
-| The same, counting the weaker verdict (Lazaret WARN, GuardDog suspicious) | 92.6% of the 516 caught (478), 89.1% of the holdout; 2.6% of the popular releases flagged (44) | 91.1% (470), 88.0%; 3.3% (57) | GuardDog 77%, 5.8% (September's sets) |
+| The same, counting the weaker verdict (Lazaret WARN, GuardDog suspicious) | 93.2% (478/513 scanned); 92.6% (478/516 selected); 89.1% of the holdout; 2.6% of the popular releases flagged (44) | 91.6% (470/513 scanned); 91.1% (470/516 selected); 88.0% of the holdout; 3.3% (57) | GuardDog 77%, 5.8% (September's sets) |
 | Go modules and crates flagged at the strictest verdict (Ubuntu's 4,104 and Go's standard library, 18) | 2 · none | not read | not run |
 | Fake credentials found (99 of 33 types, in code, `.env`, JSON, YAML, shell and key files) and look-alike decoys flagged (of 72) | **95%**, 6 (October 10) | 95%, 6 | Gitleaks 94%, 6 · detect-secrets 91%, 30 · TruffleHog 73%, 0 |
 | OWASP BenchmarkPython: true-positive rate minus false-positive rate, averaged over 14 categories (1,230 labeled cases) | **+0.61** (+0.614 when Q-4 landed, rule set 2.100.0; not rerun on the release) | +0.22 | Semgrep CE with community rules +0.16 · Bandit +0.08 |

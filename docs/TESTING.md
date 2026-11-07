@@ -330,14 +330,16 @@ benchmark's and the holdout's manifests from a clone of DataDog's
 malicious-software-packages-dataset (a plain clone or a `--filter=blob:none`
 one, not a shallow one), and prints the two entries of a sets file. The
 October 15 measurements use dataset commit `0cf258a4`, the script's default.
-That supplementary benchmark is the audit's draw
+That supplementary benchmark follows the audit draw's recipe
 (seed 20260928: 200 npm and 200 PyPI malicious-intent packages, 100
-compromised npm releases and every compromised PyPI release): 517 releases
-there. The holdout is a new draw of the shape of Sept 30's, whose draw was
-not kept (seed 20261015: 300 npm and 300 PyPI malicious-intent packages and
-150 compromised npm releases), among the packages that neither the benchmark
-nor the audit's benchmark holds: the detectors were written from the
-audit's, so the clone needs the audit's commit, `b302ad0b`, in its history
+compromised npm releases and every compromised PyPI release), but at the
+newer dataset commit: 517 releases are selected and 514 have files to scan.
+It is not the canonical audit draw. The holdout is a new draw of the shape
+of Sept 30's, whose draw was not kept (seed 20261015: 300 npm and 300 PyPI
+malicious-intent packages and 150 compromised npm releases), among the
+packages that neither the benchmark nor the audit's benchmark holds: the
+detectors were written from the audit's, so the clone needs the audit's
+commit, `b302ad0b`, in its history
 (a shallow clone gets it, without the old samples, from `git fetch
 --unshallow --filter=blob:none origin`). The first runs on them are the
 baselines. `--commit b302ad0b` gives the canonical audit benchmark: 516
@@ -396,33 +398,38 @@ named here outside the repository and any synced folder):
    `git clone --filter=blob:none --no-checkout https://github.com/DataDog/malicious-software-packages-dataset.git ~/lazaret-datadog`
    (a shallow clone needs `git fetch --unshallow --filter=blob:none origin`:
    the holdout's draw reads the audit's commit, `b302ad0b`).
-2. Write the two manifests:
-   `python3 scripts/datadog.py ~/lazaret-datadog ~/lazaret-corpus`. It
-   writes `benchmark/manifest.jsonl` and `holdout/manifest.jsonl` there and
-   prints their two entries of a sets file; stopped, the same command goes
-   on.
-3. Write the sets file once, `~/lazaret-bench/sets.json` (a `~` is the home
+2. Write the canonical audit benchmark manifest:
+   `python3 scripts/datadog.py ~/lazaret-datadog ~/lazaret-corpus-516 --commit b302ad0b4f614533e7b5ba11de6e2fae46d16928 --only benchmark`.
+   It selects 516 releases, writes 513 scannable releases to
+   `benchmark/manifest.jsonl`, and records the three expected empty releases
+   in `benchmark/skipped.json`. Stopped, the same command goes on.
+3. Write the October 15 holdout (and preserve its supplementary benchmark):
+   `python3 scripts/datadog.py ~/lazaret-datadog ~/lazaret-corpus`. It writes
+   `benchmark/manifest.jsonl` and `holdout/manifest.jsonl` there. The first is
+   the separate 514-scannable supplementary draw; the second is the 750-release
+   aggregate-only holdout used with the canonical benchmark.
+4. Write the sets file once, `~/lazaret-bench/sets516.json` (a `~` is the home
    folder; any other relative path is the sets file's folder's):
 
    ```
-   {"results": "runs", "report": "~/Projects/lazaret/Claude outputs/bench",
-    "sets": [{"name": "benchmark", "manifest": "~/lazaret-corpus/benchmark/manifest.jsonl"},
+   {"results": "runs516", "report": "~/Projects/lazaret/Claude outputs/bench516",
+    "sets": [{"name": "benchmark", "manifest": "~/lazaret-corpus-516/benchmark/manifest.jsonl"},
              {"name": "holdout", "manifest": "~/lazaret-corpus/holdout/manifest.jsonl", "aggregate_only": true}]}
    ```
 
-4. With the commit to measure checked out and its engine built
+5. With the commit to measure checked out and its engine built
    (`pip install -e ./python`: the run refuses a library that is not the
    tree's), from the repository's root:
-   `python3 scripts/bench.py all ~/lazaret-bench/sets.json --only benchmark,holdout`.
+   `python3 scripts/bench.py all ~/lazaret-bench/sets516.json --only benchmark,holdout`.
    A set's first run is its baseline; each later one is compared with the
    set's last finished run (`--baseline LABEL`: another).
-5. What a session reads back is the report folder,
-   `Claude outputs/bench/LABEL/`: `summary.txt`, `benchmark.txt` (the
+6. What a session reads back is the report folder,
+   `Claude outputs/bench516/LABEL/`: `summary.txt`, `benchmark.txt` (the
    verdicts by category and every release that moved) and `holdout.txt`
-   (counts alone). The runs (`~/lazaret-bench/runs/`), the manifests and
+   (counts alone). The runs (`~/lazaret-bench/runs516/`), the manifests and
    the samples stay on the machine.
-6. When a session is to write stories from the benchmark's misses:
-   `python3 scripts/bench.py misses ~/lazaret-bench/sets.json benchmark`.
+7. When a session is to write stories from the benchmark's misses:
+   `python3 scripts/bench.py misses ~/lazaret-bench/sets516.json benchmark`.
    It scans again, in memory, each malicious release of the set's last
    finished run that is not SUSPICIOUS (`--label`: another run) and writes
    `benchmark-misses.jsonl` to the same report folder, a line each: the
