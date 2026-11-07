@@ -328,9 +328,9 @@ samples themselves are kept outside the repository (`STRUCTURE.md` §6).
 **The malicious sets.** `scripts/datadog.py DATASET OUT` writes the
 benchmark's and the holdout's manifests from a clone of DataDog's
 malicious-software-packages-dataset (a plain clone or a `--filter=blob:none`
-one, not a shallow one), and prints the two entries of a sets file. John
-restarted the measurements on Oct 15 at the dataset's newest commit,
-`0cf258a4`, the script's default since. The benchmark is the audit's draw
+one, not a shallow one), and prints the two entries of a sets file. The
+October 15 measurements use dataset commit `0cf258a4`, the script's default.
+That supplementary benchmark is the audit's draw
 (seed 20260928: 200 npm and 200 PyPI malicious-intent packages, 100
 compromised npm releases and every compromised PyPI release): 517 releases
 there. The holdout is a new draw of the shape of Sept 30's, whose draw was
@@ -340,8 +340,12 @@ nor the audit's benchmark holds: the detectors were written from the
 audit's, so the clone needs the audit's commit, `b302ad0b`, in its history
 (a shallow clone gets it, without the old samples, from `git fetch
 --unshallow --filter=blob:none origin`). The first runs on them are the
-baselines. `--commit b302ad0b` gives the audit's benchmark, the 516 releases
-0.1.9's figures were measured on; another commit draws new sets there, and
+baselines. `--commit b302ad0b` gives the canonical audit benchmark: 516
+releases are selected, 513 have files to scan, and the three expected empty
+samples (`bolym@1.0`, `detectron2@0.6` and `requestsx@0.1.2`) are recorded in
+`skipped.json`. Report both the strict verdicts out of 513 scanned artifacts
+and out of 516 selected releases, counting those three as misses for
+comparison with the historical table. Another commit draws new sets there, and
 the script prints the commit to give again. Each sample is read in memory
 from git and written as its registry serves the release (the September
 harness's rules: the folder with the dataset's `package_info`, never an
