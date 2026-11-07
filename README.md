@@ -1,6 +1,6 @@
 # Lazaret
 
-Static security & quality analysis for Python, JavaScript, and SQL — a lightweight toolkit. No dependencies at all: it runs on the Python standard library and its own native engine (Rust, no external crates), or in any browser, and even building it downloads nothing.
+Static security & quality analysis for Python, JavaScript, TypeScript, and SQL, plus credential, Trojan Source, and hidden-content checks for Go and Rust — a lightweight toolkit. No dependencies at all: it runs on the Python standard library and its own native engine (Rust, no external crates), or in any browser, and even building it downloads nothing.
 
 ## Install
 

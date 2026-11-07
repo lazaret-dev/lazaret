@@ -1,7 +1,8 @@
 # lazaret (npm)
 
-Quarantine for your dependencies: security & quality scanner for Python and
-JavaScript projects.
+Quarantine for your dependencies: security & quality scanner for Python,
+JavaScript, TypeScript and SQL projects, with credential, token, Trojan Source
+and hidden-content checks for Go and Rust.
 
 Its scanning runs in Lazaret's native engine, written in Rust and compiled
 to WebAssembly (`native/lazaret.wasm`, in the package: nothing to compile at
@@ -9,8 +10,8 @@ install, no native addon, no dependency), the same engine the Python
 package's platform wheels carry: every pattern rule, the obfuscation, entropy
 and secret detection, the supply-chain tests, the intra-file taint, SQL-sink
 and function passes (since 0.1.9), and the cross-file taint passes, for
-JavaScript and for Python files alike (`X-*` findings: a request value passed
-into a function, in the same or another file, whose parameter reaches a sink
+JavaScript, TypeScript and Python files alike (`X-*` findings: a request value
+passed into a function, in the same or another file, whose parameter reaches a sink
 — directly or through the local variables that hold it — or a helper's
 returned request value reaching one; a proven RegExp's `exec()` is not a
 command sink; calls bind through `require()`/`import` to the function the

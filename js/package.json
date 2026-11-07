@@ -1,7 +1,7 @@
 {
   "name": "lazaret",
   "version": "0.1.9",
-  "description": "Quarantine for your dependencies: supply-chain security for Python and JavaScript packages.",
+  "description": "Zero-dependency scanner for Python, JavaScript, TypeScript and SQL, plus credential and supply-chain checks for Go and Rust.",
   "type": "module",
   "bin": {
     "lazaret": "bin/lazaret.js"
