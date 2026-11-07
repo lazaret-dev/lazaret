@@ -36,6 +36,7 @@ From a checkout, `pip install ./python` (or `pip install -e ./python` for develo
 | `lazaret hook` (`lazaret.scanner.hook`) | Commit-time gate: credentials, vulnerabilities and supply-chain threats in the files being committed, as staged; a pre-commit hook |
 | `lazaret-mcp` (`lazaret.mcp`) | MCP server: lets Claude scan code and changes via tools |
 | `lazaret/web/lazaret.html` | Web dashboard: paste code or upload files or a folder, scan in the browser |
+| `website/` | Reviewed static source for [lazaret.dev](https://lazaret.dev) |
 | `lazaret.pg` | PostgreSQL client used for the registry state DB (pure stdlib) |
 | `lazaret.safexml` | Safe XML parsing (a defusedxml-style layer over the stdlib) |
 | `examples/` | Taint-spec template and MCP client configuration template |
