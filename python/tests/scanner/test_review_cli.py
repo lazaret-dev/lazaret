@@ -25,7 +25,7 @@ import unittest
 from unittest import mock
 
 from tests import _support
-from lazaret.scanner import core
+from lazaret.scanner import _native, core, engine
 
 PY = sys.executable
 
@@ -173,22 +173,22 @@ class PerFileErrors(unittest.TestCase):
     def test_one_file_exception_becomes_a_finding(self):
         root = make_tree({"a.py": "eval(x)\n", "boom.py": "x = 1\n", "package.json": "{}"})
         self.addCleanup(shutil.rmtree, root, True)
-        real, real_after_rules = core.scan_file, core.scan_file_after_rules
+        real, real_issues = core.scan_file, engine.scan_issues
 
-        # boom.py's scan raises with either engine: in core's scan_file (the
-        # Python engine's, and each file's own retry after a batch fails), or
-        # in the part of it core runs after the native engine's rules
+        # boom.py's scan raises: in the batch (where its answer becomes its
+        # issues), and then in its own scan, which each file of a batch that
+        # failed gets
         def scan_file(path, content, lang, dep=False):
             if path == "boom.py":
                 raise RecursionError("maximum recursion depth exceeded")
             return real(path, content, lang, dep=dep)
 
-        def scan_file_after_rules(path, content, lang, rules):
+        def scan_issues(path, content, lang, name, answer):
             if path == "boom.py":
                 raise RecursionError("maximum recursion depth exceeded")
-            return real_after_rules(path, content, lang, rules)
+            return real_issues(path, content, lang, name, answer)
         with mock.patch.object(core, "scan_file", scan_file), \
-                mock.patch.object(core, "scan_file_after_rules", scan_file_after_rules), \
+                mock.patch.object(engine, "scan_issues", scan_issues), \
                 mock.patch.object(core, "scan_manifest", side_effect=ValueError("bad")):
             res = core.scan_project(root)
         errs = {i["file"]: i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"}
@@ -199,14 +199,14 @@ class PerFileErrors(unittest.TestCase):
         self.assertIn("S-EVAL-PY", {i["rule"] for i in res["issues"] if i["file"] == "a.py"})
         self.assertFalse(res["pass"])                   # a file not scanned can't pass
 
-    def test_metrics_survive_a_file_the_lexer_cannot_read(self):
-        real = core.comment_mask
+    def test_metrics_survive_a_file_the_engine_cannot_read(self):
+        # (each file's metrics are the engine's since Q-1 step 4: a file it gives no answer for counts as code)
+        real = engine.call_answers
 
-        def comment_mask(lines, lang, jsx=True):
-            if any("z = 3" in l for l in lines):
-                raise RecursionError("maximum recursion depth exceeded")
-            return real(lines, lang, jsx)
-        with mock.patch.object(core, "comment_mask", comment_mask):
+        def call_answers(calls, texts=None):
+            return [_native.NativeError("boom") if "z = 3" in text else answer
+                    for (_name, _args, text), answer in zip(calls, real(calls, texts))]
+        with mock.patch.object(engine, "call_answers", call_answers):
             metrics = core.compute_metrics([{"path": "a.py", "content": "# note\nx = 1\n", "lang": "py"},
                                             {"path": "boom.py", "content": "# note\ny = 2\nz = 3\n", "lang": "py"}])
         self.assertEqual((metrics["ncloc"], metrics["comments"]), (4, 1))     # boom.py: every line is code

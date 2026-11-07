@@ -41,18 +41,33 @@ fn rules(out: &[Out]) -> Vec<&'static str> {
         .collect()
 }
 
+/// `f` on a thread with the stack the frame tests' readings take, which
+/// recurse as deep as flow.py's frames (DBG-STACK). Measured (RUST_MIN_STACK
+/// bisected to 16 KiB, Oct 17): the chain of 987 binary operators takes
+/// 8,096 KiB in a debug build and 446 KiB in a release one, the `elif`
+/// chains collected to 992 frames 3,872 KiB and 384 KiB; a test thread has
+/// 2 MiB, so `cargo test` without `--release` overflowed. A debug build gets
+/// twice its deepest, a release build a test thread's 2 MiB, as before.
+fn on_a_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let kib = if cfg!(debug_assertions) { 16 * 1024 } else { 2 * 1024 };
+    let worker = std::thread::Builder::new().stack_size(kib * 1024).spawn(f).expect("a thread");
+    worker.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
 #[test]
 fn the_frames_stop_where_the_lazaret_command_stopped() {
     // flow.py, entered from the `lazaret` command, read a chain of 986
     // binary operators and stopped at 987 (Python's recursion limit)
-    let chain = |n: usize| format!("import os\n\ndef f(x):\n    os.system(x{})\n", " + x".repeat(n));
-    assert_eq!(rules(&run(&[("m.py", &chain(986))])), Vec::<&str>::new());
-    let out = run(&[("m.py", &chain(987))]);
-    assert_eq!(rules(&out), vec!["Q-FLOW-RECURSION"]);
-    match &out[0] {
-        Out::Note { path, line, .. } => assert_eq!((path.clone(), *line), (cp("m.py"), 3)),
-        o => panic!("{:?}", o),
-    }
+    on_a_stack(|| {
+        let chain = |n: usize| format!("import os\n\ndef f(x):\n    os.system(x{})\n", " + x".repeat(n));
+        assert_eq!(rules(&run(&[("m.py", &chain(986))])), Vec::<&str>::new());
+        let out = run(&[("m.py", &chain(987))]);
+        assert_eq!(rules(&out), vec!["Q-FLOW-RECURSION"]);
+        match &out[0] {
+            Out::Note { path, line, .. } => assert_eq!((path.clone(), *line), (cp("m.py"), 3)),
+            o => panic!("{:?}", o),
+        }
+    });
 }
 
 #[test]
@@ -92,15 +107,17 @@ fn collecting_a_modules_definitions_holds_frames_too() {
     // (an `elif` chain of 992, from the `lazaret` command) what it had
     // collected stayed, the rest of the module was not added, and the file
     // was noted; reading the module's code stops sooner (494)
-    let deep = |n: usize| format!("import os\nif a: pass\n{}def sink_fn(x):\n    os.system(x)\n", "elif b: pass\n".repeat(n));
-    let app = "from flask import request\nfrom deep import sink_fn\n\ndef v():\n    sink_fn(request.args['q'])\n";
-    let notes = |out: &[Out]| rules(out).into_iter().filter(|r| *r != "issue").collect::<Vec<_>>();
-    let out = run(&[("deep.py", &deep(493)), ("app.py", app)]);
-    assert_eq!(rules(&out), vec!["issue"]);
-    let out = run(&[("deep.py", &deep(494)), ("app.py", app)]);
-    assert_eq!((rules(&out).contains(&"issue"), notes(&out)), (true, vec!["Q-FLOW-RECURSION"]));
-    let out = run(&[("deep.py", &deep(991)), ("app.py", app)]);
-    assert_eq!((rules(&out).contains(&"issue"), notes(&out)), (true, vec!["Q-FLOW-RECURSION"]));
-    let out = run(&[("deep.py", &deep(992)), ("app.py", app)]);
-    assert_eq!(rules(&out), vec!["Q-FLOW-RECURSION"]);
+    on_a_stack(|| {
+        let deep = |n: usize| format!("import os\nif a: pass\n{}def sink_fn(x):\n    os.system(x)\n", "elif b: pass\n".repeat(n));
+        let app = "from flask import request\nfrom deep import sink_fn\n\ndef v():\n    sink_fn(request.args['q'])\n";
+        let notes = |out: &[Out]| rules(out).into_iter().filter(|r| *r != "issue").collect::<Vec<_>>();
+        let out = run(&[("deep.py", &deep(493)), ("app.py", app)]);
+        assert_eq!(rules(&out), vec!["issue"]);
+        let out = run(&[("deep.py", &deep(494)), ("app.py", app)]);
+        assert_eq!((rules(&out).contains(&"issue"), notes(&out)), (true, vec!["Q-FLOW-RECURSION"]));
+        let out = run(&[("deep.py", &deep(991)), ("app.py", app)]);
+        assert_eq!((rules(&out).contains(&"issue"), notes(&out)), (true, vec!["Q-FLOW-RECURSION"]));
+        let out = run(&[("deep.py", &deep(992)), ("app.py", app)]);
+        assert_eq!(rules(&out), vec!["Q-FLOW-RECURSION"]);
+    });
 }

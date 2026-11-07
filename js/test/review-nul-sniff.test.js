@@ -10,40 +10,18 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../src/index.js";
-import { decodeSource, textIsPlausible } from "../src/lib/encoding.js";
+import { decodeSource } from "../src/lib/encoding.js";
 
 const NUL_TOP = Buffer.from('/*\0*/eval(atob("Y29uc29sZS5sb2coMSk="))\n', "latin1");
 
-test("a NUL in the first bytes of a UTF-8 file is not taken for UTF-16", () => {
-  const dec = decodeSource(NUL_TOP);
-  assert.equal(dec.encoding, "utf-8");
-  assert.equal(dec.reported, false);
-  assert.equal(dec.text, '/*\0*/eval(atob("Y29uc29sZS5sb2coMSk="))\n');
-});
-
-test("genuine BOM-less UTF-16 (LE and BE) is still decoded and reported", () => {
-  const le = Buffer.from("import os\nos.system(input())\n", "utf16le");
-  const be = Buffer.from(le).swap16();
-  for (const [buf, enc] of [[le, "utf-16-le"], [be, "utf-16-be"]]) {
-    const dec = decodeSource(buf, { py: true });
-    assert.equal(dec.encoding, enc);
-    assert.equal(dec.reported, true);
-    assert.equal(dec.text, "import os\nos.system(input())\n");
-  }
-});
-
-test("textIsPlausible: >= 70% of the first 2048 code points are printable ASCII / TAB / LF / CR", () => {
-  assert.equal(textIsPlausible(""), false);
-  assert.equal(textIsPlausible("a".repeat(7) + "\u4e00".repeat(3)), true);    // exactly 70%
-  assert.equal(textIsPlausible("a".repeat(69) + "\u4e00".repeat(31)), false);
-  assert.equal(textIsPlausible("\t\r\n ~"), true);
-  assert.equal(textIsPlausible("\x7f\x1f\x80"), false);
-  // characters, not UTF-16 code units (as Python counts): the first 2048
-  // code points are 600 astral + 1448 ASCII = 70.7%; the first 2048 code
-  // units would hold only 848 ASCII
-  assert.equal(textIsPlausible("\u{1F600}".repeat(600) + "a".repeat(5000)), true);
-  // only the first 2048 characters count
-  assert.equal(textIsPlausible("a".repeat(2048) + "\u4e00".repeat(10000)), true);
+// The sniff and its plausibility test are the engine's (decode/mod.rs' tests; core's through
+// tests/architecture/test_decode_engine.py); here, that the package reads files through it.
+test("decodeSource is the engine's: a NUL-top UTF-8 file stays UTF-8, BOM-less UTF-16 is read", () => {
+  const dec = decodeSource(NUL_TOP, "js");
+  assert.deepEqual([dec.info.encoding, dec.info.reported, dec.text],
+    ["utf-8", false, '/*\0*/eval(atob("Y29uc29sZS5sb2coMSk="))\n']);
+  const le = decodeSource(Buffer.from("import os\r\nos.system(input())\n", "utf16le"), "py");
+  assert.deepEqual([le.info.encoding, le.info.reported, le.text], ["utf-16-le", true, "import os\nos.system(input())\n"]);
 });
 
 test("both a NUL-top .js and a BOM-less UTF-16LE .py are scanned for what they say", () => {

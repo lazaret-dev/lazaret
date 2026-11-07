@@ -12,17 +12,18 @@ Contract (card: "CLI writes reports into CWD"):
      Overwriting a report from an earlier run of this engine is the intended
      re-scan workflow and stays allowed (--force-overwrite overrides).
 
-Imported by lazaret.scanner.core; stdlib only, unit-testable on its own.
+Imported by lazaret.scanner.core. The renderers are the engine's (report.rs, BR-7 step 4 c): a report is made in
+pieces, a frame and its findings a batch at a time, which write_report writes as they come. So are the baselines'
+fingerprints and signature (baseline.rs, BR-7 step 4 d).
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import os
 import re
 import stat
 import tempfile
+
+from lazaret.scanner import _native
 
 JSON_REPORT_NAME = "lazaret-report.json"
 HTML_REPORT_NAME = "lazaret-report.html"
@@ -69,9 +70,6 @@ BASELINE_KEY_ENV = "LAZARET_BASELINE_KEY"
 #: Report key holding the signature ({"alg": ..., "value": hex}).
 SIGNATURE_FIELD = "baselineSignature"
 SIGNATURE_ALG = "HMAC-SHA256"
-# Domain separation: the MAC input is this prefix + the canonical JSON array
-# of the sorted, de-duplicated fingerprints (ASCII-escaped, no whitespace).
-_SIGNATURE_DOMAIN = b"lazaret-baseline-v1\n"
 
 
 class ReportPathError(Exception):
@@ -239,51 +237,34 @@ def is_our_report(path, kind):
 # ---------------------------------------------------------------------------
 # Baseline fingerprints and signatures
 # ---------------------------------------------------------------------------
-def fingerprint(issue):
-    """Baseline identity of one issue: rule | path | flagged line text.
-
-    Forward slashes in the path, so a baseline written on macOS/Linux still
-    matches a Windows run (whose report paths use backslashes) and vice
-    versa. Raises KeyError/TypeError/AttributeError for a malformed entry —
-    callers skip those.
-    """
-    idx = issue["line"] - issue["snipStart"]
-    snippet = issue.get("snippet") or []
-    line_text = snippet[idx].strip() if 0 <= idx < len(snippet) else ""
-    path = str(issue["file"]).replace("\\", "/")
-    return f"{issue['rule']}|{path}|{line_text}"
-
-
-def baseline_key():
-    """The signing key from $LAZARET_BASELINE_KEY as bytes, or None if unset
-    or empty."""
-    key = os.environ.get(BASELINE_KEY_ENV)
-    if not key:
-        return None
-    return key.encode("utf-8", errors="surrogateescape")
-
-
-def _fingerprints(issues):
+def fingerprints(issues):
+    """Each finding's baseline identity, rule | path with forward slashes (portable across OSes) | its flagged line
+    stripped, or None for an entry that has none (the engine's: baseline.rs), asked a batch at a time."""
     out = []
-    for i in issues if isinstance(issues, list) else ():
-        try:
-            fp = fingerprint(i)
-        except (KeyError, TypeError, AttributeError):
-            continue
-        out.append(fp)
+    for k in range(0, len(issues), BATCH):
+        out.extend(_native.call("baseline_fingerprints", {"issues": issues[k:k + BATCH]})["fingerprints"])
     return out
 
 
-def sign_fingerprints(fingerprints, key):
-    """Hex HMAC-SHA256 over the canonical serialization of *fingerprints*:
-    a domain prefix plus the JSON array of the sorted, de-duplicated
-    fingerprints (ASCII-escaped, no whitespace). Order and duplicates do not
-    matter, and path separators are already normalized by fingerprint(), so
-    a signed baseline stays portable across machines that share the key."""
-    canon = json.dumps(sorted(set(fingerprints)), ensure_ascii=True,
-                       separators=(",", ":"))
-    return hmac.new(key, _SIGNATURE_DOMAIN + canon.encode("ascii"),
-                    hashlib.sha256).hexdigest()
+def fingerprint(issue):
+    """One finding's baseline identity (fingerprints); TypeError for an entry that has none."""
+    fp = fingerprints([issue])[0]
+    if fp is None:
+        raise TypeError("not a baseline entry (an object with rule, file, line and snipStart)")
+    return fp
+
+
+def baseline_key():
+    """The signing key, $LAZARET_BASELINE_KEY as the environment gives it, or None if unset or empty."""
+    return os.environ.get(BASELINE_KEY_ENV) or None
+
+
+def sign_fingerprints(fps, key):
+    """Hex HMAC-SHA256 over a domain prefix and the sorted, distinct fingerprints as ASCII JSON (the engine's:
+    baseline.rs); the key's UTF-8 bytes, surrogateescape (bytes: those)."""
+    if isinstance(key, bytes):
+        key = key.decode("utf-8", "surrogateescape")
+    return _native.call("baseline_sign", {"fingerprints": [f for f in fps if isinstance(f, str)], "key": key})["value"]
 
 
 def report_signature(res, key=None):
@@ -292,26 +273,9 @@ def report_signature(res, key=None):
     key = key if key is not None else baseline_key()
     if not key:
         return None
+    issues = res.get("issues")
     return {"alg": SIGNATURE_ALG,
-            "value": sign_fingerprints(_fingerprints(res.get("issues")), key)}
-
-
-def verify_signature(doc, key):
-    """(ok, reason) — does the parsed report *doc* carry a valid signature
-    for *key* over the fingerprints of its own issues?"""
-    if not isinstance(doc, dict):
-        return False, "not a JSON object"
-    sig = doc.get(SIGNATURE_FIELD)
-    if not isinstance(sig, dict) or not isinstance(sig.get("value"), str):
-        return False, "it carries no baseline signature"
-    if sig.get("alg") != SIGNATURE_ALG:
-        return False, "unsupported signature algorithm"
-    expected = sign_fingerprints(_fingerprints(doc.get("issues")), key)
-    if not hmac.compare_digest(expected, sig["value"]):
-        return False, ("its signature does not verify with "
-                       f"${BASELINE_KEY_ENV} (forged, edited, or signed "
-                       "with another key)")
-    return True, ""
+            "value": sign_fingerprints(fingerprints(issues) if isinstance(issues, list) else [], key)}
 
 
 def path_is_inside(path, root):
@@ -496,8 +460,8 @@ def write_report(path, render, kind, strict=False):
     clobber an unrelated file either.
     """
     rendered = render()
-    if isinstance(rendered, str):
-        rendered = _utf8(rendered)
+    if isinstance(rendered, (str, bytes)):
+        rendered = (rendered,)
     parent = os.path.dirname(os.path.abspath(path)) or os.curdir
     # A re-scan must keep an existing report's permissions (a 0600 report
     # used to come back 0644); a new report gets the classic 0666 & ~umask
@@ -514,7 +478,8 @@ def write_report(path, render, kind, strict=False):
     fd, tmp = tempfile.mkstemp(dir=parent, prefix=".lazaret-report-",
                                suffix=".tmp")
     try:
-        _write_all(fd, rendered)
+        for piece in rendered:                 # a report's pieces as they come (one string or bytes, or many)
+            _write_all(fd, _utf8(piece) if isinstance(piece, str) else piece)
         try:
             if hasattr(os, "fchmod"):
                 os.fchmod(fd, mode)
@@ -557,27 +522,43 @@ def _umask():
     return cur
 
 
-def mark_result(res):
-    """Copy of the scan result dict with the engine marker as first key."""
-    out = {ENGINE_MARKER: ENGINE_VERSION}
-    out.update(res)
-    return out
+#: Findings per engine call when a report is made in pieces.
+BATCH = 2000
+
+
+def framed(call, doc, args, items):
+    """A report in pieces: the engine's frame (`call` with `args`, `doc` with its findings left out in their
+    place), then `items(batch, first)` for each batch of its findings, then the rest of the frame."""
+    issues = doc.get("issues") if isinstance(doc, dict) else None
+    if isinstance(issues, list):
+        doc = dict(doc)
+        doc["issues"] = []
+    else:
+        issues = []
+    got = _native.call(call, dict(args, doc=doc, count=len(issues)))
+    yield got["head"]
+    for k in range(0, len(issues), BATCH):
+        yield items(issues[k:k + BATCH], k == 0)
+    yield got["tail"]
+
+
+def json_chunks(res, prefix=None):
+    """The JSON report in pieces: Python's json.dumps(…, indent=2) of the result with the marker as key #1 and,
+    when $LAZARET_BASELINE_KEY is set, the baseline signature as key #2 (the engine's: report.rs)."""
+    if prefix is None:
+        prefix = [[ENGINE_MARKER, ENGINE_VERSION]]
+        sig = report_signature(res)
+        if sig is not None:
+            prefix.append([SIGNATURE_FIELD, sig])
+    return framed("report_json", res, {"prefix": prefix},
+                  lambda batch, first: _native.call("report_items", {"items": batch, "level": 2, "first": first})["text"])
 
 
 def json_renderer(res):
-    """JSON report text: the result dict with the marker as key #1 and, when
-    $LAZARET_BASELINE_KEY is set, the baseline signature as key #2."""
-    out = mark_result(res)
-    sig = report_signature(res)
-    if sig is not None:
-        out = {ENGINE_MARKER: ENGINE_VERSION, SIGNATURE_FIELD: sig}
-        out.update((k, v) for k, v in res.items()
-                   if k not in (ENGINE_MARKER, SIGNATURE_FIELD))
-    return json.dumps(out, indent=2)
+    """JSON report text (json_chunks joined)."""
+    return "".join(json_chunks(res))
 
 
 def sarif_renderer(sarif):
-    """SARIF log text with the marker in a top-level property bag, first."""
-    out = {"properties": {ENGINE_MARKER: ENGINE_VERSION}}
-    out.update(sarif)
-    return json.dumps(out, indent=2)
+    """A SARIF log's text with the marker in a top-level property bag, first."""
+    return "".join(json_chunks(sarif, [["properties", {ENGINE_MARKER: ENGINE_VERSION}]]))

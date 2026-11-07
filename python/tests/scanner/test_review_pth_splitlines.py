@@ -23,7 +23,6 @@ import unittest
 
 from lazaret.scanner import core
 from tests import _support
-from tests.scanner import _dashboard_vm as dash
 
 SEPARATORS = ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
 
@@ -90,21 +89,6 @@ class ProjectScanTests(unittest.TestCase):
             p = subprocess.run([sys.executable, _support.CLI, root, "--ci", "--out-dir", out, "--quiet"],
                                capture_output=True, encoding="utf-8", errors="replace", timeout=40)
             self.assertEqual(p.returncode, 1, p.stderr)
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    def test_uploads_split_like_the_cli(self):
-        uploads = [(f"s{n}.pth", marker_line(n).encode("utf-8")) for n in range(len(SEPARATORS))]
-        uploads.append(("m.pth", "x\x85import zlib; zlib.decompress(b)\n# a\vimport a\x1cimport b\n".encode("utf-8")))
-        (page,) = dash.run([{"op": "uploadScan", "files": [
-            {"name": n, "b64": base64.b64encode(d).decode("ascii")} for n, d in uploads]}])
-        key = lambda i: json.dumps(i, sort_keys=True, ensure_ascii=False)
-        for (name, data), got in zip(uploads, page):
-            with self.subTest(file=name):
-                cli = core.pth_issues(name, data.decode("utf-8-sig", "replace"))
-                self.assertTrue(cli)
-                self.assertEqual(sorted(map(key, got)), sorted(map(key, cli)))
 
 
 if __name__ == "__main__":

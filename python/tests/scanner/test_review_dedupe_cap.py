@@ -13,14 +13,12 @@ now (core.cap_issues, the npm engine's capIssues, the dashboard's capIssues):
 * every rule that is not a security rule (S-, T-, SC-, X-, SQL-) is capped at
   200 findings per file, whatever its severity or type, with one Q-CAPPED.
 
-The dashboard (node:vm, skipped without node) is checked on the same inputs.
 All content is inert.
 """
 import json
 import unittest
 
 from lazaret.scanner import core
-from tests.scanner import _dashboard_vm as dash
 
 ONE_LINE = "try{}catch(e){}" * 130_000            # the review's 1.95 MB repro
 MANY_LINES = "try{}catch(e){}\n" * 1000
@@ -95,26 +93,6 @@ class CapTests(unittest.TestCase):
         self.assertEqual(count(issues, "B-EMPTY-CATCH"), 200)
         self.assertEqual(capped_msgs(issues), ["119800 more B-EMPTY-CATCH findings omitted"])
         self.assertLess(len(json.dumps(issues)), 200_000)                 # was ~67 MB as a report
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    """The page's engine applies the same dedupe and cap (field-by-field equal)."""
-
-    def test_same_findings_as_the_cli(self):
-        cases = [("one.js", "js", "try{}catch(e){}" * 20_000),
-                 ("many.js", "js", MANY_LINES),
-                 ("e.py", "py", "try:\n    f()\nexcept:\n    pass\n" * 250),
-                 ("d.sql", "sql", "DELETE FROM a; DELETE FROM b; DELETE FROM c;\n" * 3 + "DELETE FROM t;\n" * 250),
-                 ("s.py", "py", "cur.execute(sql % x); cur.execute(tpl.format(y))\ncur.execute(a % x); "
-                                "cur.execute(b % y)\n")]
-        page = dash.run([{"op": "scanFile", "file": {"name": n, "lang": lang, "content": c}} for n, lang, c in cases])
-        for (name, lang, content), got in zip(cases, page):
-            with self.subTest(file=name):
-                key = lambda i: json.dumps(i, sort_keys=True, ensure_ascii=False)
-                self.assertEqual(sorted(map(key, got)), sorted(map(key, core.scan_file(name, content, lang))))
-        self.assertEqual(count(page[0], "B-EMPTY-CATCH"), 1)
-        self.assertEqual(capped_msgs(page[1]), ["800 more B-EMPTY-CATCH findings omitted"])
 
 
 if __name__ == "__main__":

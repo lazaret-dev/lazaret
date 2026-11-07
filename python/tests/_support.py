@@ -20,6 +20,11 @@ SCA = os.path.join(_BIN, "sca_main.py")
 BOOTSTRAP = os.path.join(_BIN, "registry_bootstrap.py")   # registry with a faked network
 
 MAKE_BUNDLE = os.path.join(REPO_ROOT, "scripts", "make_bundle.py")
+
+# The environment of a test that fakes urllib's opener (repo._OPENER, repo._module_opener): Python's transport,
+# which the native one (NET-1, lazaret/scanner/nativenet.py) would otherwise take the request from. A test class
+# takes it with `@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)`.
+PYTHON_TRANSPORT = {"LAZARET_NETWORK": "python"}
 FLOW_SRC = os.path.join(PKG, "scanner", "flow.py")
 
 
@@ -49,6 +54,30 @@ def requires_env(var):
     return unittest.skipUnless(os.environ.get(var), f"{var} not set")
 
 
+def npm_node_tar():
+    """(node, the folder of the node-tar npm bundles) of this machine, (node, None) without it, (None, None) without
+    node. npm's folder is the npm on PATH's (its bin/npm-cli.js, links followed: the npm `npm install` runs), else the
+    one beside the node, Homebrew's libexec too, as scripts/fuzz/npm_extract.cjs finds it. (MAC-TESTS: Homebrew's npm
+    is in HOMEBREW_PREFIX/lib/node_modules and the Cellar's libexec, not beside the node its links lead to, so on such
+    a Mac the tests that compare with npm's node-tar skipped.)"""
+    import shutil
+    node = shutil.which("node")
+    if not node:
+        return None, None
+    npm = shutil.which("npm")
+    cli = os.path.realpath(npm) if npm else ""
+    bindir = os.path.dirname(os.path.realpath(node))
+    prefix = os.path.dirname(bindir)
+    folders = [os.path.dirname(os.path.dirname(cli))] if os.path.basename(cli) == "npm-cli.js" else []
+    folders += [os.path.join(prefix, "lib", "node_modules", "npm"),
+                os.path.join(prefix, "libexec", "lib", "node_modules", "npm"), os.path.join(bindir, "node_modules", "npm")]
+    for folder in folders:
+        tar = os.path.join(folder, "node_modules", "tar")
+        if os.path.isdir(tar):
+            return node, tar
+    return node, None
+
+
 def skip_unless_permissions_enforced(test):
     """For tests that make a directory unwritable with chmod and expect a
     failure. Root ignores directory permissions, and on Windows chmod can't
@@ -66,6 +95,32 @@ def skip_on_windows(reason):
     import sys
     import unittest
     return unittest.skipIf(sys.platform == "win32", reason)
+
+
+def runnable(script):
+    """The path that runs `script`, a Python file with a #! line (a test's
+    fake tool): the script itself, elsewhere than on Windows. Windows runs no
+    #! line, and a program on PATH is found only under one of PATHEXT's
+    extensions (lazaret.scanner.programs.find), so there it is a `.cmd`
+    written beside the script that runs it with this Python and its
+    arguments, and passes its exit code on (as tests/registry/
+    test_guard_editor.py's fake editor is run)."""
+    import sys
+    if sys.platform != "win32":
+        return script
+    launcher = script + ".cmd"
+    with open(launcher, "w", encoding="utf-8", newline="") as f:
+        # (`%` doubled: a batch file expands `%name%` even in quotes)
+        f.write('@echo off\r\n"{}" "{}" %*\r\n'.format(sys.executable.replace("%", "%%"), script.replace("%", "%%")))
+    return launcher
+
+
+def native_rel(rel):
+    """A root-relative path the tests write with '/' as the Python package reports a file of a tree it read from the
+    disk: os.sep-separated, a backslash on Windows (core._collect: "Paths are root-relative (os.sep separators)"). An
+    archive member's path stays '/'-separated: only the scan of a folder on the disk (a project scan, a repository's
+    checkout) reports this form."""
+    return rel.replace("/", os.sep)
 
 
 def unix_newlines(data: bytes) -> bytes:

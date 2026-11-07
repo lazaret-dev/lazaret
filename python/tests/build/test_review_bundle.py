@@ -35,7 +35,8 @@ CREDENTIALS = ["python/.npmrc", "js/.npmrc", ".github/.pypirc", "python/.envrc",
                "examples/id_ed25519.pub", "docs/.git-credentials", "python/.env.local",
                "js/cert.P12"]
 JUNK = ["python/src/lazaret/._core.py", "docs/.DS_Store", "js/node_modules/x/index.js",
-        "python/src/lazaret/__pycache__/core.cpython-312.pyc"]
+        "python/src/lazaret/__pycache__/core.cpython-312.pyc",
+        "python/src/lazaret/_native/liblazaret_native.so"]     # what pip install -e built
 STRAY = ["scripts/..t.sh", "docs/notes-to-self.txt"]
 
 

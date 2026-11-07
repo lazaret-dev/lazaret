@@ -1,11 +1,12 @@
 """The engine's Unicode normalization (NFC, NFD, NFKC and NFKD of text
 pinned to Unicode 13.0, which the match text and the look-alike rules read)
 against Python's unicodedata, on every assigned code point alone and on
-random strings of the characters composition turns on. Python's
-unicodedata is the oracle here, as Unicode's own algorithm; it is 13.0's
-where the suite runs on Python 3.10, and the tables agree for every
-assigned 13.0 character on the later ones (scripts/make_rust_tables.py
---check).
+random strings of the characters composition turns on; and its case fold
+after NFD or NFC (str.casefold(), BR-2: the registry's fold of a member's
+name, repo.case_fold). Python's unicodedata is the oracle here, as
+Unicode's own algorithm; it is 13.0's where the suite runs on Python 3.10,
+and the tables agree for every assigned 13.0 character on the later ones
+(scripts/make_rust_tables.py --check).
 """
 import random
 import unicodedata
@@ -25,13 +26,15 @@ class NormalizationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.cps = [c for c in range(0x110000) if _unicode13.assigned(c) and not 0xD800 <= c <= 0xDFFF]
 
-    def compare(self, form, texts):
+    def compare(self, form, texts, fold=False):
+        args = {"form": form, "fold": True} if fold else {"form": form}
         bad = []
         for i in range(0, len(texts), 4000):
             chunk = texts[i:i + 4000]
-            answers = _native.call("batch", {"calls": [["normalize", {"form": form}, t] for t in chunk], "threads": 2})
+            answers = _native.call("batch", {"calls": [["normalize", args, t] for t in chunk], "threads": 2})
             for t, a in zip(chunk, answers):
-                if a.get("ok") != unicodedata.normalize(form, t):
+                want = unicodedata.normalize(form, t)
+                if a.get("ok") != (want.casefold() if fold else want):
                     bad.append((form, [f"U+{ord(c):04X}" for c in t]))
                     if len(bad) >= 10:
                         return bad
@@ -42,6 +45,9 @@ class NormalizationTests(unittest.TestCase):
         for form in ("NFC", "NFD", "NFKC", "NFKD"):
             with self.subTest(form=form):
                 self.assertEqual(self.compare(form, singles), [])
+        for form in ("NFD", "NFC"):
+            with self.subTest(form=form, fold=True):
+                self.assertEqual(self.compare(form, singles, fold=True), [])
 
     def test_sequences(self):
         rnd = random.Random(15)
@@ -59,6 +65,9 @@ class NormalizationTests(unittest.TestCase):
         for form in ("NFC", "NFD", "NFKC", "NFKD"):
             with self.subTest(form=form):
                 self.assertEqual(self.compare(form, texts), [])
+        for form in ("NFD", "NFC"):
+            with self.subTest(form=form, fold=True):
+                self.assertEqual(self.compare(form, texts, fold=True), [])
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@
 module-qualified decoder (codecs.decode, zlib.decompress, marshal.loads) may
 name its module that way. Every segment ends at a '.', so matching stays
 linear. Dependency mode's decode-to-variable flow recognizes the same
-decoders. Checked in the Python engine and (project mode) the dashboard;
+decoders. Checked in the Python engine;
 js/test/review-eval-decode-import.test.js covers the npm engine. All content
 is inert: nothing is decoded or executed.
 """
@@ -17,7 +17,6 @@ import time
 import unittest
 
 from lazaret.scanner import core
-from tests.scanner import _dashboard_vm as dash
 
 FLAGGED = [
     'exec(__import__("base64").b64decode("cHJpbnQoMSk="))',
@@ -77,19 +76,6 @@ class PythonEngineTests(unittest.TestCase):
             core.scan_file("m.py", src + "\n", "py")
             core.scan_file("dep.py", src + "\n", "py", dep=True)
             self.assertLess(time.monotonic() - started, 8.0, src[:40])
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    def test_same_findings_as_the_cli(self):
-        cases = [(f"f{n}.py", src + "\n") for n, src in enumerate(FLAGGED + NOT_FLAGGED)]
-        cases.append(("multi.py", 'x = 1\nexec(\n    __import__("base64").b64decode(p))\n'))
-        page = dash.run([{"op": "scanFile", "file": {"name": n, "lang": "py", "content": c}} for n, c in cases])
-        for (name, content), got in zip(cases, page):
-            with self.subTest(file=name):
-                key = lambda i: json.dumps(i, sort_keys=True, ensure_ascii=False)
-                self.assertEqual(sorted(map(key, got)), sorted(map(key, core.scan_file(name, content, "py"))))
-        self.assertEqual(sum(bool(at(got)) for got in page), len(FLAGGED) + 1)
 
 
 if __name__ == "__main__":

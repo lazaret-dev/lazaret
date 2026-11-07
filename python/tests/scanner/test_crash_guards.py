@@ -58,16 +58,14 @@ APPEAL_JS = "var data = getUserInput();\ndangerous_sink(data);\n"
 
 
 class _EngineState:
-    """Snapshot/restore the global taint tables that apply_taint_config /
+    """Snapshot/restore the global taint state that apply_taint_config (the
+    configured part of the intra-file model, core._TAINT_CONFIGURED) and
     configure mutate, so tests cannot poison each other (same technique as
     test_taint_config_validation.py)."""
 
     def __init__(self):
         self.saved = (
-            dict(lazaret.TAINT_SOURCES),
-            {k: list(v) for k, v in lazaret.TAINT_SINKS.items()},
-            dict(lazaret._FULL_SAN),
-            copy.deepcopy(lazaret._PARTIAL_SAN),
+            copy.deepcopy(lazaret._TAINT_CONFIGURED),
             list(lazaret_flow._PY_SOURCE_EXTRA),
             list(lazaret_flow._EXTRA_PY_SINKS),
             set(lazaret_flow.FULL_SANITIZERS_PY),
@@ -79,16 +77,9 @@ class _EngineState:
         )
 
     def restore(self):
-        (srcs, sinks, full, part, pse, eps, fsp, epp, jsrc, jsinks,
-         jfull, jpart) = self.saved
-        lazaret.TAINT_SOURCES.clear()
-        lazaret.TAINT_SOURCES.update(srcs)
-        for lang, rows in sinks.items():
-            lazaret.TAINT_SINKS[lang][:] = rows
-        lazaret._FULL_SAN.clear()
-        lazaret._FULL_SAN.update(full)
-        lazaret._PARTIAL_SAN.clear()
-        lazaret._PARTIAL_SAN.update(part)
+        (configured, pse, eps, fsp, epp, jsrc, jsinks, jfull, jpart) = self.saved
+        lazaret._TAINT_CONFIGURED.clear()
+        lazaret._TAINT_CONFIGURED.update(copy.deepcopy(configured))
         lazaret_flow._PY_SOURCE_EXTRA[:] = pse
         lazaret_flow._EXTRA_PY_SINKS[:] = eps
         lazaret_flow.FULL_SANITIZERS_PY.clear()
@@ -127,20 +118,20 @@ class TestTaintConfigBadRegex(unittest.TestCase):
         self.assertTrue(lazaret.get_taint_config_warnings())
 
     def test_cli_bad_regex_records_warning_and_skips(self):
-        before = lazaret.TAINT_SOURCES["py"].pattern
+        before = lazaret.taint_args("py")
         lazaret.apply_taint_config({"python": {"sources": ["("]}})
         warns = lazaret.get_taint_config_warnings()
         self.assertEqual(len(warns), 1)
         self.assertIn("'('", warns[0])
         self.assertIn("not a valid regex", warns[0])
-        # the invalid rule was NOT applied — pattern unchanged
-        self.assertEqual(lazaret.TAINT_SOURCES["py"].pattern, before)
+        # the invalid rule was NOT applied — the configured model unchanged
+        self.assertEqual(lazaret.taint_args("py"), before)
 
     def test_cli_python_sink_bad_regex_warns_not_raises(self):
-        before = list(lazaret.TAINT_SINKS["py"])
+        before = lazaret.taint_args("py")
         lazaret.apply_taint_config({"python": {"sinks": [
             {"pattern": "(", "category": "SQL injection"}]}})
-        self.assertEqual(lazaret.TAINT_SINKS["py"], before)  # not added
+        self.assertEqual(lazaret.taint_args("py"), before)  # not added
         warns = lazaret.get_taint_config_warnings()
         self.assertEqual(len(warns), 1)
         self.assertIn("not a valid regex", warns[0])
@@ -157,32 +148,34 @@ class TestTaintConfigBadRegex(unittest.TestCase):
                         "not a valid regex" in warns[0], warns)
 
     def test_cli_sanitizer_full_bad_entry_warns_not_raises(self):
-        before = lazaret._FULL_SAN["py"].pattern
+        before = lazaret.taint_args("py")
         lazaret.apply_taint_config({"python": {"sanitizers":
                                                   {"full": [5]}}})
-        self.assertEqual(lazaret._FULL_SAN["py"].pattern, before)
+        self.assertEqual(lazaret.taint_args("py"), before)
         warns = lazaret.get_taint_config_warnings()
         self.assertTrue(any("sanitizers.full entry 5" in w for w in warns),
                         warns)
 
     def test_cli_sanitizer_partial_non_str_name_warns_not_raises(self):
-        before = copy.deepcopy(lazaret._PARTIAL_SAN)
+        before = lazaret.taint_args("py")
         # valid category, non-str name: re.escape(5) previously raised
         # TypeError (and would again if it sat outside the try/except)
         lazaret.apply_taint_config({"python": {"sanitizers":
                                                   {"partial": {5: ["SQL injection"]}}}})
-        self.assertEqual(lazaret._PARTIAL_SAN, before)
+        self.assertEqual(lazaret.taint_args("py"), before)
         warns = lazaret.get_taint_config_warnings()
         self.assertTrue(any("could not be compiled" in w for w in warns),
                         warns)
 
     def test_cli_valid_regex_still_applies(self):
         # vacuity guard: fixing crashes must not disable valid configs
-        before = lazaret.TAINT_SOURCES["py"].pattern
         lazaret.apply_taint_config({"python": {"sources": [r"my\.source\b"]}})
         self.assertEqual(lazaret.get_taint_config_warnings(), [])
-        self.assertIn("my\\.source", lazaret.TAINT_SOURCES["py"].pattern)
-        self.assertTrue(lazaret.TAINT_SOURCES["py"].pattern.startswith(before[:10]))
+        self.assertIn(r"my\.source\b", lazaret.taint_args("py")["sources"])
+        # and it is read, with the built-in sources
+        src = "import os\nx = my.source()\nos.system(x)\ny = input()\nos.system(y)\n"
+        found = {(i["rule"], i["line"]) for i in lazaret.scan_file("v.py", src, "py")}
+        self.assertTrue({("T-CMD", 3), ("T-CMD", 5)} <= found, found)
 
     def test_flow_python_sources_bad_regex_warns_not_raises(self):
         n = len(lazaret_flow._PY_SOURCE_EXTRA)

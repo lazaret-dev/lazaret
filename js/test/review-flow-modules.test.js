@@ -258,9 +258,9 @@ test("the work budget notes itself", () => {
   let src = "";
   for (let i = 0; i < 60; i++) src += `function c${i}() { return v${i + 1}; }\nvar v${i + 1} = c${i + 1}();\n`;
   src += "function c60() { return req.query.q; }\n" + "x = y + z;\n".repeat(6000) + "exec(c0());\n";
-  const t = Date.now();
+  const t = performance.now();
   const got = analyzeFlows([{ path: "a.js", content: src, lang: "js" }]);
-  assert.ok(Date.now() - t < 20000);
+  assert.ok(performance.now() - t < 20000);
   assert.deepEqual(got.map((i) => [i.rule, i.name, i.file, i.line]),
     [["Q-FLOW-INCOMPLETE", "Flow analysis incomplete (size budget)", "a.js", 1]]);
   assert.match(got[0].msg, /stopped following values at the module's own code in 'a\.js'/);
@@ -296,9 +296,9 @@ test("nested code is linear and bounded", () => {
     calls: "function runIt(c){exec(c)}\n" + "runIt(".repeat(200000) + "req.query.q" + ")".repeat(200000) + "\n",
   };
   for (const [label, src] of Object.entries(cases)) {
-    const t = Date.now();
+    const t = performance.now();
     const got = analyzeFlows([{ path: "a.js", content: src, lang: "js" }]);
-    assert.ok(Date.now() - t < 20000, label);
+    assert.ok(performance.now() - t < 20000, label);
     assert.deepEqual(got.map((i) => [i.rule, i.msg.includes("nesting too deep")]), [["Q-FLOW-SKIPPED", true]], label);
   }
 });

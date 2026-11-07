@@ -9,13 +9,18 @@ were not reported at all. Fixtures are inert strings; nothing is executed.
 import unittest
 
 from tests import _support  # noqa: F401
-from lazaret.scanner import core
+from lazaret.scanner import _native, core
 
 B64 = '"cHJpbnQoJ2hpJyk="'           # base64 of print('hi')
 
 
 def found(src, lang, dep=False):
     return {(i["rule"], i["line"]) for i in core.scan_file("x." + lang, src, lang, dep=dep)}
+
+
+def match_text(line, lang):
+    """The text the engine matches a line in (its file context: filectx.rs)."""
+    return _native.call("file_context", {"lang": lang}, line)[0][2]
 
 
 class PythonNFKCTests(unittest.TestCase):
@@ -34,10 +39,9 @@ class PythonNFKCTests(unittest.TestCase):
         issue = next(i for i in core.scan_file("x.py", src, "py") if i["rule"] == "S-OSCMD-PY")
         self.assertIn("\uff53\uff59\uff53", issue["snippet"][1])
 
-    def test_ascii_lines_are_not_copied(self):
-        lines = ["x = 1", "y = 2"]
-        ctx = core._FileCtx(lines, "py")
-        self.assertIs(ctx.mlines[0], lines[0])
+    def test_match_text_is_nfkc(self):
+        self.assertEqual(match_text("x = 1", "py"), "x = 1")
+        self.assertEqual(match_text("os.\uff53\uff59\uff53\uff54\uff45\uff4d(input())", "py"), "os.system(input())")
 
 
 class JavaScriptEscapeTests(unittest.TestCase):
@@ -57,16 +61,14 @@ class JavaScriptEscapeTests(unittest.TestCase):
         self.assertIn(("T-CMD", 2), got)
 
     def test_escapes_inside_string_literals_are_not_decoded(self):
-        ctx = core._FileCtx(['var s = "\\u0065val(x)"; t = \'\\u0065\'; \\u0065val(y);'], "js")
-        self.assertEqual(ctx.mlines[0], 'var s = "\\u0065val(x)"; t = \'\\u0065\'; eval(y);')
+        self.assertEqual(match_text('var s = "\\u0065val(x)"; t = \'\\u0065\'; \\u0065val(y);', "js"),
+                         'var s = "\\u0065val(x)"; t = \'\\u0065\'; eval(y);')
 
     def test_quote_inside_regex_literal_does_not_hide_escape(self):
-        ctx = core._FileCtx(["x = /'/; \\u0065val(y);"], "js")
-        self.assertEqual(ctx.mlines[0], "x = /'/; eval(y);")
+        self.assertEqual(match_text("x = /'/; \\u0065val(y);", "js"), "x = /'/; eval(y);")
 
     def test_non_identifier_escapes_left_alone(self):
-        ctx = core._FileCtx(["a\\u0028b\\u{110000}c"], "js")
-        self.assertEqual(ctx.mlines[0], "a\\u0028b\\u{110000}c")
+        self.assertEqual(match_text("a\\u0028b\\u{110000}c", "js"), "a\\u0028b\\u{110000}c")
 
 
 class BidiTests(unittest.TestCase):

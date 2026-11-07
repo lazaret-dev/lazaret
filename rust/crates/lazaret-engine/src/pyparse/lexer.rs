@@ -185,6 +185,7 @@ pub const MAX_FSTRINGS: usize = 150;
 pub const MAX_SPECS: usize = 2;
 
 /// The tokens of a text, and what the parser and the tree need besides.
+#[derive(Clone)]
 pub struct Lexed {
     pub toks: Vec<Tok>,
     pub strings: Strings,
@@ -273,9 +274,41 @@ fn is_hex(c: u32) -> bool {
 /// (ASCII letters, digits, `_`, and any non-ASCII character: those are
 /// checked once the identifier is read).
 #[inline]
-fn ident_char(c: u32) -> bool {
-    c >= 0x80 || c == 0x5F || is_digit(c) || (0x41..=0x5A).contains(&c) || (0x61..=0x7A).contains(&c)
+pub(crate) fn ident_char(c: u32) -> bool {
+    c >= 0x80 || IDENT_ASCII[c as usize]
 }
+
+/// The ASCII characters a name holds: `_`, digits and letters (P-1: a table rather than four comparisons a character).
+const IDENT_ASCII: [bool; 128] = {
+    let mut t = [false; 128];
+    let mut c = 0;
+    while c < 128 {
+        t[c] = c == 0x5F || (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A);
+        c += 1;
+    }
+    t
+};
+
+/// The keyword a name is, by its index in KEYWORDS (P-1: none is longer than eight characters, and only some letters
+/// start one).
+pub(crate) fn keyword(text: &[u32]) -> Option<usize> {
+    let first = *text.first()?;
+    if text.len() > 8 || first >= 128 || KEYWORD_FIRSTS & (1u128 << first) == 0 {
+        return None;
+    }
+    KEYWORDS.iter().position(|kw| kw.len() == text.len() && kw.bytes().zip(text).all(|(a, &b)| a as u32 == b))
+}
+
+/// The first characters of the keywords.
+const KEYWORD_FIRSTS: u128 = {
+    let mut m = 0u128;
+    let mut i = 0;
+    while i < KEYWORDS.len() {
+        m |= 1u128 << KEYWORDS[i].as_bytes()[0];
+        i += 1;
+    }
+    m
+};
 
 #[inline]
 fn ident_start(c: u32) -> bool {
@@ -307,6 +340,35 @@ pub fn line_starts(src: &[u32]) -> Vec<u32> {
 /// what Python cannot encode (a lone surrogate, a value beyond U+10FFFF).
 pub fn tokenize(src: &[u32]) -> Result<Lexed, LexError> {
     tokenize_with(src, false)
+}
+
+/// (P-1) [`tokenize`]'s reading of `src`, made once while a gate is open for `src` (textgate::memo): the parser's
+/// tokens, which the decoded view's lexer (lex/py.rs) and the import-time test's loading (signs.rs) read too, and the
+/// supply-chain model's thread is given (pyflow::supply::facts).
+pub fn shared(src: &[u32]) -> std::sync::Arc<Result<Lexed, LexError>> {
+    crate::textgate::memo(src, "py-lexed", || std::sync::Arc::new(tokenize(src)))
+}
+
+/// Would [`tokenize_with`]`(src, true)` read `src` otherwise than `lexed` (`tokenize(src)`'s reading, which read it
+/// whole) does: does a name that a `t` prefix could be (at most two ASCII characters, a `t` among them) stand right
+/// before a quote? Up to the first such name the two read alike; past it only `tokenize_with` says.
+pub fn t_prefix_in(src: &[u32], lexed: &Lexed) -> bool {
+    lexed.toks.iter().any(|t| {
+        t.t == T::Name && t.e.saturating_sub(t.s) <= 2 && {
+            let w = &src[(t.s as usize).min(src.len())..(t.e as usize).min(src.len())];
+            w.iter().all(|&c| c < 0x80) && w.iter().any(|&c| c | 0x20 == 0x74) && matches!(src.get(t.e as usize), Some(&0x22) | Some(&0x27))
+        }
+    })
+}
+
+/// [`tokenize_with`]`(src, true)`: [`shared`]'s reading where the two read alike (one that refuses the text says
+/// nothing of the other: `t"{'"'}"` is a template string, but no plain reading).
+pub fn shared_with_tstrings(src: &[u32]) -> std::sync::Arc<Result<Lexed, LexError>> {
+    let shared = shared(src);
+    match &*shared {
+        Ok(l) if !t_prefix_in(src, l) => shared,
+        _ => std::sync::Arc::new(tokenize_with(src, true)),
+    }
 }
 
 /// `tokenize`, and with `tstrings` a `t` prefix (`t`, `tr`, `rt`) begins a
@@ -661,7 +723,7 @@ impl<'a> Lexer<'a> {
             }
         }
         if ascii {
-            if let Some(k) = KEYWORDS.iter().position(|kw| kw.len() == text.len() && kw.bytes().zip(text).all(|(a, &b)| a as u32 == b)) {
+            if let Some(k) = keyword(text) {
                 self.push(T::Kw, k as u8, start, end, 0);
                 return Ok(());
             }

@@ -25,8 +25,8 @@ PyPI releases, and the detections that must survive the fixes.
    most-installed PyPI packages. Now only marshalled bytecode that is run, or
    that comes from bytes embedded or decoded in the code, is SC-MARSHAL.
 
-The npm engine and the dashboard run the same inputs through
-tests/architecture/test_js_parity.py and test_review_dashboard_parity.py.
+The npm engine runs the same inputs through
+tests/architecture/test_js_parity.py (and the dashboard runs the npm engine).
 Fixtures are inert strings; nothing is executed.
 """
 import unittest

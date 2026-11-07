@@ -148,6 +148,13 @@ fn which_error_python_reports() {
     // (not inside an f-string; a string's escapes are the parser's)
     assert_eq!(error("a b\nf'{x!}'\n").0, 1);
     assert_eq!(error("a b\n'\\N{NOSUCH}'\n").0, 1);
+    // a string Python cannot decode is its error as its parser takes the token, before its tokenizer reads on: a
+    // backslash after it then makes a bracket opened on a line before "never closed", and on its own line it stands
+    assert_eq!(error("x = [\"a\",\n  \"\\U0001F60\\\", \"\\U0001D41A\", \"c\"]\n"),
+               (1, "'[' was never closed".to_string()));
+    assert_eq!(error("x = (\"a\",\n b\"\\xZZ\" \\q)\n"), (1, "'(' was never closed".to_string()));
+    assert_eq!(error("x = [\"\\U0001F60\\\", \"\\U0001D41A\", \"c\"]\n"),
+               (1, "truncated \\UXXXXXXXX escape".to_string()));
     // a bracket left open on a line before is reported
     assert_eq!(error("x = (1,\n2 3\n"), (1, "'(' was never closed".to_string()));
     // `$`, `?`, a backquote: tokens the parser refuses
@@ -166,6 +173,11 @@ fn which_error_python_reports() {
     // whatever follows), a value missing after `:` (at the `:`)
     assert_eq!(error("x = {'a': 1,\n 'b' c}"), (2, "':' expected after dictionary key".to_string()));
     assert_eq!(error("{1: 1,\n 2 if 3}").0, 2);
+    // … and in an expression right after a `with` item's target, which
+    // Python's error pass reads as an expression
+    assert_eq!(error("with a as b{t:\n c,\n d = f}:\n pass"), (3, "':' expected after dictionary key".to_string()));
+    assert_eq!(error("with (a as b c):\n pass"), (1, "invalid syntax. Perhaps you forgot a comma?".to_string()));
+    assert_eq!(error("with a as b c:\n pass"), (1, "invalid syntax".to_string()));
     assert_eq!(error("x = {'a':\n}"), (1, "expression expected after dictionary key and ':'".to_string()));
     // a statement `x, f(…)` whose call's arguments do not read: Python's
     // error pass reads from the call's `(` again (invalid_assignment), and
@@ -179,6 +191,10 @@ fn which_error_python_reports() {
     assert_eq!(error("q = p , f(a=1,\n b='x'= c=2)").0, 2);
     assert_eq!(error("p , g(x, a=1,\n h(b='x'= c=2))"), (2, "positional argument follows keyword argument".to_string()));
     assert_eq!(error("f(**k, h(b=1 =))").1, "positional argument follows keyword argument unpacking");
+    // a keyword's value followed by a comprehension's clauses that read (invalid_kwarg), at the name
+    assert_eq!(error("f(a=\n b for b in c)"), (1, meant.clone()));
+    assert_eq!(error("f(x,\n a=b for b in c if d)"), (2, meant.clone()));
+    assert_eq!(error("f(a=b for)").0, 1);
     // the expression after another: its failing trailers dropped, an error
     // inside the brackets it starts with reported
     assert_eq!(error("[u g(\n b c)]").0, 1);
@@ -321,5 +337,70 @@ fn no_input_panics() {
         let out = to_json(&src, k % 2 == 0);
         assert!(crate::json::parse_str(&out).is_ok(), "{:?}", out);
         let _ = parse(&src);
+    }
+}
+
+/// A reading of the tokenizer, to compare two by.
+fn reading(r: &Result<lexer::Lexed, lexer::LexError>) -> String {
+    match r {
+        Ok(l) => format!("{:?} {:?} {:?} {:?}", l.toks, l.line_starts, l.comments, l.fail),
+        Err(e) => format!("refused {:?}", e),
+    }
+}
+
+#[test]
+fn the_shared_reading_with_template_strings_is_the_tokenizers() {
+    // (P-1: lexer::shared_with_tstrings takes the parser's reading where it is the same; crafted texts, then seeded
+    // soups of pieces with every `t` prefix, quotes and f-string parts)
+    let crafted = [
+        "x = 1\n",
+        "t'a'\n",
+        "x = t\"{y}\" + 'z'\n",
+        "rt'a' tr\"b\" Rt'c' tR\"d\" T'e'\n",
+        "f\"{t'x'}\"\n",
+        "t\"{'\"'}\"\n",
+        "s = \"{'\" + t + '\"'\n",
+        "at'x' ta'y' bt'z'\n",
+        "t = 1\nprint(t, 'x')\n",
+        "x = 'unterminated\n",
+        "def f(:\n",
+        "\"\"\"doc\"\"\"\nt\n'x'\n",
+    ];
+    let pieces = [
+        "t", "T", "tr", "rt", "Rt", "tR", "f", "rf", "b", "r", "x", "at", "'", "\"", "'''", "\"\"\"", "{", "}", "{x}",
+        "!r", ":", "=", " ", "\n", "\\", "#c", "(", ")", "é", "1",
+    ];
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+    let mut soups: Vec<Vec<u32>> = crafted.iter().map(|s| cp(s)).collect();
+    for _ in 0..6000 {
+        let mut src: Vec<u32> = Vec::new();
+        for _ in 0..rng.below(24) + 1 {
+            src.extend(cp(pieces[rng.below(pieces.len())]));
+        }
+        soups.push(src);
+    }
+    for src in &soups {
+        let shared = lexer::shared_with_tstrings(src);
+        let own = lexer::tokenize_with(src, true);
+        assert_eq!(reading(&shared), reading(&own), "{:?}", src.iter().filter_map(|&c| char::from_u32(c)).collect::<String>());
+    }
+}
+
+#[test]
+fn names_and_keywords_by_table() {
+    // (P-1: lexer::ident_char's table and keyword's filter, against what they replaced)
+    for c in 0..0x300u32 {
+        let before = c >= 0x80 || c == 0x5F || (0x30..=0x39).contains(&c) || (0x41..=0x5A).contains(&c) || (0x61..=0x7A).contains(&c);
+        assert_eq!(lexer::ident_char(c), before, "{:#x}", c);
+    }
+    let before = |text: &[u32]| lexer::KEYWORDS.iter().position(|kw| kw.len() == text.len() && kw.bytes().zip(text).all(|(a, &b)| a as u32 == b));
+    for (k, kw) in lexer::KEYWORDS.iter().enumerate() {
+        assert_eq!(lexer::keyword(&cp(kw)), Some(k));
+        for name in [format!("{}x", kw), kw[1..].to_string(), format!("_{}", kw), kw.to_uppercase(), kw.to_lowercase()] {
+            assert_eq!(lexer::keyword(&cp(&name)), before(&cp(&name)), "{}", name);
+        }
+    }
+    for name in ["", "self", "x", "nonlocals", "Falsey", "\u{e9}", "y", "if_"] {
+        assert_eq!(lexer::keyword(&cp(name)), before(&cp(name)), "{}", name);
     }
 }

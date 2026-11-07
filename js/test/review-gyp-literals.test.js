@@ -63,8 +63,9 @@ test("\\N{…} escapes, by name or alias, in any case", () => {
   const [hinted] = scanGyp("binding.gyp", "{'action': ['ba\\N{LATIN SMALL LETTER LONG S}e64']}");
   assert.deepEqual([hinted.sev, hinted.cmd, hinted.msg.includes("runs a download or evaluation command")], ["MAJOR", "ba\u017fe64", true]);
   for (const bad of ["'\\N{}'", "'\\N{ A}'", "'\\N{LATIN  SMALL LETTER A}'", "'\\N'", "'\\N{A'"]) assert.deepEqual(cmd(bad), UNPARSEABLE, bad);
-  // a well-formed name outside pynames.js's table is accepted (it may be valid for Python), as U+FFFD
-  assert.deepEqual(cmd("'\\N{GREEK SMALL LETTER ALPHA}'"), ["\ufffd"]);
+  // any name Python knows (the engine's Python parser reads them all), and none it does not
+  assert.deepEqual(cmd("'\\N{GREEK SMALL LETTER ALPHA}'"), ["\u03b1"]);
+  assert.deepEqual(cmd("'\\N{NO SUCH CHARACTER NAME}'"), UNPARSEABLE);
 });
 
 test("line breaks, whitespace and NUL as Python's tokenizer reads them", () => {

@@ -107,22 +107,27 @@ def _uleb(n):
 
 def export_trie(names):
     """A dyld export trie as ld64 writes one: the names' shared prefix on one
-    edge from the root, then an edge per name (all offsets below 128)."""
+    edge from the root, then an edge per name (offsets in ULEB128, one byte
+    or more: each node's place depends on the lengths before it, so they are
+    settled by going round until they hold)."""
     prefix = os.path.commonprefix(list(names)) if len(names) > 1 else ""
     leaf = b"\x02\x00\x10\x00"                  # terminal: flags 0, address 0x10; no children
     tails = [n[len(prefix):] for n in names]
-    inner_size = 2 + sum(len(t) + 2 for t in tails)
+    root, inner_at = b"", 0
     if prefix:
-        root = b"\x00\x01" + prefix.encode() + b"\0"
-        inner_at = len(root) + 1
-        root += _uleb(inner_at)
-    else:
-        root, inner_at = b"", 0
-    leaves_at = inner_at + inner_size
-    inner = b"\x00" + bytes([len(tails)])
-    for i, tail in enumerate(tails):
-        inner += tail.encode() + b"\0" + _uleb(leaves_at + 4 * i)
-    assert len(inner) == inner_size
+        while True:
+            root = b"\x00\x01" + prefix.encode() + b"\0" + _uleb(inner_at)
+            if len(root) == inner_at:
+                break
+            inner_at = len(root)
+    leaves_at = inner_at
+    while True:
+        inner = b"\x00" + bytes([len(tails)])
+        for i, tail in enumerate(tails):
+            inner += tail.encode() + b"\0" + _uleb(leaves_at + 4 * i)
+        if inner_at + len(inner) == leaves_at:
+            break
+        leaves_at = inner_at + len(inner)
     return root + inner + leaf * len(tails)
 
 
@@ -262,6 +267,47 @@ class LinuxTests(unittest.TestCase):
         self.assertEqual(info["exports"], set(EXPORTS))             # not the import, not the local
 
 
+class MuslTests(unittest.TestCase):
+    """musllinux: musl's libc alone (Alpine names it libc.musl-<arch>.so.1, a
+    musl-gcc elsewhere libc.so: musl's loader answers for both), no symbol
+    versions, and no libgcc_s, which a minimal Alpine doesn't have."""
+    TAG = "musllinux_1_2_x86_64"
+
+    def assertRefused(self, data, words, tag=None):
+        summary, problems = run_check(data, tag or self.TAG)
+        self.assertTrue(problems, f"accepted: {summary}")
+        self.assertTrue(any(all(w in p for w in words) for p in problems), problems)
+
+    def test_a_library_that_needs_only_musl(self):
+        for needed in (("libc.musl-x86_64.so.1",), ("libc.so",), ()):
+            with self.subTest(needed=needed):
+                summary, problems = run_check(elf(needed=needed, versions={}), self.TAG)
+                self.assertEqual(problems, [])
+                self.assertIn("musl", summary)
+        aarch64 = elf(machine=183, needed=("libc.musl-aarch64.so.1",), versions={})
+        self.assertEqual(run_check(aarch64, "musllinux_1_2_aarch64")[1], [])
+
+    def test_libgcc_s_and_other_libraries(self):
+        self.assertRefused(elf(needed=("libgcc_s.so.1", "libc.musl-x86_64.so.1"), versions={}),
+                           ["libgcc_s.so.1", "unwinder"])
+        for lib in ("libstdc++.so.6", "libssl.so.3", "ld-linux-x86-64.so.2"):
+            with self.subTest(lib=lib):
+                self.assertRefused(elf(needed=("libc.musl-x86_64.so.1", lib), versions={}), [lib])
+
+    def test_a_library_linked_against_glibc(self):
+        self.assertRefused(elf(), ["GLIBC_2.28", "linked against glibc"])
+        self.assertRefused(elf(needed=("libc.so",), versions={"libc.so": ["GLIBC_2.17"]}), ["GLIBC_2.17"])
+
+    def test_the_wrong_machine_rpath_stack_and_exports(self):
+        good = {"needed": ("libc.musl-x86_64.so.1",), "versions": {}}
+        self.assertRefused(elf(machine=183, **good), ["machine 183", "x86_64"])
+        self.assertRefused(elf(etype=2, **good), ["not a shared object"])
+        self.assertRefused(elf(runpath="$ORIGIN", **good), ["RUNPATH"])
+        self.assertRefused(elf(stack_flags=7, **good), ["executable stack"])
+        self.assertRefused(elf(exports=EXPORTS[1:], **good), ["lazaret_engine_call"])
+        self.assertRefused(macho(), ["not an ELF file"])
+
+
 class MacTests(unittest.TestCase):
     TAG = "macosx_11_0_arm64"
 
@@ -361,20 +407,21 @@ class WindowsTests(unittest.TestCase):
 
 class TagAndInputTests(unittest.TestCase):
     def test_tags_this_check_does_not_know(self):
-        for tag in ("linux_x86_64", "musllinux_1_2_x86_64", "macosx_11_0_universal2", "win32", "any", ""):
+        for tag in ("linux_x86_64", "musllinux_1_2_i686", "macosx_11_0_universal2", "win32", "any", ""):
             with self.subTest(tag=tag):
                 self.assertIn("not a platform tag this check knows", run_check(elf(), tag)[1][0])
 
     def test_the_library_names_are_the_backends(self):
         backend = _support.load_script(BACKEND, "lazaret_build_for_check")
-        for tag in ("manylinux_2_28_x86_64", "manylinux_2_28_aarch64", "macosx_11_0_arm64", "macosx_10_12_x86_64",
-                    "win_amd64", "win_arm64"):
+        for tag in ("manylinux_2_28_x86_64", "manylinux_2_28_aarch64", "musllinux_1_2_x86_64",
+                    "musllinux_1_2_aarch64", "macosx_11_0_arm64", "macosx_10_12_x86_64", "win_amd64", "win_arm64"):
             with self.subTest(tag=tag):
                 self.assertEqual(check.library_name(tag), backend.native_library_name(tag))
 
     def test_damaged_files_are_problems_not_crashes(self):
-        for tag, good in (("manylinux_2_28_x86_64", elf()), ("macosx_11_0_arm64", macho()),
-                          ("win_amd64", pe())):
+        for tag, good in (("manylinux_2_28_x86_64", elf()), ("musllinux_1_2_x86_64", elf(needed=("libc.so",),
+                                                                                              versions={})),
+                          ("macosx_11_0_arm64", macho()), ("win_amd64", pe())):
             for cut in range(0, len(good), 5):
                 with self.subTest(tag=tag, cut=cut):
                     self.assertTrue(run_check(good[:cut], tag)[1])
@@ -424,18 +471,26 @@ class BuiltLibraryTests(unittest.TestCase):
             arch = {62: "x86_64", 183: "aarch64"}.get(info["machine"])
             if arch is None:
                 self.skipTest(f"ELF machine {info['machine']}")
-            glibc = max(check._dotted(v.partition("_")[2]) for names in info["versions"].values()
-                        for v in names if v.startswith("GLIBC_"))
-            self.assertEqual(run_check(data, f"manylinux_{glibc[0]}_{glibc[1]}_{arch}")[1], [])
-            if glibc[1] > 17:
-                older = run_check(data, f"manylinux_{glibc[0]}_{glibc[1] - 1}_{arch}")[1]
-                self.assertTrue(any(f"glibc {glibc[0]}.{glibc[1]}" in p for p in older), older)
+            versions = [check._dotted(v.partition("_")[2]) for names in info["versions"].values()
+                        for v in names if v.startswith("GLIBC_")]
+            if versions:
+                glibc = max(versions)
+                tag = f"manylinux_{glibc[0]}_{glibc[1]}_{arch}"
+                self.assertEqual(run_check(data, tag)[1], [])
+                if glibc[1] > 17:
+                    older = run_check(data, f"manylinux_{glibc[0]}_{glibc[1] - 1}_{arch}")[1]
+                    self.assertTrue(any(f"glibc {glibc[0]}.{glibc[1]}" in p for p in older), older)
+            else:                       # musl's (wheels.yml's musllinux build): no symbol versions at all
+                tag = f"musllinux_1_2_{arch}"
+                self.assertEqual(run_check(data, tag)[1], [])
+                self.assertTrue(run_check(data, f"manylinux_2_28_{arch}")[1])
         elif data[:4] == b"\xcf\xfa\xed\xfe":
             info = check.read_macho(data)
             self.assertEqual({"_" + n for n in EXPORTS} - info["exports"], set())
             arch = {0x0100000C: "arm64", 0x01000007: "x86_64"}[info["cpu"]]
             major, minor, _patch = info["minos"]
-            self.assertEqual(run_check(data, f"macosx_{major}_{minor}_{arch}")[1], [])
+            tag = f"macosx_{major}_{minor}_{arch}"
+            self.assertEqual(run_check(data, tag)[1], [])
         elif data[:2] == b"MZ":
             info = check.read_pe(data)       # CI's test build links the C runtime dynamically: no policy here
             self.assertEqual(info["exports"] & set(EXPORTS), set(EXPORTS))
@@ -445,8 +500,6 @@ class BuiltLibraryTests(unittest.TestCase):
             self.fail("not an ELF, Mach-O or PE file")
         # --load, in a process of its own (_native keeps the first library it loads): the
         # library loads here, reports the package's version and gives its known answer
-        tag = (f"manylinux_{glibc[0]}_{glibc[1]}_{arch}" if data[:4] == b"\x7fELF"
-               else f"macosx_{major}_{minor}_{arch}")
         env = {k: v for k, v in os.environ.items() if not k.startswith("LAZARET_")}
         p = subprocess.run([sys.executable, SCRIPT, str(_built_library()), tag, "--load"], capture_output=True,
                            encoding="utf-8", errors="replace", env=env, timeout=40)
@@ -457,7 +510,7 @@ class BuiltLibraryTests(unittest.TestCase):
 class DistTests(unittest.TestCase):
     """The release's Python files: built here by the backend, with synthetic
     libraries that keep their tags' promises."""
-    TAGS = ("manylinux_2_28_x86_64", "macosx_11_0_arm64", "win_amd64")
+    TAGS = ("manylinux_2_28_x86_64", "musllinux_1_2_x86_64", "macosx_11_0_arm64", "win_amd64")
 
     @classmethod
     def setUpClass(cls):
@@ -466,7 +519,8 @@ class DistTests(unittest.TestCase):
         cls.backend = _support.load_script(BACKEND, "lazaret_build_for_dist")
         cls.version = cls.backend.version()
         root = pathlib.Path(cls._tmp.name)
-        cls.libraries = {"manylinux_2_28_x86_64": elf(), "macosx_11_0_arm64": macho(), "win_amd64": pe()}
+        cls.libraries = {"manylinux_2_28_x86_64": elf(), "macosx_11_0_arm64": macho(), "win_amd64": pe(),
+                         "musllinux_1_2_x86_64": elf(needed=("libc.musl-x86_64.so.1",), versions={})}
         cls.dist = root / "dist"
         cls.dist.mkdir()
         cls.backend.build_sdist(str(cls.dist))
@@ -574,6 +628,9 @@ class DistTests(unittest.TestCase):
                      lambda m: m.update({"lazaret/_native/liblazaret_native.so": newer}))
         self.assertProblem(d, ["manylinux_2_28_x86_64", "glibc 2.34"])
         d = self.copy()
+        self.rewrite(d, "musllinux_1_2_x86_64", lambda m: m.update({"lazaret/_native/liblazaret_native.so": elf()}))
+        self.assertProblem(d, ["musllinux_1_2_x86_64", "linked against glibc"])
+        d = self.copy()
         self.rewrite(d, "win_amd64", lambda m: m.update({"lazaret/_native/lazaret_native.dll": pe(machine=0xAA64)}))
         self.assertProblem(d, ["win_amd64", "machine 0xaa64"])
 
@@ -582,10 +639,15 @@ class DistTests(unittest.TestCase):
         meta = f"{dist_info}/METADATA"
 
         def plain_apache(m):
-            m[meta] = m[meta].replace(b"Apache-2.0 AND Python-2.0.1", b"Apache-2.0")
+            m[meta] = m[meta].replace(b"Apache-2.0 AND Unicode-3.0", b"Apache-2.0")
+
+        def names_cpythons_license(m):
+            m[meta] = m[meta].replace(b"License-File: NOTICE\n", b"License-File: NOTICE\nLicense-File: LICENSE-PYTHON\n")
+            m[f"{dist_info}/licenses/LICENSE-PYTHON"] = b"a license the release does not ship\n"
 
         for change, words in (
-                (plain_apache, ["License-Expression is Apache-2.0", "Python-2.0.1"]),
+                (plain_apache, ["License-Expression is Apache-2.0", "Unicode-3.0"]),
+                (names_cpythons_license, ["License-Files the release does not ship", "LICENSE-PYTHON"]),
                 (lambda m: m.pop(f"{dist_info}/licenses/NOTICE"), ["NOTICE", "not at"]),
                 (lambda m: m.update({f"{dist_info}/licenses/NOTICE": b"edited\n"}), ["NOTICE is not rust/NOTICE"]),
                 (lambda m: m.update({meta: m[meta].replace(b"Summary: ", b"Summary: Changed ")}),
@@ -596,11 +658,11 @@ class DistTests(unittest.TestCase):
                 self.assertProblem(d, ["win_amd64"] + words)
         base = f"lazaret-{self.version}/"
         d = self.copy()
-        self.rewrite_sdist(d, lambda m: m.pop(base + "LICENSE-PYTHON"))
-        self.assertProblem(d, [self.sdist(), "LICENSE-PYTHON"])
+        self.rewrite_sdist(d, lambda m: m.pop(base + "NOTICE"))
+        self.assertProblem(d, [self.sdist(), "NOTICE"])
         d = self.copy()
         self.rewrite_sdist(d, lambda m: m.update({base + "PKG-INFO": m[base + "PKG-INFO"].replace(
-            b"Apache-2.0 AND Python-2.0.1", b"Apache-2.0")}))
+            b"Apache-2.0 AND Unicode-3.0", b"Apache-2.0")}))
         self.assertProblem(d, [self.sdist(), "License-Expression is Apache-2.0"])
 
     def test_records_and_stray_files(self):

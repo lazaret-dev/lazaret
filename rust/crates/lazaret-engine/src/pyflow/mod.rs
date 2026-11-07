@@ -41,6 +41,8 @@ pub mod unparse;
 #[cfg(test)]
 mod tests;
 
+mod listing;
+
 pub use crate::jsflow::Out;
 pub use driver::{analyze, Config};
 
@@ -211,6 +213,13 @@ pub fn is_in(s: &[u32], list: &[&str]) -> bool {
 
 pub fn in_words(s: &[u32], words: &str) -> bool {
     words.split_whitespace().any(|w| pystr::eq(s, w))
+}
+
+/// [`in_words`] of [`CLEAN_RESULT`], its words split once (it is asked of
+/// every call the model resolves).
+pub fn clean_result(s: &[u32]) -> bool {
+    static WORDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    WORDS.get_or_init(|| CLEAN_RESULT.split_whitespace().collect()).iter().any(|w| pystr::eq(s, w))
 }
 
 fn cp(s: &str) -> PyStr {
@@ -699,7 +708,7 @@ pub fn dotted(t: &Tree, node: NodeId) -> PyStr {
 
 /// `dotted`, and the links of the chain it followed.
 pub fn dotted_links(t: &Tree, node: NodeId) -> (PyStr, u64) {
-    let mut parts: Vec<&[u32]> = Vec::new();
+    let mut parts: Vec<&[u32]> = Vec::with_capacity(4);
     let mut n = node;
     let mut links = 0u64;
     loop {
@@ -737,7 +746,7 @@ pub fn dotted_links(t: &Tree, node: NodeId) -> (PyStr, u64) {
             }
         }
     }
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(parts.iter().map(|p| p.len() + 1).sum());
     for (k, p) in parts.iter().rev().enumerate() {
         if k > 0 {
             out.push(0x2E);
@@ -812,6 +821,32 @@ pub fn leaves(t: &Tree, body: &[u32]) -> bool {
 
 // ---------------- the project ----------------
 
+/// (P-1) What a reading of a function read of the state that readings change: functions' summaries, classes'
+/// attributes, modules' globals, the variables functions give the defs nested in them and those defs give them back,
+/// and the environment's store (the supply-chain model). A function's next reading in the fixpoint reads as its last
+/// did when none of these changed since that one began: its answers are the same, so are the steps it takes but those
+/// of the answers kept since (`Project::first_work`), and it changes nothing.
+#[derive(Default)]
+pub struct Reads {
+    pub fns: QuickSet<FnId>,
+    pub classes: QuickSet<ClsId>,
+    pub globals: QuickSet<(ModId, NameId)>,
+    pub closures: QuickSet<FnId>,
+    pub backs: QuickSet<FnId>,
+    pub env: bool,
+}
+
+/// (P-1) When each part of that state last changed, by `Project::epoch`'s count.
+#[derive(Default)]
+pub struct Changed {
+    fns: QuickMap<FnId, u64>,
+    classes: QuickMap<ClsId, u64>,
+    globals: QuickMap<(ModId, NameId), u64>,
+    closures: QuickMap<FnId, u64>,
+    backs: QuickMap<FnId, u64>,
+    env: u64,
+}
+
 pub struct Project {
     pub mods: Vec<Module>,
     pub fns: Vec<Func>,
@@ -850,6 +885,17 @@ pub struct Project {
     pub closure_back: QuickMap<FnId, QuickMap<NameId, Taint>>,
     pub global_decls: QuickMap<FnId, Vec<NameId>>,
     pub nonlocal_decls: QuickMap<FnId, Vec<NameId>>,
+    /// (P-1) the changes to the state readings read, counted, and when each part last changed
+    pub epoch: u64,
+    changed: Changed,
+    /// (P-1) what the fixpoint's reading in progress reads, and each function's last reading there: (the count when
+    /// it began, the steps a reading like it takes, what it read)
+    pub reads: std::cell::RefCell<Option<Reads>>,
+    pub last_read: QuickMap<FnId, (u64, u64, Reads)>,
+    /// (P-1) the work of computing answers that are kept (a later reading takes none of it): how deep in such a
+    /// computation the reading is, and the work of those it made
+    first_depth: u32,
+    pub first_work: u64,
 }
 
 impl Project {
@@ -890,7 +936,128 @@ impl Project {
             closure_back: QuickMap::default(),
             global_decls: QuickMap::default(),
             nonlocal_decls: QuickMap::default(),
+            epoch: 0,
+            changed: Changed::default(),
+            reads: std::cell::RefCell::new(None),
+            last_read: QuickMap::default(),
+            first_depth: 0,
+            first_work: 0,
         }
+    }
+
+    // ---------- (P-1) what a reading reads, and when it changed ----------
+
+    #[inline]
+    pub fn note_fn(&self, g: FnId) {
+        if let Some(r) = self.reads.borrow_mut().as_mut() {
+            r.fns.insert(g);
+        }
+    }
+
+    #[inline]
+    pub fn note_class(&self, c: ClsId) {
+        if let Some(r) = self.reads.borrow_mut().as_mut() {
+            r.classes.insert(c);
+        }
+    }
+
+    #[inline]
+    pub fn note_global(&self, m: ModId, n: NameId) {
+        if let Some(r) = self.reads.borrow_mut().as_mut() {
+            r.globals.insert((m, n));
+        }
+    }
+
+    #[inline]
+    pub fn note_closure(&self, f: FnId) {
+        if let Some(r) = self.reads.borrow_mut().as_mut() {
+            r.closures.insert(f);
+        }
+    }
+
+    #[inline]
+    pub fn note_back(&self, f: FnId) {
+        if let Some(r) = self.reads.borrow_mut().as_mut() {
+            r.backs.insert(f);
+        }
+    }
+
+    #[inline]
+    pub fn note_env(&self) {
+        if let Some(r) = self.reads.borrow_mut().as_mut() {
+            r.env = true;
+        }
+    }
+
+    pub fn mark_fn(&mut self, f: FnId) {
+        self.epoch += 1;
+        self.changed.fns.insert(f, self.epoch);
+    }
+
+    pub fn mark_class(&mut self, c: ClsId) {
+        self.epoch += 1;
+        self.changed.classes.insert(c, self.epoch);
+    }
+
+    pub fn mark_global(&mut self, m: ModId, n: NameId) {
+        self.epoch += 1;
+        self.changed.globals.insert((m, n), self.epoch);
+    }
+
+    pub fn mark_closure(&mut self, f: FnId) {
+        self.epoch += 1;
+        self.changed.closures.insert(f, self.epoch);
+    }
+
+    pub fn mark_back(&mut self, f: FnId) {
+        self.epoch += 1;
+        self.changed.backs.insert(f, self.epoch);
+    }
+
+    pub fn mark_env(&mut self) {
+        self.epoch += 1;
+        self.changed.env = self.epoch;
+    }
+
+    /// The steps of a reading of `f` like its last in the fixpoint, when nothing that one read has changed since it
+    /// began (None: read it).
+    pub fn unchanged(&self, f: FnId) -> Option<u64> {
+        let (start, steps, r) = self.last_read.get(&f)?;
+        let start = *start;
+        let ch = &self.changed;
+        if r.env && ch.env > start
+            || r.fns.iter().any(|g| ch.fns.get(g).is_some_and(|&e| e > start))
+            || r.classes.iter().any(|c| ch.classes.get(c).is_some_and(|&e| e > start))
+            || r.globals.iter().any(|k| ch.globals.get(k).is_some_and(|&e| e > start))
+            || r.closures.iter().any(|g| ch.closures.get(g).is_some_and(|&e| e > start))
+            || r.backs.iter().any(|g| ch.backs.get(g).is_some_and(|&e| e > start))
+        {
+            return None;
+        }
+        Some(*steps)
+    }
+
+    /// The start of computing an answer that is kept: the work so far.
+    #[inline]
+    pub fn first_begin(&mut self) -> u64 {
+        self.first_depth += 1;
+        self.work
+    }
+
+    /// Its end (`w0`: first_begin's): its work, unless inside another, is a kept answer's.
+    #[inline]
+    pub fn first_end(&mut self, w0: u64) {
+        self.first_depth -= 1;
+        if self.first_depth == 0 {
+            self.first_work += self.work - w0;
+        }
+    }
+
+    /// (P-1) A reading of the fixpoint begins: what it reads is recorded.
+    pub fn reading_begins(&mut self) {
+        *self.reads.borrow_mut() = Some(Reads::default());
+        self.first_depth = 0;
+        self.first_work = 0;
     }
 
     /// The project name of string `sid` of module `m`'s tree.
@@ -1309,9 +1476,14 @@ impl Project {
             return Ok(hit.clone());
         }
         self.name_cache.insert((m, name), Rc::new(Vec::new()));
-        self.enter()?;
+        let w0 = self.first_begin();
+        if let Err(h) = self.enter() {
+            self.first_end(w0);
+            return Err(h);
+        }
         let r = self.resolve_name_inner(m, name, hops);
         self.leave();
+        self.first_end(w0);
         let out = Rc::new(r?);
         self.name_cache.insert((m, name), out.clone());
         Ok(out)
@@ -1424,6 +1596,13 @@ impl Project {
         if let Some(b) = &self.classes[c as usize].bases {
             return Ok(b.clone());
         }
+        let w0 = self.first_begin();
+        let r = self.bases_inner(c);
+        self.first_end(w0);
+        r
+    }
+
+    fn bases_inner(&mut self, c: ClsId) -> Result<Vec<ClsId>, Halt> {
         self.classes[c as usize].bases = Some(Vec::new());
         let (m, node) = (self.classes[c as usize].module, self.classes[c as usize].node);
         let bases: Vec<u32> = self.tree(m).list(b_(self.tree(m), node)).to_vec();
@@ -1516,6 +1695,7 @@ impl Project {
             if !seen.insert(x) {
                 continue;
             }
+            self.note_class(x);
             if let Some(v) = self.classes[x as usize].attr_taint.get(&attr) {
                 t = Some(match t {
                     None => v.clone(),
@@ -1614,7 +1794,10 @@ impl Project {
         if let Some(r) = self.call_cache.get(&(f, call)) {
             return Ok(r.clone());
         }
-        let r = Rc::new(self.resolve_call_inner(f, call)?);
+        let w0 = self.first_begin();
+        let r = self.resolve_call_inner(f, call);
+        self.first_end(w0);
+        let r = Rc::new(r?);
         self.call_cache.insert((f, call), r.clone());
         Ok(r)
     }
@@ -1734,9 +1917,15 @@ impl Project {
             return *c;
         }
         let c = eval::classify(&self.cfg, raw, canon, precise, attr);
-        self.charge(4 * (raw.len() + canon.len()) as u64);
-        if let Some(k) = key {
-            self.class_memo.insert(k, c);
+        match key {
+            Some(k) => {
+                // (kept: a later reading's is a hit, which takes no work)
+                let w0 = self.first_begin();
+                self.charge(4 * (raw.len() + canon.len()) as u64);
+                self.first_end(w0);
+                self.class_memo.insert(k, c);
+            }
+            None => self.charge(4 * (raw.len() + canon.len()) as u64),
         }
         c
     }

@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run, scanManifest, buildResult, jsonRenderer } from "../src/index.js";
 import { pyExt } from "../src/lib/binary.js";
-import { pyJsonParse, jsonErrorWhere } from "../src/lib/pyjson.js";
 import { parseArgs, pyInt } from "../src/cli.js";
 
 function scanTree(files, args = [], env = {}) {
@@ -90,18 +89,11 @@ test("source text is read in Unicode 13.0", () => {
 });
 
 // A trailing comma in a root package.json: Python 3.13+ reports it at the
-// comma ("line 3 column 21" below), 3.10-3.12 and this engine at the bracket
-// after it ("line 4 column 1"), so SC-MANIFEST-UNPARSEABLE's message depended
-// on the Python version. Both engines report the comma now, on every Python.
+// comma ("line 3 column 21" below), 3.10-3.12 at the bracket after it ("line
+// 4 column 1"), so SC-MANIFEST-UNPARSEABLE's message depended on the Python
+// version. The engine reports the comma, on every Python (its reader's cases:
+// manifest/pyjson.rs).
 test("a JSON trailing comma is reported at the comma, as Python 3.13+ does", () => {
-  const where = (text) => jsonErrorWhere(text, pyJsonParse(text).pos);
-  for (const [text, at] of [['{"a": 1,}', "line 1 column 8"], ['{"a": 1,\n}', "line 1 column 8"],
-    ["[1, ]", "line 1 column 3"], ["[1,\n\t\r ]", "line 1 column 3"], ['{"a": [[],]}', "line 1 column 10"],
-    // not a trailing comma: where every Python reports it
-    ['{"a": 1,]', "line 1 column 9"], ["[1,}", "line 1 column 4"], ["[1,,]", "line 1 column 4"],
-    ["{,}", "line 1 column 2"], ["[1,\f]", "line 1 column 4"], ['{"a": 1,', "line 1 column 9"]]) {
-    assert.equal(where(text), at, JSON.stringify(text));
-  }
   const r = scanManifest("package.json", '{\n  "name": "app",\n  "version": "1.0.0",\n}\n');
   assert.deepEqual(r.map((i) => [i.rule, i.msg]), [["SC-MANIFEST-UNPARSEABLE",
     "package.json could not be parsed (JSONDecodeError: line 3 column 21); its install hooks could not be checked."]]);
@@ -129,9 +121,9 @@ test("integer options are read as Python's int() reads them", () => {
   const line = "x = eval(y)  # abcdef\n";
   const r = scanTree({ "a.py": line }, ["--excerpt-width", "1_0", "--max-source-bytes", "2_000_000"]);
   assert.equal(r.code, 0);
-  assert.ok(r.out.includes("      » x = eval(y…"), r.out.join("\n"));
+  assert.ok(r.out.some((l) => /^ +» x = eval\(y…$/.test(l)), r.out.join("\n"));
   const neg = scanTree({ "a.py": line }, ["--excerpt-width", "-3"]);
-  assert.ok(neg.out.includes("      » x = eval(y)  # abc…"), neg.out.join("\n"));   // Python: line[:-3] + "…"
+  assert.ok(neg.out.some((l) => /^ +» x = eval\(y\) {2}# abc…$/.test(l)), neg.out.join("\n"));   // Python: line[:-3] + "…"
   const env = scanTree({ "a.py": line }, [], { LAZARET_MAX_SOURCE_BYTES: "\u0661_\u0660" });   // 10 bytes
   assert.deepEqual(env.found, ["a.py:1 SC-TRUNCATED"]);
 });
@@ -154,6 +146,6 @@ test("perFile holds every file in Python's order; dupPct is written as a float",
   for (const [dup, written] of [[100, "100.0"], [12.5, "12.5"], [33.3, "33.3"], [0, "0.0"]]) {
     res.metrics.dupPct = dup;
     assert.equal(JSON.parse(jsonRenderer(res)).metrics.dupPct, dup);
-    assert.match(jsonRenderer(res), new RegExp(`\n {4}"dupPct": ${written.replace(".", "\\.")}\n`));
+    assert.match(jsonRenderer(res), new RegExp(`\n {4}"dupPct": ${written.replace(".", "\\.")},?\n`));
   }
 });

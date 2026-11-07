@@ -19,11 +19,15 @@ pub enum D {
     Global(PyStr),
     Local,
     Unknown,
+    /// (the supply-chain model) what a call of a Node module's function
+    /// makes, or `new` of its class (`createHash('sha1')`, `http.createServer(app)`):
+    /// its methods are Node's, never the script's functions of the same name
+    Native,
 }
 
 /// How a call's targets were found: by binding only ("definite"), by name
 /// only ("open"), both ("mixed"), or none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum How {
     Definite,
     Open,
@@ -39,6 +43,21 @@ pub(crate) fn dedupe<T: Clone + Eq + std::hash::Hash>(xs: Vec<T>) -> Vec<T> {
 
 fn unknown() -> Vec<D> {
     vec![D::Unknown]
+}
+
+/// (the supply-chain model) Is a callee, by what it may be, a Node module's
+/// function or class, or a method of what one made (`crypto.createHash`,
+/// `createHash(…).update`)? What a call of it makes is D::Native.
+fn node_made(ds: &[D]) -> bool {
+    !ds.is_empty()
+        && ds.iter().all(|d| match d {
+            D::Native => true,
+            D::Builtin(b) => {
+                let root = b.split(|&c| c == 0x2E || c == 0x2F).next().unwrap_or(&[]);
+                is_in(NODE_BUILTINS, root)
+            }
+            _ => false,
+        })
 }
 
 fn dotted(a: &[u32], b: &[u32]) -> PyStr {
@@ -59,7 +78,7 @@ impl Program {
         // (a cycle reads as unknown)
         self.desc_memo.insert(b, Rc::new(unknown()));
         let writes = self.binds[b as usize].writes.clone();
-        let (bmod, bname) = (self.binds[b as usize].module, self.binds[b as usize].name.clone());
+        let (bmod, bname) = (self.binds[b as usize].module, self.names[self.binds[b as usize].name as usize].clone());
         let mut out: Vec<D> = Vec::new();
         for w in writes {
             match w {
@@ -79,7 +98,7 @@ impl Program {
                             D::Pkg(t) if self.cfg.supply.is_some() => {
                                 out.push(D::Pkg(if eq(&name, "default") { t } else { dotted(&t, &name) }))
                             }
-                            _ => out.push(D::Open(if eq(&name, "default") { bname.clone() } else { name.clone() })),
+                            _ => out.push(D::Open(if eq(&name, "default") { bname.to_vec() } else { (*name).clone() })),
                         }
                     }
                 }
@@ -109,9 +128,73 @@ impl Program {
         if out.is_empty() {
             out.push(D::Local);
         }
-        let out = Rc::new(out);
+        // (one copy of each list, however many bindings have it: BIG-BUNDLE-TAIL, memory)
+        let out = match self.desc_kept.get(&out) {
+            Some(kept) => kept.clone(),
+            None => {
+                let kept = Rc::new(out.clone());
+                self.desc_kept.insert(out, kept.clone());
+                kept
+            }
+        };
         self.desc_memo.insert(b, out.clone());
         out
+    }
+
+    /// The string a node holds: a string literal, a template with no
+    /// substitution, or (the supply-chain model) a name bound once, in its
+    /// own module, to one of those or to a sequence ending in one: what
+    /// decoding an obfuscated file leaves, `const N = 'get'; x[N](…)`,
+    /// `require(i)` with `i = 'child_process'`.
+    pub fn const_str(&self, m: ModId, node: NodeId, scope: ScopeId) -> Option<PyStr> {
+        let a = Ast(&self.mods[m as usize].tree);
+        let literal = |v: NodeId| -> Option<PyStr> {
+            if let Some(s) = a.str_value(v) {
+                return Some(s.to_vec());
+            }
+            if a.kind(v) == Kind::TemplateLiteral && a.list(v, jt::B).is_empty() {
+                return a.list(v, jt::A).first().map(|&q| a.s(q, jt::A).to_vec());
+            }
+            None
+        };
+        if let Some(s) = literal(node) {
+            return Some(s);
+        }
+        if self.cfg.supply.is_none() || a.kind(node) != Kind::Identifier {
+            return None;
+        }
+        let b = self.mods[m as usize].bind_at[node as usize];
+        let b = if b == UNSET {
+            self.lookup(scope, a.name(node))?
+        } else if b == GLOBAL {
+            return None;
+        } else {
+            b
+        };
+        let bind = &self.binds[b as usize];
+        if bind.module != m || bind.writes.len() != 1 {
+            return None;
+        }
+        match &bind.writes[0] {
+            Write::Init { node: v, path, .. } if path.is_empty() => {
+                let v = if a.kind(*v) == Kind::SequenceExpression { *a.list(*v, jt::A).last()? } else { *v };
+                literal(v)
+            }
+            _ => None,
+        }
+    }
+
+    /// A member expression's property name: a literal's (Ast::prop_name), or
+    /// a constant's (const_str: `x[N]`).
+    pub fn member_name(&self, m: ModId, node: NodeId, scope: ScopeId) -> Option<PyStr> {
+        let a = Ast(&self.mods[m as usize].tree);
+        if let Some(n) = a.prop_name(node) {
+            return Some(n);
+        }
+        if !a.computed(node) {
+            return None;
+        }
+        self.const_str(m, a.at(node, jt::B), scope)
     }
 
     /// What an expression may be.
@@ -160,36 +243,61 @@ impl Program {
                 };
                 let mut is_require = Ast(&self.mods[m as usize].tree).is_ident_named(callee, "require")
                     && self.lookup(scope, &u("require")).is_none();
-                if !is_require && self.cfg.supply.is_some() && !args.is_empty() && depth < ALIAS_DEPTH {
-                    // (the supply-chain model: require under another name —
-                    // `const r = require`, `module.require`, `const q = module.require`)
-                    is_require = self.descs_of_expr(m, callee, scope, depth + 1).iter().any(|d| match d {
-                        D::Global(g) => eq(g, "require"),
-                        D::Open(n) => eq(n, "require"),
-                        D::Builtin(b) => eq(b, "module.require"),
-                        _ => false,
-                    });
+                // (the supply-chain model: what the callee may be, read once — a chain of
+                // calls reads each link once, `w.uint32(10).string(a).uint32(18)…`)
+                let mut callee_descs: Option<Vec<D>> = None;
+                if !is_require && self.cfg.supply.is_some() && depth < ALIAS_DEPTH {
+                    // (an arrow called where it is made is what its body is, `var
+                    // __require = (() => createRequire(import.meta.url))()`)
+                    let (ck, body) = {
+                        let a = Ast(&self.mods[m as usize].tree);
+                        let ck = a.kind(callee);
+                        (ck, if ck == Kind::ArrowFunctionExpression { a.at(callee, C) } else { NONE })
+                    };
+                    if ck == Kind::ArrowFunctionExpression
+                        && body != NONE
+                        && self.mods[m as usize].tree.nodes[body as usize].kind != Kind::BlockStatement
+                    {
+                        let fscope = self.fns[self.mods[m as usize].fid_at[callee as usize] as usize].scope;
+                        return self.descs_of_expr(m, body, fscope, depth + 1);
+                    }
+                    let ds = self.descs_of_expr(m, callee, scope, depth + 1);
+                    // (createRequire makes a require)
+                    if ds.iter().any(|d| matches!(d, D::Builtin(b) if eq(b, "module.createRequire"))) {
+                        return vec![D::Builtin(u("module.require"))];
+                    }
+                    // (require under another name: `const r = require`, `module.require`,
+                    // `const q = module.require`)
+                    if !args.is_empty() {
+                        is_require = ds.iter().any(|d| match d {
+                            D::Global(g) => eq(g, "require"),
+                            D::Open(n) => eq(n, "require"),
+                            D::Builtin(b) => eq(b, "module.require"),
+                            _ => false,
+                        });
+                    }
+                    callee_descs = Some(ds);
                 }
                 if is_require && !args.is_empty() {
-                    let a = Ast(&self.mods[m as usize].tree);
                     let arg = args[0];
                     let fmod = self.fns[self.scopes[scope as usize].fid as usize].module;
-                    if let Some(v) = a.str_value(arg) {
-                        let v = v.to_vec();
+                    if let Some(v) = self.const_str(m, arg, scope) {
                         return vec![self.resolve_spec(fmod, &v)];
                     }
-                    if a.kind(arg) == Kind::TemplateLiteral && a.list(arg, B).is_empty() {
-                        let q = a.list(arg, A);
-                        let raw = q.first().map(|&e| a.s(e, A).to_vec()).unwrap_or_default();
-                        return vec![self.resolve_spec(fmod, &raw)];
-                    }
+                }
+                if !is_require && callee_descs.as_deref().is_some_and(node_made) {
+                    return vec![D::Native];
                 }
                 unknown()
             }
             Kind::NewExpression => {
                 let callee = Ast(&self.mods[m as usize].tree).at(node, A);
+                let ds = self.descs_of_expr(m, callee, scope, depth + 1);
+                if self.cfg.supply.is_some() && depth < ALIAS_DEPTH && node_made(&ds) {
+                    return vec![D::Native];
+                }
                 let mut out = Vec::new();
-                for d in self.descs_of_expr(m, callee, scope, depth + 1) {
+                for d in ds {
                     if let D::Class(c) = d {
                         out.push(D::Inst(c));
                     }
@@ -201,10 +309,7 @@ impl Program {
                 }
             }
             Kind::MemberExpression => {
-                let (name, obj) = {
-                    let a = Ast(&self.mods[m as usize].tree);
-                    (a.prop_name(node), a.at(node, A))
-                };
+                let (name, obj) = (self.member_name(m, node, scope), Ast(&self.mods[m as usize].tree).at(node, A));
                 let name = match name {
                     None => return unknown(),
                     Some(n) => n,
@@ -276,8 +381,54 @@ impl Program {
         }
     }
 
+    /// (the supply-chain model) Are a class's instances made in more than
+    /// one place: two `new` of it or of its subclasses? Its `this.x` then
+    /// is no one binding (one instance's members are not another's: every
+    /// MagicString of a bundle that makes them in its plugins), and an
+    /// instance is a container (eval.rs, sc_instance_call).
+    pub fn sc_made_widely(&mut self, c: ClassId) -> bool {
+        if self.sc_wide.is_none() {
+            let mut sites: HashMap<ClassId, u32> = HashMap::new();
+            let news: Vec<(ModId, NodeId, ScopeId)> = self
+                .fns
+                .iter()
+                .flat_map(|f| {
+                    let m = f.module;
+                    let tree = &self.mods[m as usize].tree;
+                    f.calls
+                        .iter()
+                        .filter(move |&&(n, _)| tree.nodes[n as usize].kind == Kind::NewExpression)
+                        .map(move |&(n, s)| (m, n, s))
+                })
+                .collect();
+            for (m, node, scope) in news {
+                let callee = Ast(&self.mods[m as usize].tree).at(node, jt::A);
+                let mut made: Vec<ClassId> = Vec::new();
+                for d in self.descs_of_expr(m, callee, scope, 0) {
+                    if let D::Class(mut cc) = d {
+                        for _ in 0..ALIAS_DEPTH {
+                            if made.contains(&cc) {
+                                break;
+                            }
+                            made.push(cc);
+                            match self.superclass(cc, 0) {
+                                Some(sup) => cc = sup,
+                                None => break,
+                            }
+                        }
+                    }
+                }
+                for cc in made {
+                    *sites.entry(cc).or_default() += 1;
+                }
+            }
+            self.sc_wide = Some(sites.into_iter().filter(|&(_, n)| n > 1).map(|(cc, _)| cc).collect());
+        }
+        self.sc_wide.as_ref().is_some_and(|w| w.contains(&c))
+    }
+
     /// The method a scope's code belongs to, through arrow functions.
-    fn method_fn(&self, scope: ScopeId) -> FnId {
+    pub(super) fn method_fn(&self, scope: ScopeId) -> FnId {
         let mut f = self.scopes[scope as usize].fid;
         let mut seen = 0;
         loop {
@@ -315,7 +466,7 @@ impl Program {
         match d {
             D::Mod(idx) => self.member_descs(*idx, name, depth, 0),
             D::Obj(oid) => {
-                let props: Vec<(NodeId, ScopeId)> = self.objs[*oid as usize].props.get(name).cloned().unwrap_or_default();
+                let props: Vec<(NodeId, ScopeId)> = self.obj_prop(*oid, name);
                 let om = self.objs[*oid as usize].module;
                 let mut out = Vec::new();
                 for (node, scope) in props {
@@ -351,6 +502,7 @@ impl Program {
                 }
             }
             D::Builtin(b) => vec![D::Builtin(dotted(b, name))],
+            D::Native => vec![D::Native],
             D::Global(g) if is_in(GLOBAL_OBJECTS, g) => vec![D::Builtin(dotted(g, name))],
             _ => {
                 if is_in(COMMON_METHODS, name) {
@@ -477,7 +629,7 @@ impl Program {
                 break;
             }
             seen += 1;
-            if let Some(&fid) = self.classes[cc as usize].methods.get(&u("constructor")) {
+            if let Some(&fid) = self.classes[cc as usize].methods.get(u("constructor").as_slice()) {
                 return Some(fid);
             }
             c = self.superclass(cc, 0);
@@ -487,6 +639,9 @@ impl Program {
 
     /// (project functions the call may reach, how). Memoized per call.
     pub fn call_targets(&mut self, m: ModId, call: NodeId, scope: ScopeId) -> Rc<(Vec<FnId>, How)> {
+        if self.mods[m as usize].tg_none.get(call) {
+            return self.tg_empty.clone();
+        }
         if let Some(got) = self.tg_memo.get(&(m, call)) {
             return got.clone();
         }
@@ -539,7 +694,7 @@ impl Program {
         let fids = dedupe(fids);
         let mut opens: Vec<FnId> = Vec::new();
         for name in dedupe(open_names) {
-            if let Some(cands) = self.by_name.get(&name) {
+            if let Some(cands) = self.by_name.get(name.as_slice()) {
                 if !cands.is_empty() && cands.len() <= MAX_OPEN {
                     for &c in cands {
                         if !fids.contains(&c) && !opens.contains(&c) {
@@ -562,7 +717,21 @@ impl Program {
         };
         let mut all = fids;
         all.extend(opens);
-        let out = Rc::new((all, how));
+        if all.is_empty() {
+            // (how: None)
+            self.mods[m as usize].tg_none.set(call);
+            return self.tg_empty.clone();
+        }
+        // (one copy of each answer, however many calls have it: BIG-BUNDLE-TAIL, memory)
+        let key = (all, how);
+        let out = match self.tg_kept.get(&key) {
+            Some(kept) => kept.clone(),
+            None => {
+                let kept = Rc::new(key.clone());
+                self.tg_kept.insert(key, kept.clone());
+                kept
+            }
+        };
         self.tg_memo.insert((m, call), out.clone());
         out
     }
@@ -570,10 +739,10 @@ impl Program {
     /// The bindings an import binding reads (a module's exported
     /// variables), following re-exports.
     pub fn import_targets(&mut self, b: BindId) -> Vec<BindId> {
-        if let Some(t) = &self.binds[b as usize].targets {
+        if let Some(t) = self.import_targets.get(&b) {
             return t.clone();
         }
-        self.binds[b as usize].targets = Some(Vec::new());
+        self.import_targets.insert(b, Vec::new());
         let writes = self.binds[b as usize].writes.clone();
         let bmod = self.binds[b as usize].module;
         let mut out = Vec::new();
@@ -588,7 +757,7 @@ impl Program {
             }
         }
         let out = dedupe(out);
-        self.binds[b as usize].targets = Some(out.clone());
+        self.import_targets.insert(b, out.clone());
         out
     }
 

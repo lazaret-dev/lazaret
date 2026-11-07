@@ -25,6 +25,16 @@ fn any_in(text: &[u32], needles: &pystr::Needles) -> bool {
     needles.any_in(text)
 }
 
+/// For each line of `text` no longer than `lim.long_row`, does it hold
+/// one of the strings of the write needles (false for a longer line, which
+/// is not asked): kept for the call while a gate is open for `text`, since
+/// both download tests ask it of the same text, line by line.
+fn write_lines(p: &Pack, lim: &Lim, rows: &[&[u32]], text: &[u32]) -> Vec<bool> {
+    let needles = p.needles("_DL_FILE_WRITE_NEEDLES");
+    let long_row = lim.long_row;
+    crate::textgate::memo(text, "_DL_FILE_WRITE_NEEDLES lines", || rows.iter().map(|row| row.len() <= long_row && any_in(row, needles)).collect())
+}
+
 fn in_set(set: &[PyStr], s: &[u32]) -> bool {
     set.iter().any(|x| x.as_slice() == s)
 }
@@ -443,6 +453,47 @@ fn lhs_names(p: &Pack, lhs: &[u32]) -> Vec<PyStr> {
         }
     }
     out
+}
+
+/// Is a runner call one of exec's (`exec(`, `execSync(`, `child_process.exec(`) whose first argument is a string
+/// literal, a plain command line (no `;`, `|`, `&`, `$`, `%`, `!`, `^`, `=`, globs, brackets, quotes or redirection:
+/// not Python's `exec("import os; …")` either), none of whose words is a program that runs what it is given: an
+/// interpreter, a shell or an opener (_DL_RUNNERS), a wrapper (_HOOK_WRAPPERS: `env`, `sudo`, `nice` …) or a program
+/// that runs the command its arguments name (_CMD_RUNNERS: `xargs`, `timeout`, `npx` …)? What follows that argument
+/// is the program's arguments or the call's options, which nothing reads as code (D-17: lerna's `exec("git",
+/// ["checkout", "--"].concat(files), execOpts)`). A `.` past the first word is a path, not the shell's `.`.
+fn fixed_command(p: &Pack, call: &[u32], first: &[u32]) -> bool {
+    let name = pystr::lower(pystr::rstrip_chars(call, "( \t"));
+    if !["exec", "execsync"].iter().any(|e| pystr::ends_with(&name, e)) {
+        return false;
+    }
+    let lit = pystr::strip(first);
+    let q = match lit.first() {
+        Some(&q) if q == c('"') || q == c('\'') || q == c('`') => q,
+        _ => return false,
+    };
+    if lit.len() < 3 || lit[lit.len() - 1] != q {
+        return false;
+    }
+    let inner = &lit[1..lit.len() - 1];
+    let plain = |ch: u32| !";|&$%!^*?()<>{}[]`'\"\\=\n".chars().any(|x| x as u32 == ch);
+    if !inner.iter().all(|&ch| plain(ch)) {
+        return false;
+    }
+    let runs = [p.strs("_DL_RUNNERS"), p.strs("_HOOK_WRAPPERS"), p.strs("_CMD_RUNNERS")];
+    let words = pystr::split_ws(inner);
+    for (n, &word) in words.iter().enumerate() {
+        let base = word.rsplit(|&x| x == c('/')).next().unwrap_or(word);
+        let key = pystr::lower(base);
+        let key = key.strip_suffix(u(".exe").as_slice()).unwrap_or(&key);
+        if n > 0 && pystr::eq(key, ".") {
+            continue;
+        }
+        if runs.iter().any(|set| set.iter().any(|r| r.as_slice() == key)) {
+            return false;
+        }
+    }
+    !words.is_empty()
 }
 
 fn defined_here(p: &Pack, row: &[u32], i: usize) -> bool {
@@ -1093,6 +1144,12 @@ impl<'r> Row<'r> {
             }
         }
         ends.push(close.unwrap_or(end));
+        // (a command its first argument names, given the data as the arguments after it, runs that program:
+        // lerna's `exec("git", ["checkout", "--"].concat(files), execOpts)`, its wrapper of execa; unless the
+        // program runs what it is given, D-17)
+        if !alias && starts.len() > 1 && fixed_command(p, r.group0(), pystr::sub(row, starts[0], ends[0])) {
+            return false;
+        }
         let (live, holes): (Vec<usize>, (Vec<usize>, Vec<usize>)) = match taint {
             Some(t) if self.dirty => {
                 let l = self.live(p, ph, t);
@@ -1736,13 +1793,13 @@ fn pathrun_after(p: &Pack, lim: &Lim, rows: &[&[u32]], k: usize, path: &[u32]) -
     None
 }
 
-fn written_and_run(p: &Pack, lim: &Lim, rows: &[&[u32]], is_src: &dyn Fn(&[u32]) -> bool, downloads: bool) -> Option<usize> {
+fn written_and_run(p: &Pack, lim: &Lim, text: &[u32], rows: &[&[u32]], is_src: &dyn Fn(&[u32]) -> bool, downloads: bool) -> Option<usize> {
     let mut known: HashMap<usize, bool> = HashMap::new();
     let n = rows.len();
-    let needles = p.needles("_DL_FILE_WRITE_NEEDLES");
+    let writes = write_lines(p, lim, rows, text);
     let write = p.re("_DL_FILE_WRITE_RE");
     for (k, row) in rows.iter().enumerate() {
-        if row.len() > lim.long_row || !any_in(row, needles) {
+        if !writes[k] {
             continue;
         }
         let mut near_src: Option<bool> = None;
@@ -1791,7 +1848,7 @@ pub fn downloads_and_runs(p: &Pack, text: &[u32]) -> Option<(usize, Option<PyStr
     let rows: Vec<&[u32]> = pystr::split_char(text, c('\n'));
     let source = p.pair("_DL_SOURCE");
     let is_src = |row: &[u32]| dl_finditer(source, row, 0, None).next().is_some();
-    let hit = written_and_run(p, &lim, &rows, &is_src, true)?;
+    let hit = written_and_run(p, &lim, text, &rows, &is_src, true)?;
     Some((hit + 1, run_interp(p, rows[hit])))
 }
 
@@ -1807,6 +1864,52 @@ pub fn decodes_and_runs(p: &Pack, text: &[u32]) -> Option<(usize, Option<PyStr>)
     let rows: Vec<&[u32]> = pystr::split_char(text, c('\n'));
     let decode = p.re("_DECODE_CALL_RE");
     let is_src = |row: &[u32]| decode.search(row).is_some();
-    let hit = written_and_run(p, &lim, &rows, &is_src, false)?;
+    let hit = written_and_run(p, &lim, text, &rows, &is_src, false)?;
     Some((hit + 1, run_interp(p, rows[hit])))
+}
+
+#[cfg(test)]
+mod fixed_command_tests {
+    use super::*;
+    use crate::pack;
+
+    fn cps(s: &str) -> Vec<u32> {
+        s.chars().map(|c| c as u32).collect()
+    }
+
+    #[test]
+    fn a_program_named_by_a_literal_runs_no_data() {
+        // D-17: lerna's gitCheckout, a function whose body runs git given the parameter's files as its arguments
+        let p = pack::current();
+        let names: Vec<PyStr> = ["stagedFiles", "gitOpts", "execOpts"].iter().map(|s| cps(s)).collect();
+        let kind = |body: &str| received_code_kind(&p, &cps(body), &names, &[]).map(|(_, k)| k);
+        let head = "const files = gitOpts.granularPathspec ? stagedFiles : \".\";\n";
+        assert_eq!(kind(&format!("{}return exec(\"git\", [\"checkout\", \"--\"].concat(files), execOpts);", head)), None);
+        assert_eq!(kind(&format!("{}return exec(\n  \"git\",\n  [\"checkout\"].concat(files),\n  execOpts\n);", head)), None);
+        assert_eq!(kind("return execSync('git status --porcelain', stagedFiles);"), None);
+        // (nor a command line that starts with a fixed program, as before)
+        assert_eq!(kind("return exec(\"git \" + stagedFiles);"), None);
+        // the parameter as the program, an interpreter given it: run
+        assert_eq!(kind("return exec(stagedFiles, [], execOpts);"), Some("run"));
+        assert_eq!(kind("return exec(\"node\", [\"-e\", stagedFiles]);"), Some("run"));
+        // (an interpreter reached through env is not a fixed program either)
+        assert!(!fixed_command(&p, &cps("exec("), &cps("\"/usr/bin/env python3\"")));
+        assert!(!fixed_command(&p, &cps("execSync("), &cps("'sudo node'")));
+        assert!(fixed_command(&p, &cps("exec("), &cps("\"/usr/bin/git\"")));
+        assert!(fixed_command(&p, &cps("execSync("), &cps("'git add .'")));
+        assert!(!fixed_command(&p, &cps("eval("), &cps("\"git\"")));
+        assert!(!fixed_command(&p, &cps("exec("), &cps("\"sh -c\"")));
+        assert!(!fixed_command(&p, &cps("exec("), &cps("\". ./env.sh\"")));
+        // (nor a program that runs the command its arguments name, alone or before an interpreter)
+        for line in ["\"xargs\"", "'xargs sh -c'", "\"timeout 5\"", "\"timeout 5 node\"", "\"npx\"", "'nohup'", "\"doas\""] {
+            assert!(!fixed_command(&p, &cps("exec("), &cps(line)), "{}", line);
+        }
+        // (a variable the shell expands, a glob)
+        assert!(!fixed_command(&p, &cps("exec("), &cps("\"%COMSPEC%\"")));
+        assert!(!fixed_command(&p, &cps("exec("), &cps("\"/tmp/x*\"")));
+        // (Python's exec of a literal that is code, not a command line)
+        assert!(!fixed_command(&p, &cps("exec("), &cps("\"import os; os.system(c)\"")));
+        // the data given to such a program: run
+        assert_eq!(kind("return exec(\"timeout\", stagedFiles, execOpts);"), Some("run"));
+    }
 }

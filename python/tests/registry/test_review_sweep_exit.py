@@ -67,6 +67,7 @@ class Sweep:
                 mock.patch.object(repo, "http_bytes", side_effect=http_bytes), \
                 mock.patch.object(repo, "discover_npm", return_value=list(feed)), \
                 mock.patch.object(repo, "discover_pypi", return_value=[]), \
+                mock.patch.object(repo, "discover_crates", return_value=[]), \
                 mock.patch("sys.argv", ["lazaret-registry", *argv, "--db", self.db]), \
                 contextlib.redirect_stdout(io.StringIO()) as out, \
                 contextlib.redirect_stderr(io.StringIO()) as err:

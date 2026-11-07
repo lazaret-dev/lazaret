@@ -1,14 +1,15 @@
 """linre, the native engine's linear-time regex engine (rust/…/src/linre,
 docs/RUST_ENGINE.md), against Python's re: the rule pack on the regex corpus.
 
-Every pattern of the pack linre accepts is run by both on the texts the
-pyre parity test uses (_rust_regex_corpus.py: the pattern's own words and
-the characters patterns treat specially) and on the characters re handles
-specially one by one (_linre_inputs.EDGE: ſ, K, İ, U+0085, U+00A0,
-U+001C–U+001F, astral characters, lone surrogates), at 0 and in windows
-(pos/endpos inside the text, and past each other), with and without a text
-gate: search, match, fullmatch, finditer with every group, sub and split
-answer alike. Then what linre refuses: the reasons, and linre.check.
+Every pattern of the pack is run by both (linre accepts them all: P-16)
+on the texts the pyre parity test uses (_rust_regex_corpus.py: the
+pattern's own words and the characters patterns treat specially) and on
+the characters re handles specially one by one (_linre_inputs.EDGE: ſ, K,
+İ, U+0085, U+00A0, U+001C–U+001F, astral characters, lone surrogates), at
+0 and in windows (pos/endpos inside the text, and past each other), with
+and without a text gate: search, match, fullmatch, finditer with every
+group, sub and split answer alike. Then that none of the pack is refused,
+what linre refuses of other patterns (the reasons), and linre.check.
 
 The sampled texts are test_linre_b.py's and _c's, the hand-written patterns
 _d's, linear time test_linre_linear.py's. Skipped where the native library
@@ -21,11 +22,6 @@ from lazaret.scanner import _native
 from tests.architecture import _linre_inputs as inputs
 from tests.architecture import _rust_regex_corpus as corpus
 from tests.architecture.test_rust_parity_regex import HANDWRITTEN_TEXTS, pack_patterns
-
-# why linre refuses a pattern of the pack (a backreference needs what a group
-# matched; an unbounded lookahead costs up to the rest of the text at every
-# position; a program over the size limit comes of counted repeats)
-REASONS = ("a backreference", "a lookahead of unbounded width", "too large")
 
 
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
@@ -57,15 +53,13 @@ class LinreCorpusTests(unittest.TestCase):
                 n += inputs.compare(self, src, flags, texts, gate=True, pos=7, endpos=290)
         self.assertGreater(n, 5000)
 
-    def test_most_of_the_pack_is_accepted(self):
+    def test_every_pattern_of_the_pack_is_accepted(self):
+        # P-16: none of the pack's patterns runs on sre's backtracking matcher
+        # (the engine refuses to compile one linre does not run)
         checked = inputs.checked()
         self.assertEqual(sorted(checked), sorted(name for name, _, _ in pack_patterns()))
         refused = {name: e["reason"] for name, e in checked.items() if not e["accepted"]}
-        self.assertGreater(len(checked) - len(refused), 0.9 * len(checked))
-        for name, why in refused.items():
-            with self.subTest(pattern=name):
-                self.assertNotIn("error", checked[name], f"Python's re compiles {name}")
-                self.assertTrue(why.startswith(REASONS), why)
+        self.assertEqual(refused, {})
 
     def test_check(self):
         names = [name for name, _, _ in pack_patterns()][:5] + ["NO_SUCH_PATTERN", "RULES[100000]"]
@@ -86,8 +80,8 @@ class LinreCorpusTests(unittest.TestCase):
         # a pattern Python's re rejects is an error (refused false); one
         # linre does not run, a refusal with the reason
         for src, refused, why in [
-            (r"(['\"])x\1", True, "backreference"),
-            (r"a(?=.*b)", True, "lookahead of unbounded width"),
+            (r"(\w)x\1", True, "backreference"),
+            (r"(?<=a{1001})b", True, "lookbehind wider than 1000 characters"),
             (r"(?:a{1,2000}){1,2000}", True, "too large"),
             (r"(a)?(?(1)b|c)", True, "conditional"),
             (r"(?:a*)*", True, "empty string"),

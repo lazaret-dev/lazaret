@@ -1,0 +1,1200 @@
+[
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "/home/example",
+      "/Documents"
+    ],
+    "result": "/home/example/Documents"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "/home/example",
+      ".ssh",
+      "id_ed25519"
+    ],
+    "result": "/home/example/.ssh/id_ed25519"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "/home/example",
+      "/.ssh/id_ed25519"
+    ],
+    "result": "/home/example/.ssh/id_ed25519"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "/home/example/.tool/state",
+      "../../Documents"
+    ],
+    "result": "/home/example/Documents"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "base",
+      "~"
+    ],
+    "result": "base/~"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "base",
+      "~/Documents"
+    ],
+    "result": "base/~/Documents"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "~",
+      ".."
+    ],
+    "result": "."
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "~",
+      "/Documents"
+    ],
+    "result": "~/Documents"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "C:/Users/example/Documents"
+    ],
+    "result": "C:/Users/example/.tool/state/C:/Users/example/Documents"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "D:/Users/example/Documents"
+    ],
+    "result": "C:/Users/example/.tool/state/D:/Users/example/Documents"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "/Users/example/Documents"
+    ],
+    "result": "C:/Users/example/.tool/state/Users/example/Documents"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "\\Users\\example\\Documents"
+    ],
+    "result": "C:/Users/example/.tool/state/\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "C:",
+      "relative"
+    ],
+    "result": "C:/relative"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "C:/base",
+      "c:tail"
+    ],
+    "result": "C:/base/c:tail"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "C:/base",
+      "D:tail"
+    ],
+    "result": "C:/base/D:tail"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "\\\\host\\share\\base",
+      "\\tail"
+    ],
+    "result": "\\\\host\\share\\base/\\tail"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "\\\\host\\share",
+      "..\\tail"
+    ],
+    "result": "\\\\host\\share/..\\tail"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "//host/share",
+      "../tail"
+    ],
+    "result": "/host/tail"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "//host",
+      "share"
+    ],
+    "result": "/host/share"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "/",
+      "host",
+      "share"
+    ],
+    "result": "/host/share"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "//",
+      "host",
+      "share"
+    ],
+    "result": "/host/share"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "base",
+      "",
+      "tail"
+    ],
+    "result": "base/tail"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "",
+      ""
+    ],
+    "result": "."
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "base",
+      ""
+    ],
+    "result": "base"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "base",
+      "../.."
+    ],
+    "result": ".."
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      "x",
+      "./C:/tail"
+    ],
+    "result": "x/C:/tail"
+  },
+  {
+    "api": "node.posix.join",
+    "parts": [
+      ".",
+      "a:b"
+    ],
+    "result": "a:b"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "/home/example",
+      "/Documents"
+    ],
+    "result": "\\home\\example\\Documents"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "/home/example",
+      ".ssh",
+      "id_ed25519"
+    ],
+    "result": "\\home\\example\\.ssh\\id_ed25519"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "/home/example",
+      "/.ssh/id_ed25519"
+    ],
+    "result": "\\home\\example\\.ssh\\id_ed25519"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "/home/example/.tool/state",
+      "../../Documents"
+    ],
+    "result": "\\home\\example\\Documents"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "base",
+      "~"
+    ],
+    "result": "base\\~"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "base",
+      "~/Documents"
+    ],
+    "result": "base\\~\\Documents"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "~",
+      ".."
+    ],
+    "result": "."
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "~",
+      "/Documents"
+    ],
+    "result": "~\\Documents"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "C:/Users/example/Documents"
+    ],
+    "result": "C:\\Users\\example\\.tool\\state\\C:\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "D:/Users/example/Documents"
+    ],
+    "result": "C:\\Users\\example\\.tool\\state\\D:\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "/Users/example/Documents"
+    ],
+    "result": "C:\\Users\\example\\.tool\\state\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "\\Users\\example\\Documents"
+    ],
+    "result": "C:\\Users\\example\\.tool\\state\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "C:",
+      "relative"
+    ],
+    "result": "C:\\relative"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "C:/base",
+      "c:tail"
+    ],
+    "result": "C:\\base\\c:tail"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "C:/base",
+      "D:tail"
+    ],
+    "result": "C:\\base\\D:tail"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "\\\\host\\share\\base",
+      "\\tail"
+    ],
+    "result": "\\\\host\\share\\base\\tail"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "\\\\host\\share",
+      "..\\tail"
+    ],
+    "result": "\\\\host\\share\\tail"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "//host/share",
+      "../tail"
+    ],
+    "result": "\\\\host\\share\\tail"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "//host",
+      "share"
+    ],
+    "result": "\\\\host\\share\\"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "/",
+      "host",
+      "share"
+    ],
+    "result": "\\host\\share"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "//",
+      "host",
+      "share"
+    ],
+    "result": "\\host\\share"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "base",
+      "",
+      "tail"
+    ],
+    "result": "base\\tail"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "",
+      ""
+    ],
+    "result": "."
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "base",
+      ""
+    ],
+    "result": "base"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "base",
+      "../.."
+    ],
+    "result": ".."
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      "x",
+      "./C:/tail"
+    ],
+    "result": ".\\x\\C:\\tail"
+  },
+  {
+    "api": "node.win32.join",
+    "parts": [
+      ".",
+      "a:b"
+    ],
+    "result": ".\\a:b"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "/home/example",
+      "/Documents"
+    ],
+    "result": "/Documents"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "/home/example",
+      ".ssh",
+      "id_ed25519"
+    ],
+    "result": "/home/example/.ssh/id_ed25519"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "/home/example",
+      "/.ssh/id_ed25519"
+    ],
+    "result": "/.ssh/id_ed25519"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "/home/example/.tool/state",
+      "../../Documents"
+    ],
+    "result": "/home/example/.tool/state/../../Documents"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "base",
+      "~"
+    ],
+    "result": "base/~"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "base",
+      "~/Documents"
+    ],
+    "result": "base/~/Documents"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "~",
+      ".."
+    ],
+    "result": "~/.."
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "~",
+      "/Documents"
+    ],
+    "result": "/Documents"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "C:/Users/example/Documents"
+    ],
+    "result": "C:/Users/example/.tool/state/C:/Users/example/Documents"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "D:/Users/example/Documents"
+    ],
+    "result": "C:/Users/example/.tool/state/D:/Users/example/Documents"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "/Users/example/Documents"
+    ],
+    "result": "/Users/example/Documents"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "\\Users\\example\\Documents"
+    ],
+    "result": "C:/Users/example/.tool/state/\\Users\\example\\Documents"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "C:",
+      "relative"
+    ],
+    "result": "C:/relative"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "C:/base",
+      "c:tail"
+    ],
+    "result": "C:/base/c:tail"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "C:/base",
+      "D:tail"
+    ],
+    "result": "C:/base/D:tail"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "\\\\host\\share\\base",
+      "\\tail"
+    ],
+    "result": "\\\\host\\share\\base/\\tail"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "\\\\host\\share",
+      "..\\tail"
+    ],
+    "result": "\\\\host\\share/..\\tail"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "//host/share",
+      "../tail"
+    ],
+    "result": "//host/share/../tail"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "//host",
+      "share"
+    ],
+    "result": "//host/share"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "/",
+      "host",
+      "share"
+    ],
+    "result": "/host/share"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "//",
+      "host",
+      "share"
+    ],
+    "result": "//host/share"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "base",
+      "",
+      "tail"
+    ],
+    "result": "base/tail"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "",
+      ""
+    ],
+    "result": ""
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "base",
+      ""
+    ],
+    "result": "base/"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "base",
+      "../.."
+    ],
+    "result": "base/../.."
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      "x",
+      "./C:/tail"
+    ],
+    "result": "x/./C:/tail"
+  },
+  {
+    "api": "python.posixpath.join",
+    "parts": [
+      ".",
+      "a:b"
+    ],
+    "result": "./a:b"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "/home/example",
+      "/Documents"
+    ],
+    "result": "/Documents"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "/home/example",
+      ".ssh",
+      "id_ed25519"
+    ],
+    "result": "/home/example\\.ssh\\id_ed25519"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "/home/example",
+      "/.ssh/id_ed25519"
+    ],
+    "result": "/.ssh/id_ed25519"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "/home/example/.tool/state",
+      "../../Documents"
+    ],
+    "result": "/home/example/.tool/state\\../../Documents"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "base",
+      "~"
+    ],
+    "result": "base\\~"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "base",
+      "~/Documents"
+    ],
+    "result": "base\\~/Documents"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "~",
+      ".."
+    ],
+    "result": "~\\.."
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "~",
+      "/Documents"
+    ],
+    "result": "/Documents"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "C:/Users/example/Documents"
+    ],
+    "result": "C:/Users/example/Documents"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "D:/Users/example/Documents"
+    ],
+    "result": "D:/Users/example/Documents"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "/Users/example/Documents"
+    ],
+    "result": "C:/Users/example/Documents"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "\\Users\\example\\Documents"
+    ],
+    "result": "C:\\Users\\example\\Documents"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "C:",
+      "relative"
+    ],
+    "result": "C:relative"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "C:/base",
+      "c:tail"
+    ],
+    "result": "c:/base\\tail"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "C:/base",
+      "D:tail"
+    ],
+    "result": "D:tail"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "\\\\host\\share\\base",
+      "\\tail"
+    ],
+    "result": "\\\\host\\share\\tail"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "\\\\host\\share",
+      "..\\tail"
+    ],
+    "result": "\\\\host\\share\\..\\tail"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "//host/share",
+      "../tail"
+    ],
+    "result": "//host/share\\../tail"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "//host",
+      "share"
+    ],
+    "result": "//host\\share"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "/",
+      "host",
+      "share"
+    ],
+    "result": "/host\\share"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "//",
+      "host",
+      "share"
+    ],
+    "result": "//host\\share"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "base",
+      "",
+      "tail"
+    ],
+    "result": "base\\tail"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "",
+      ""
+    ],
+    "result": ""
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "base",
+      ""
+    ],
+    "result": "base\\"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "base",
+      "../.."
+    ],
+    "result": "base\\../.."
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      "x",
+      "./C:/tail"
+    ],
+    "result": "x\\./C:/tail"
+  },
+  {
+    "api": "python.ntpath.join",
+    "parts": [
+      ".",
+      "a:b"
+    ],
+    "result": "a:b"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      "/Documents"
+    ],
+    "result": "/Documents"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      "../..",
+      "Documents"
+    ],
+    "result": "/home/example/Documents"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      "~"
+    ],
+    "result": "/home/example/.tool/state/~"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      "C:/Users/example/Documents"
+    ],
+    "result": "/home/example/.tool/state/C:/Users/example/Documents"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      "D:/Users/example/Documents"
+    ],
+    "result": "/home/example/.tool/state/D:/Users/example/Documents"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      "\\Users\\example\\Documents"
+    ],
+    "result": "/home/example/.tool/state/\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      "c:tail"
+    ],
+    "result": "/home/example/.tool/state/c:tail"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      "\\\\host\\share\\base",
+      "../tail"
+    ],
+    "result": "/home/example/.tool/state/tail"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      ""
+    ],
+    "result": "/home/example/.tool/state"
+  },
+  {
+    "api": "node.posix.resolve",
+    "parts": [
+      "/home/example/.tool/state",
+      ".",
+      "tail"
+    ],
+    "result": "/home/example/.tool/state/tail"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "/Documents"
+    ],
+    "result": "C:\\Documents"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "../..",
+      "Documents"
+    ],
+    "result": "C:\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "~"
+    ],
+    "result": "C:\\Users\\example\\.tool\\state\\~"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "C:/Users/example/Documents"
+    ],
+    "result": "C:\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "D:/Users/example/Documents"
+    ],
+    "result": "D:\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "\\Users\\example\\Documents"
+    ],
+    "result": "C:\\Users\\example\\Documents"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "c:tail"
+    ],
+    "result": "c:\\Users\\example\\.tool\\state\\tail"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      "\\\\host\\share\\base",
+      "../tail"
+    ],
+    "result": "\\\\host\\share\\tail"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      ""
+    ],
+    "result": "C:\\Users\\example\\.tool\\state"
+  },
+  {
+    "api": "node.win32.resolve",
+    "parts": [
+      "C:/Users/example/.tool/state",
+      ".",
+      "tail"
+    ],
+    "result": "C:\\Users\\example\\.tool\\state\\tail"
+  },
+  {
+    "api": "go.path.Join",
+    "parts": [
+      "/home/example",
+      "/Documents"
+    ],
+    "result": "/home/example/Documents"
+  },
+  {
+    "api": "go.path.Join",
+    "parts": [
+      "/home/example",
+      "/.ssh/id_ed25519"
+    ],
+    "result": "/home/example/.ssh/id_ed25519"
+  },
+  {
+    "api": "go.path.Join",
+    "parts": [
+      "base",
+      "~"
+    ],
+    "result": "base/~"
+  },
+  {
+    "api": "go.path.Join",
+    "parts": [
+      "base",
+      "../.."
+    ],
+    "result": ".."
+  },
+  {
+    "api": "go.path.Join",
+    "parts": [
+      "",
+      ""
+    ],
+    "result": ""
+  },
+  {
+    "api": "go.path.Join",
+    "parts": [
+      "//host",
+      "share"
+    ],
+    "result": "/host/share"
+  },
+  {
+    "api": "go.path.Join",
+    "parts": [
+      "C:/base",
+      "D:/tail"
+    ],
+    "result": "C:/base/D:/tail"
+  },
+  {
+    "api": "go.path.Join",
+    "parts": [
+      "base",
+      ""
+    ],
+    "result": "base"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "/home/example",
+      "/Documents"
+    ],
+    "result": "\\home\\example\\Documents"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "C:/base",
+      "D:/tail"
+    ],
+    "result": "C:\\base\\D:\\tail"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "C:",
+      "relative"
+    ],
+    "result": "C:relative"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "C:",
+      "\\root"
+    ],
+    "result": "C:\\root"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "\\\\host\\share",
+      "..\\tail"
+    ],
+    "result": "\\\\host\\share\\tail"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "base",
+      "~"
+    ],
+    "result": "base\\~"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "base",
+      "../.."
+    ],
+    "result": ".."
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "",
+      ""
+    ],
+    "result": ""
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "//host",
+      "share"
+    ],
+    "result": "\\\\host\\share"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      "base",
+      ""
+    ],
+    "result": "base"
+  },
+  {
+    "api": "go.filepath.windows.Join",
+    "parts": [
+      ".",
+      "a:b"
+    ],
+    "result": ".\\a:b"
+  }
+]

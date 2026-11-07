@@ -34,7 +34,8 @@ test("a hostile file name or link target prints on one line", { skip: process.pl
     assert.equal(run(["check", d, "--no-json", "--no-html"], { out: (s) => out.push(s), err: () => {}, env: {} }), 0);
     const lines = out.join("\n").split("\n");
     assert.deepEqual(lines.filter((l) => l.startsWith("::")), []);
-    assert.deepEqual(lines.filter((l) => l.trimStart().startsWith("Quality gate")), ["  Quality gate: FAILED"]);
-    assert.ok(lines.some((l) => l.includes("zz··  Quality gate:  PASSED ·::notice::marker-from-a-file-name·  x.py:1")), lines.join("\n"));
+    assert.deepEqual(lines.filter((l) => l.trimStart().startsWith("Quality gate")), ["  Quality gate:  FAILED "]);
+    // (the file's findings under its name, as core prints them: step 4 c)
+    assert.ok(lines.includes("  zz··  Quality gate:  PASSED ·::notice::marker-from-a-file-name·  x.py"), lines.join("\n"));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

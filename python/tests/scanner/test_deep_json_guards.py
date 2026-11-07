@@ -361,11 +361,12 @@ class StoreReportDeepBlobTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class HttpJsonDeepTests(unittest.TestCase):
     def setUp(self):
-        self._real_fetch = lazaret_repo._fetch
+        self._real_fetch, self._real_opener = lazaret_repo._fetch, lazaret_repo._OPENER
         lazaret_repo._OPENER = _FakeOpener()
 
     def tearDown(self):
-        lazaret_repo._fetch = self._real_fetch
+        # (both: a fake opener left behind answered every later test's registry requests in a one-process run)
+        lazaret_repo._fetch, lazaret_repo._OPENER = self._real_fetch, self._real_opener
 
     def _patch_fetch(self, data):
         lazaret_repo._fetch = (

@@ -21,6 +21,7 @@
 //! deduped with `dict.fromkeys`, so does this: the order of a call's
 //! targets decides which of them a finding names.
 
+pub mod decodeuse;
 pub mod descs;
 pub mod driver;
 pub mod eval;
@@ -30,17 +31,97 @@ mod tests;
 
 use crate::jsparse::tree::{self as jt, Kind, NodeId, Tree, NONE};
 use crate::pystr::PyStr;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 pub use driver::{analyze, Config, Out};
+
+/// The hash of the pass's maps keyed by its own numbers (a binding's, a node's, a function's): one multiply per word
+/// (FxHash's). SipHash, the standard maps' default, was a twentieth of a bundle's reading (P-17); its resistance to
+/// chosen keys is not needed for numbers the pass assigns in order. Maps keyed by a text keep SipHash.
+#[derive(Default, Clone, Copy)]
+pub struct IdHasher(u64);
+
+const ID_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(ID_SEED);
+        }
+    }
+
+    fn write_u8(&mut self, i: u8) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(ID_SEED);
+    }
+
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(ID_SEED);
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(ID_SEED);
+    }
+
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(ID_SEED);
+    }
+}
+
+/// A map keyed by the pass's own numbers (IdHasher).
+pub type IdMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IdHasher>>;
+/// A set of the pass's own numbers (IdHasher).
+pub type IdSet<K> = HashSet<K, std::hash::BuildHasherDefault<IdHasher>>;
+
+/// (the supply-chain model) A call of a function that calls a parameter (Func::param_calls, D-19), as its caller's
+/// reading made it: what the caller gives there is run with what the function calls the parameter with, again when
+/// that changes (driver's replays), not by reading the caller again.
+pub struct PcSite {
+    /// the reading's scope at the call
+    pub cur: ScopeId,
+    pub args: Vec<V>,
+    pub spread: isize,
+    /// the functions given, by position
+    pub given: Vec<(usize, Vec<FnId>)>,
+}
 
 pub const MAX_FILE: usize = 2_000_000;
 pub const MAX_TOTAL: usize = 8_000_000;
 pub const MAX_OPEN: usize = 4;
 pub const MAX_ITERS: u32 = 50;
+/// BIG-BUNDLE-TAIL: the supply-chain model's readings of one function at most, and its budget: twice the taint pass's
+/// a node, at most SUPPLY_WORK_MAX (driver::fixpoint). TypeScript's `_tsc.js` (6 MB, 535,197 nodes) and
+/// `typescript.js` (9 MB, 795,472) reach their fixpoint in 2,921,420 and 3,504,659 steps, their busiest function read
+/// 11 and 8 times (20,280,424 and 24,435,744 steps, and up to 367 readings of one function, before John's decisions of
+/// Oct 21: driver::Queue); pyright's bundle in 2,543,462, Claude Code's `cli.js` (11 MB) in 8,568,044.
+pub const SUPPLY_MAX_ITERS: u32 = 1_000;
+pub const SUPPLY_WORK_PER_NODE: u64 = 48;
+pub const SUPPLY_WORK_MAX: u64 = 32_000_000;
 pub const MAX_PARAMS: usize = 64;
 pub const PARAM_BASE: u64 = 1 << 20;
+/// A parameter's key, set on a value read through a member of the parameter whose name is not the environment's
+/// (the supply-chain model, D-16: `env.platform`, `env.readConfig()`): what a call gives such a parameter is,
+/// there, its value without the whole environment.
+pub const MEMBER_KEY: u64 = 1 << 63;
+/// A method's receiver, `this`, as a parameter's index (the supply-chain model, B-3): a method of a class made in
+/// several places reads `this` as the value it is called on, so what one method of an instance was given reaches
+/// what another method of that instance does with it (`r.setCode(t); r.run()`), and no other instance's.
+pub const RECV_INDEX: usize = (PARAM_BASE - 1) as usize;
+
+
+/// The function a parameter's key is of.
+pub fn key_owner(key: u64) -> FnId {
+    ((key & !MEMBER_KEY) / PARAM_BASE) as FnId
+}
+
+/// A parameter's key's index among its function's parameters.
+pub fn key_index(key: u64) -> usize {
+    ((key & !MEMBER_KEY) % PARAM_BASE) as usize
+}
 pub const EXPORT_HOPS: u32 = 8;
 pub const ALIAS_DEPTH: u32 = 16;
 pub const WORK_BASE: u64 = 200_000;
@@ -268,6 +349,27 @@ thread_local! {
     static NO_PARAMS: Rc<[u64]> = Rc::from(Vec::new());
 }
 
+/// Is every key of `small` in `big` (both ascending)?
+fn params_within(small: &Rc<[u64]>, big: &Rc<[u64]>) -> bool {
+    if small.is_empty() || Rc::ptr_eq(small, big) {
+        return true;
+    }
+    if small.len() > big.len() {
+        return false;
+    }
+    let mut j = 0;
+    for &k in small.iter() {
+        while j < big.len() && big[j] < k {
+            j += 1;
+        }
+        if j == big.len() || big[j] != k {
+            return false;
+        }
+        j += 1;
+    }
+    true
+}
+
 fn no_params() -> Rc<[u64]> {
     NO_PARAMS.with(|p| p.clone())
 }
@@ -322,11 +424,34 @@ impl V {
         self.src || !self.params.is_empty()
     }
 
+    /// Is `self.union(o)` `self`: does it hold all `o` holds, read where it says? (BIG-BUNDLE-TAIL, speed: the union
+    /// of a value with what it holds already, most of a reading's, is it, not a copy made)
+    pub fn covers(&self, o: &V) -> bool {
+        (self.src || !o.src)
+            && (self.src || self.sc.is_none())
+            && self.clean & !o.clean == 0
+            && (self.built || !o.built)
+            && o.kind & !self.kind == 0
+            && params_within(&o.params, &self.params)
+            && match (&o.sc, &self.sc) {
+                (None, _) => true,
+                (Some(y), Some(x)) => Rc::ptr_eq(x, y) || x == y,
+                (Some(_), None) => false,
+            }
+    }
+
     pub fn union(&self, o: &V) -> V {
         if o.is_empty() {
             return self.clone();
         }
         if self.is_empty() {
+            return o.clone();
+        }
+        if self.covers(o) {
+            return self.clone();
+        }
+        // (o, not self, gives the read's fields when self is no read)
+        if !self.src && (o.src || o.sc.is_none()) && o.covers(self) {
             return o.clone();
         }
         let s = if self.src { self } else { o };
@@ -382,11 +507,11 @@ impl V {
     }
 
     /// The value with only the parameters of functions `fids`.
-    pub fn within(&self, fids: &BTreeSet<u32>) -> V {
+    pub fn within(&self, fids: &[u32]) -> V {
         if self.params.is_empty() {
             return self.clone();
         }
-        let params: Vec<u64> = self.params.iter().copied().filter(|&k| fids.contains(&((k / PARAM_BASE) as u32))).collect();
+        let params: Vec<u64> = self.params.iter().copied().filter(|&k| fids.contains(&key_owner(k))).collect();
         if params.len() == self.params.len() {
             return self.clone();
         }
@@ -394,6 +519,19 @@ impl V {
             return V::empty();
         }
         V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), Rc::from(params), self.clean, self.built, self.kind)
+            .with_sc(self.sc.clone())
+    }
+
+    /// The value read through a member of a name that is not the environment's: its parameters' keys with
+    /// MEMBER_KEY set (D-16).
+    pub fn through_member(&self) -> V {
+        if self.params.iter().all(|&k| k & MEMBER_KEY != 0) {
+            return self.clone();
+        }
+        let mut keys: Vec<u64> = self.params.iter().map(|&k| k | MEMBER_KEY).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), Rc::from(keys), self.clean, self.built, self.kind)
             .with_sc(self.sc.clone())
     }
 
@@ -437,7 +575,6 @@ pub enum ScopeKind {
 pub struct Scope {
     pub kind: ScopeKind,
     pub parent: Option<ScopeId>,
-    pub names: HashMap<PyStr, BindId>,
     /// the function the scope's code belongs to
     pub fid: FnId,
 }
@@ -478,17 +615,19 @@ pub type Path = Vec<Option<PyStr>>;
 pub enum Write {
     Fn { node: NodeId, scope: ScopeId, fid: FnId },
     Param { node: NodeId, scope: ScopeId, index: usize },
-    Init { node: NodeId, scope: ScopeId, path: Path },
-    Assign { node: NodeId, scope: ScopeId, path: Path },
+    // (a path and an import's names boxed: a write is 32 bytes, not 56, of a bundle's 400,000: BIG-BUNDLE-TAIL, memory)
+    Init { node: NodeId, scope: ScopeId, path: Box<[Option<PyStr>]> },
+    Assign { node: NodeId, scope: ScopeId, path: Box<[Option<PyStr>]> },
     Nothing { scope: ScopeId },
-    Import { spec: PyStr, scope: ScopeId, name: PyStr },
+    Import { spec: Box<PyStr>, scope: ScopeId, name: Box<PyStr> },
     Class { node: NodeId, scope: ScopeId, cid: ClassId },
     Opaque { node: NodeId, scope: ScopeId },
 }
 
 pub struct Bind {
     pub bid: BindId,
-    pub name: PyStr,
+    /// (the name, one copy for every binding of it: Program::name_ids)
+    pub name: u32,
     pub kind: BindKind,
     /// the function whose code declares it
     pub fid: FnId,
@@ -498,8 +637,6 @@ pub struct Bind {
     pub module: ModId,
     /// (identifier node, parent node) of every reference
     pub refs: Vec<(NodeId, NodeId)>,
-    /// an import: the bindings it reads in the modules it names
-    pub targets: Option<Vec<BindId>>,
 }
 
 /// A sink a parameter reaches: (file, line, the function's label, whether
@@ -511,7 +648,7 @@ pub struct Func {
     pub module: ModId,
     /// its node (the Program for the module's own code)
     pub node: NodeId,
-    pub name: Option<PyStr>,
+    pub name: Option<Rc<[u32]>>,
     pub params: Vec<NodeId>,
     pub scope: ScopeId,
     /// the enclosing function (None: the module's own code)
@@ -525,26 +662,95 @@ pub struct Func {
     pub is_module: bool,
     /// a route handler: 1 (request, response), 2 (error, request, response)
     pub route: u8,
-    /// param index -> category -> the sink it reaches
-    pub reach: BTreeMap<usize, BTreeMap<u8, Entry>>,
-    /// param index -> (clean, built) of the value it returns
-    pub ret_params: BTreeMap<usize, (u8, bool)>,
-    /// request data it returns
-    pub ret_src: Option<V>,
-    /// key of an enclosing function's parameter it returns -> (clean, built)
-    pub ret_outer: BTreeMap<u64, (u8, bool)>,
-    /// param index -> the closure variables it is written to (the
-    /// supply-chain model's: `res.on('data', d => body += d)`)
-    pub param_writes: BTreeMap<usize, BTreeSet<BindId>>,
+    /// param index -> (clean, built, through a member alone: MEMBER_KEY) of the value it returns
+    pub ret_params: VecMap<usize, (u8, bool, bool)>,
+    /// what few functions have: the sinks their parameters reach, the request data and the parameters of functions
+    /// around them they return (boxed: BIG-BUNDLE-TAIL, memory)
+    pub more: Option<Box<FuncMore>>,
     /// fid -> the parameters it passed tainted values in its last reading
-    pub callers: BTreeMap<FnId, BTreeSet<usize>>,
+    /// (one row of (caller, parameter): BIG-BUNDLE-TAIL, memory)
+    pub callers: Callers,
+    /// the supply-chain model's parts of the summary, made when one is first written (BIG-BUNDLE-TAIL, memory: six
+    /// empty maps a function, of a bundle's 128,000)
+    pub sc: Option<Box<FuncSc>>,
+    /// a direct eval() in its own code, or a with statement (the module's eval_with, by function: what either can
+    /// rebind is the names of the functions within it, D-20's sc_checked)
+    pub eval_with: bool,
     pub runs: u32,
+    /// (the supply-chain model) the reporting pass reads it: its last reading of the pass came where a finding may
+    /// be recorded (Eval::would), or a summary it uses changed after that reading in a way the pass did not read
+    /// it again for (BIG-BUNDLE-TAIL, speed: of a bundle's 22,000 functions, most come nowhere near one)
+    pub emits: bool,
     /// (call node, scope) of its call sites
     pub calls: Vec<(NodeId, ScopeId)>,
     pub size: u64,
 }
 
+/// The supply-chain model's parts of a function's summary (Func::sc).
+#[derive(Default)]
+pub struct FuncSc {
+    /// (param index, category) -> whether it reaches the sink through a member alone (MEMBER_KEY, D-16)
+    pub reach_member: BTreeMap<(usize, u8), bool>,
+    /// param index -> the closure variables it is written to (the
+    /// supply-chain model's: `res.on('data', d => body += d)`)
+    pub param_writes: BTreeMap<usize, BTreeSet<BindId>>,
+    /// param index -> the files it is written to: (the keys of the path, where), the supply-chain model's (D-2:
+    /// `request.get(u, (e, r, body) => fs.writeFileSync(p, body))`, a callback given a download)
+    pub param_files: BTreeMap<usize, BTreeSet<(Vec<PyStr>, u32)>>,
+    /// param index -> the members of `this` it is put into as into a container (`record(r, c) {
+    /// this._events.push(new Event(r, c)) }`): the supply-chain model's (D-3c), which a call on an instance puts into
+    /// that instance (sc_kept), not into every instance's member
+    pub param_kept: BTreeMap<usize, BTreeSet<PyStr>>,
+    /// the members of `this` it returns as written (`all() { return this._events; }`): the supply-chain model's
+    /// (D-3c), which a call on a name gives what that name's member holds (sc_kept_returned)
+    pub ret_kept: BTreeSet<PyStr>,
+    /// param index -> what the function calls the parameter with, by position: the supply-chain model's (D-19:
+    /// `function withEnv(cb) { cb(JSON.stringify(process.env)); }`), which runs the function a caller gives there
+    /// with those values, as a built-in's callback is run
+    pub param_calls: BTreeMap<usize, Vec<V>>,
+}
+
+/// A function's facts few functions have (Func::more).
+#[derive(Default)]
+pub struct FuncMore {
+    /// param index -> category -> the sink it reaches
+    pub reach: VecMap<usize, Rc<VecMap<u8, Entry>>>,
+    /// request data it returns
+    pub ret_src: Option<Box<V>>,
+    /// key of an enclosing function's parameter it returns -> (clean, built)
+    pub ret_outer: VecMap<u64, (u8, bool)>,
+}
+
 impl Func {
+    pub fn more_mut(&mut self) -> &mut FuncMore {
+        self.more.get_or_insert_with(Default::default)
+    }
+
+    /// request data it returns
+    pub fn ret_src(&self) -> Option<&V> {
+        self.more.as_ref().and_then(|m| m.ret_src.as_deref())
+    }
+
+    /// key of an enclosing function's parameter it returns -> (clean, built)
+    pub fn ret_outer(&self) -> impl Iterator<Item = (&u64, &(u8, bool))> + '_ {
+        self.more.iter().flat_map(|m| m.ret_outer.iter())
+    }
+
+    /// param index -> category -> the sink it reaches
+    pub fn reach(&self) -> impl Iterator<Item = (&usize, &Rc<VecMap<u8, Entry>>)> + '_ {
+        self.more.iter().flat_map(|m| m.reach.iter())
+    }
+
+    /// The supply-chain model's parts of the summary, if any was written.
+    pub fn sc_ref(&self) -> Option<&FuncSc> {
+        self.sc.as_deref()
+    }
+
+    /// The supply-chain model's parts of the summary, to write (made empty when first written).
+    pub fn sc_mut(&mut self) -> &mut FuncSc {
+        self.sc.get_or_insert_with(Default::default)
+    }
+
     pub fn label(&self) -> PyStr {
         if self.is_module {
             return u("(module level)");
@@ -566,7 +772,7 @@ impl Func {
         }
         match &self.name {
             Some(n) if !n.is_empty() => {
-                let mut out = n.clone();
+                let mut out = n.to_vec();
                 out.extend(u("()"));
                 out
             }
@@ -579,9 +785,9 @@ pub struct Class {
     pub cid: ClassId,
     pub name: Option<PyStr>,
     /// prototype method name -> fid
-    pub methods: HashMap<PyStr, FnId>,
+    pub methods: HashMap<Rc<[u32]>, FnId>,
     /// static member name -> fid
-    pub statics: HashMap<PyStr, FnId>,
+    pub statics: HashMap<Rc<[u32]>, FnId>,
     /// the superclass expression: (module, node, scope)
     pub sup: Option<(ModId, NodeId, ScopeId)>,
 }
@@ -589,8 +795,6 @@ pub struct Class {
 pub struct Obj {
     pub oid: ObjId,
     pub module: ModId,
-    /// key -> [(value node, scope)]
-    pub props: HashMap<PyStr, Vec<(NodeId, ScopeId)>>,
 }
 
 /// An export of a module.
@@ -616,7 +820,8 @@ pub struct Mod {
     /// the index of its file in the pass's input
     pub file: u32,
     pub dir: PyStr,
-    pub tree: Tree,
+    /// (shared: a reading walks its lists without copying them, Eval::tree)
+    pub tree: Rc<Tree>,
     pub scope: ScopeId,
     /// fid of the module's own code
     pub fn_: FnId,
@@ -636,13 +841,564 @@ pub struct Mod {
     pub regexp_rebound: bool,
     pub nodes: u64,
     // the per-node annotations jsflow.py keeps on its dicts
-    pub scope_at: Vec<u32>,
-    pub fid_at: Vec<u32>,
-    pub cid_at: Vec<u32>,
-    pub oid_at: Vec<u32>,
-    pub bind_at: Vec<u32>,
-    pub asg: Vec<bool>,
-    pub text_memo: HashMap<NodeId, Rc<PyStr>>,
+    // (the marks most nodes lack are kept for the nodes that have them: Sparse)
+    pub scope_at: Sparse<u32>,
+    pub fid_at: Sparse<u32>,
+    pub cid_at: Sparse<u32>,
+    pub oid_at: Sparse<u32>,
+    pub bind_at: Sparse<u32>,
+    pub asg: Sparse<bool>,
+    /// a member assignment's right side, by its left node, and whether its operator is `=` (`o.p = …`; not a
+    /// destructuring's member, which has none)
+    pub member_rhs: IdMap<NodeId, (NodeId, bool)>,
+    /// (eval.rs, regexp_member) whether a binding's property holds only a regex, by binding and name
+    pub regexp_props: HashMap<(BindId, PyStr), bool>,
+    pub text_memo: IdMap<NodeId, Rc<PyStr>>,
+    /// The calls whose targets are none (`Program::call_targets`), and the callees that name nothing the supply-chain
+    /// model asks of (`sc_names`): most of a bundle's (BIG-BUNDLE-TAIL, memory: a bit each, not a memo's entry)
+    pub tg_none: NodeBits,
+    pub sc_names_none: NodeBits,
+}
+
+/// The bindings the scopes declare, by (scope, name's number): a map while the model is built, then (`freeze`) each
+/// scope's names in a row, ordered by number, and a map for those declared after (BIG-BUNDLE-TAIL, memory: a bundle's
+/// 286,000 names in a map were 7 MB, in rows 3).
+#[derive(Default)]
+pub struct ScopeNames {
+    pub map: IdMap<(ScopeId, u32), BindId>,
+    /// scope s's names: items[starts[s]..starts[s + 1]]
+    starts: Vec<u32>,
+    items: Vec<(u32, BindId)>,
+}
+
+impl ScopeNames {
+    #[inline]
+    pub fn get(&self, scope: ScopeId, name: u32) -> Option<BindId> {
+        if let Some(&b) = self.map.get(&(scope, name)) {
+            return Some(b);
+        }
+        let s = scope as usize;
+        if s + 1 >= self.starts.len() {
+            return None;
+        }
+        let row = &self.items[self.starts[s] as usize..self.starts[s + 1] as usize];
+        row.binary_search_by_key(&name, |&(n, _)| n).ok().map(|k| row[k].1)
+    }
+
+    /// The names declared so far in rows (`scopes`: how many scopes there are).
+    pub fn freeze(&mut self, scopes: usize) {
+        let map = std::mem::take(&mut self.map);
+        let mut all: Vec<(ScopeId, u32, BindId)> = Vec::with_capacity(self.items.len() + map.len());
+        for s in 0..self.starts.len().saturating_sub(1) {
+            for &(n, b) in &self.items[self.starts[s] as usize..self.starts[s + 1] as usize] {
+                all.push((s as ScopeId, n, b));
+            }
+        }
+        self.items = Vec::new();
+        all.extend(map.into_iter().map(|((s, n), b)| (s, n, b)));
+        // (stable: of a name in both, what the map holds, declared since, is after; the last is the binding it has)
+        all.sort_by_key(|&(s, n, _)| (s, n));
+        let mut w = 0;
+        for r in 0..all.len() {
+            if w > 0 && (all[w - 1].0, all[w - 1].1) == (all[r].0, all[r].1) {
+                all[w - 1] = all[r];
+            } else {
+                all[w] = all[r];
+                w += 1;
+            }
+        }
+        all.truncate(w);
+        let n = scopes.max(all.last().map_or(0, |x| x.0 as usize + 1));
+        let mut starts = vec![0u32; n + 1];
+        for &(s, _, _) in &all {
+            starts[s as usize + 1] += 1;
+        }
+        for s in 0..n {
+            starts[s + 1] += starts[s];
+        }
+        // (a vector of its own, not the triples' room reused: Vec's collect in place keeps that)
+        self.items = all.iter().map(|&(_, n, b)| (n, b)).collect();
+        drop(all);
+        self.starts = starts;
+        self.map = IdMap::default();
+    }
+
+    /// how many names (the tests')
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.map.len() + self.items.len()
+    }
+}
+
+/// What the object literals give their keys, by (object, key's number): a map while the model is built, then
+/// (`freeze`) one row of (object, key, value node, scope), ordered by object and key (BIG-BUNDLE-TAIL, memory).
+#[derive(Default)]
+pub struct ObjProps {
+    pub map: IdMap<(ObjId, u32), Vec<(NodeId, ScopeId)>>,
+    items: Vec<(ObjId, u32, NodeId, ScopeId)>,
+}
+
+impl ObjProps {
+    /// [(value node, scope)], the last written first.
+    pub fn get(&self, oid: ObjId, name: u32) -> Vec<(NodeId, ScopeId)> {
+        if let Some(v) = self.map.get(&(oid, name)) {
+            return v.clone();
+        }
+        let k = self.items.partition_point(|&(o, n, _, _)| (o, n) < (oid, name));
+        self.items[k..].iter().take_while(|&&(o, n, _, _)| (o, n) == (oid, name)).map(|&(_, _, v, s)| (v, s)).collect()
+    }
+
+    pub fn freeze(&mut self) {
+        if self.map.is_empty() {
+            return;
+        }
+        let mut keys: Vec<(ObjId, u32)> = self.map.keys().copied().collect();
+        keys.sort_unstable();
+        // (an object's keys are made with it: none is in the row already)
+        let mut items = Vec::with_capacity(self.items.len() + self.map.values().map(|v| v.len()).sum::<usize>());
+        items.append(&mut self.items);
+        for k in keys {
+            for &(v, s) in &self.map[&k] {
+                items.push((k.0, k.1, v, s));
+            }
+        }
+        // (stable: each key's values keep their order)
+        items.sort_by_key(|&(o, n, _, _)| (o, n));
+        self.items = items;
+        self.map = IdMap::default();
+    }
+
+    /// how many values the keys hold (the tests')
+    #[cfg(test)]
+    pub fn items_len(&self) -> usize {
+        self.map.values().map(|v| v.len()).sum::<usize>() + self.items.len()
+    }
+}
+
+/// A function's callers and the parameters of it each passed tainted values in its last reading: (caller, parameter)
+/// ascending, a caller that passed none (caller, NO_PARAM) (BIG-BUNDLE-TAIL, memory: a map of lists was a list for
+/// each of a bundle's 71,000 callers, of one parameter).
+#[derive(Default)]
+pub struct Callers(Vec<(FnId, u32)>);
+
+const NO_PARAM: u32 = u32::MAX;
+
+impl Callers {
+    /// caller `c`'s rows
+    fn range(&self, c: FnId) -> std::ops::Range<usize> {
+        let lo = self.0.partition_point(|&(x, _)| x < c);
+        let hi = lo + self.0[lo..].iter().take_while(|&&(x, _)| x == c).count();
+        lo..hi
+    }
+
+    /// `c` passed these (ascending), as its last reading did.
+    pub fn set(&mut self, c: FnId, used: &[u32]) {
+        let r = self.range(c);
+        if used.is_empty() {
+            self.0.splice(r, [(c, NO_PARAM)]);
+        } else {
+            self.0.splice(r, used.iter().map(|&i| (c, i)));
+        }
+    }
+
+    /// `c` passed these too (a replay's).
+    pub fn merge(&mut self, c: FnId, used: &[u32]) {
+        let r = self.range(c);
+        if r.is_empty() {
+            self.set(c, used);
+            return;
+        }
+        if used.is_empty() {
+            return;
+        }
+        let mut mine: Vec<u32> = self.0[r.clone()].iter().map(|&(_, i)| i).filter(|&i| i != NO_PARAM).collect();
+        for &i in used {
+            if let Err(k) = mine.binary_search(&i) {
+                mine.insert(k, i);
+            }
+        }
+        self.0.splice(r, mine.into_iter().map(|i| (c, i)));
+    }
+
+    /// (caller, the parameters it passed), callers ascending.
+    pub fn groups(&self) -> Vec<(FnId, Vec<u32>)> {
+        let mut out: Vec<(FnId, Vec<u32>)> = Vec::new();
+        for &(c, i) in &self.0 {
+            if out.last().map_or(true, |l| l.0 != c) {
+                out.push((c, Vec::new()));
+            }
+            if i != NO_PARAM {
+                out.last_mut().map(|l| l.1.push(i));
+            }
+        }
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// (callers, rows) (the tests')
+    #[cfg(test)]
+    pub fn counts(&self) -> (usize, usize) {
+        (self.groups().len(), self.0.len())
+    }
+}
+
+/// A vector kept in parts of CHUNK items, the first growing to that as a vector does (BIG-BUNDLE-TAIL, memory: a
+/// bundle's bindings and functions, 15 MB each in WebAssembly, grew by moving the whole vector to a larger room, which
+/// left the old one to what fits in it; parts fit the rooms the parse left).
+pub struct Chunked<T> {
+    parts: Vec<Vec<T>>,
+    len: usize,
+}
+
+const CHUNK_BITS: u32 = 12;
+const CHUNK: usize = 1 << CHUNK_BITS;
+
+impl<T> Chunked<T> {
+    pub const fn new() -> Self {
+        Chunked { parts: Vec::new(), len: 0 }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn push(&mut self, x: T) {
+        match self.parts.last_mut() {
+            Some(p) if p.len() < CHUNK => p.push(x),
+            _ => {
+                let mut p = if self.parts.is_empty() { Vec::new() } else { Vec::with_capacity(CHUNK) };
+                p.push(x);
+                self.parts.push(p);
+            }
+        }
+        self.len += 1;
+    }
+
+    pub fn iter(&self) -> std::iter::Flatten<std::slice::Iter<'_, Vec<T>>> {
+        self.parts.iter().flatten()
+    }
+
+    pub fn iter_mut(&mut self) -> std::iter::Flatten<std::slice::IterMut<'_, Vec<T>>> {
+        self.parts.iter_mut().flatten()
+    }
+
+    /// the items it has room for (the tests')
+    #[cfg(test)]
+    pub fn capacity(&self) -> usize {
+        self.parts.iter().map(|p| p.capacity()).sum()
+    }
+
+    /// The last part at its size (no later part is made but at CHUNK).
+    pub fn shrink_to_fit(&mut self) {
+        if let Some(p) = self.parts.last_mut() {
+            if p.len() < CHUNK {
+                p.shrink_to_fit();
+            }
+        }
+    }
+}
+
+impl<T> Default for Chunked<T> {
+    fn default() -> Self {
+        Chunked::new()
+    }
+}
+
+impl<T> std::ops::Index<usize> for Chunked<T> {
+    type Output = T;
+
+    #[inline]
+    fn index(&self, i: usize) -> &T {
+        &self.parts[i >> CHUNK_BITS][i & (CHUNK - 1)]
+    }
+}
+
+impl<T> std::ops::IndexMut<usize> for Chunked<T> {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        &mut self.parts[i >> CHUNK_BITS][i & (CHUNK - 1)]
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Chunked<T> {
+    type Item = &'a T;
+    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Vec<T>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut Chunked<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::iter::Flatten<std::slice::IterMut<'a, Vec<T>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+/// push(), growing a full vector by as many as it holds (one for an empty one), not to four at the first item as Vec
+/// does (BIG-BUNDLE-TAIL, memory: most of a bundle's 286,000 bindings have one write and one or two references, which
+/// left their vectors three quarters empty, 30 MB while the model was built).
+pub trait PushSlim<T> {
+    fn push_slim(&mut self, x: T);
+}
+
+impl<T> PushSlim<T> for Vec<T> {
+    #[inline]
+    fn push_slim(&mut self, x: T) {
+        if self.len() == self.capacity() {
+            self.reserve_exact(self.len().max(1));
+        }
+        self.push(x);
+    }
+}
+
+/// A bit for each node of a module's tree.
+pub struct NodeBits(Vec<u64>);
+
+impl NodeBits {
+    pub fn new(nodes: usize) -> NodeBits {
+        NodeBits(vec![0; nodes / 64 + 1])
+    }
+
+    #[inline]
+    pub fn get(&self, node: NodeId) -> bool {
+        self.0.get(node as usize / 64).is_some_and(|w| w >> (node % 64) & 1 != 0)
+    }
+
+    pub fn set(&mut self, node: NodeId) {
+        let w = node as usize / 64;
+        if w >= self.0.len() {
+            self.0.resize(w + 1, 0);
+        }
+        self.0[w] |= 1u64 << (node % 64);
+    }
+}
+
+/// A small map kept as a sorted vector, in its keys' order as a BTreeMap is (BIG-BUNDLE-TAIL, memory: a summary's
+/// maps hold a few entries each, and a BTreeMap's node is some 200 bytes, of a bundle's 128,000 functions).
+#[derive(Clone, Debug)]
+pub struct VecMap<K, V>(Vec<(K, V)>);
+
+impl<K, V> Default for VecMap<K, V> {
+    fn default() -> Self {
+        VecMap(Vec::new())
+    }
+}
+
+impl<K: Ord + Copy, V> VecMap<K, V> {
+    pub const fn new() -> Self {
+        VecMap(Vec::new())
+    }
+
+    fn find(&self, k: &K) -> Result<usize, usize> {
+        self.0.binary_search_by(|(x, _)| x.cmp(k))
+    }
+
+    pub fn get(&self, k: &K) -> Option<&V> {
+        self.find(k).ok().map(|i| &self.0[i].1)
+    }
+
+    pub fn contains_key(&self, k: &K) -> bool {
+        self.find(k).is_ok()
+    }
+
+    /// `v` at `k`; what was there before.
+    pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        match self.find(&k) {
+            Ok(i) => Some(std::mem::replace(&mut self.0[i].1, v)),
+            Err(i) => {
+                self.0.insert(i, (k, v));
+                None
+            }
+        }
+    }
+
+    /// The value at `k`, `make()` put there first if none is.
+    pub fn slot(&mut self, k: K, make: impl FnOnce() -> V) -> &mut V {
+        let i = match self.find(&k) {
+            Ok(i) => i,
+            Err(i) => {
+                self.0.insert(i, (k, make()));
+                i
+            }
+        };
+        &mut self.0[i].1
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> + '_ {
+        self.0.iter().map(|(k, v)| (k, v))
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &V> + '_ {
+        self.0.iter().map(|(_, v)| v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'a, K: Ord + Copy, V> IntoIterator for &'a VecMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = std::iter::Map<std::slice::Iter<'a, (K, V)>, fn(&'a (K, V)) -> (&'a K, &'a V)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|(k, v)| (k, v))
+    }
+}
+
+/// Does a caller's set of the parameters it gives values (Func::callers) meet `changed`?
+pub fn meets(changed: &BTreeSet<usize>, used: &[u32]) -> bool {
+    !changed.is_empty() && used.iter().any(|&i| changed.contains(&(i as usize)))
+}
+
+/// A mark a tree's nodes have few of, indexed by node as a vector is, an unmarked node reading `none`: kept for the
+/// marked nodes alone (BIG-BUNDLE-TAIL, John's decision of Oct 21: a vector is four bytes for each of a
+/// 16,000,000-character bundle's 3,600,000 nodes, of which a function's, a class's or an object's mark is on 4 per
+/// cent and a scope's on 8). While the model is built a map (or a vector, `dense`: the identifiers' bindings, on a
+/// node in five); once its module is resolved (`freeze`), a bit for each node and the marks of the marked ones in
+/// order, found by counting the bits before (12 bytes for each 64 nodes beside the marks: the bindings' marks are 3
+/// MB of that bundle, not 14).
+pub struct Sparse<T: Copy> {
+    store: Store<T>,
+    none: T,
+}
+
+enum Store<T> {
+    Map(IdMap<u32, T>),
+    Dense(Vec<T>),
+    /// bit `k % 64` of `bits[k / 64]`: node k is marked; its mark is `vals[base[k / 64] + the bits below it]`
+    Frozen { bits: Vec<u64>, base: Vec<u32>, vals: Vec<T> },
+}
+
+impl<T: Copy + PartialEq> Sparse<T> {
+    pub fn new(none: T) -> Sparse<T> {
+        Sparse { store: Store::Map(IdMap::default()), none }
+    }
+
+    /// A mark most of `n` nodes may have while the model is built: a vector until frozen.
+    pub fn dense(n: usize, none: T) -> Sparse<T> {
+        Sparse { store: Store::Dense(vec![none; n]), none }
+    }
+
+    /// The marks, as they will be read from now on (its module resolved: none is set after).
+    pub fn freeze(&mut self) {
+        let none = self.none;
+        let (bits, vals) = match &self.store {
+            Store::Map(m) => {
+                let mut marked: Vec<(u32, T)> = m.iter().filter(|(_, v)| **v != none).map(|(k, v)| (*k, *v)).collect();
+                marked.sort_unstable_by_key(|&(k, _)| k);
+                let words = marked.last().map_or(0, |&(k, _)| k as usize / 64 + 1);
+                let mut bits = vec![0u64; words];
+                for &(k, _) in &marked {
+                    bits[k as usize / 64] |= 1u64 << (k % 64);
+                }
+                // (a vector of its own, not the pairs' room reused: Vec's collect in place keeps that)
+                let vals: Vec<T> = marked.iter().map(|&(_, v)| v).collect();
+                (bits, vals)
+            }
+            Store::Dense(v) => {
+                // (in node order already: read twice, not copied)
+                let words = v.iter().rposition(|x| *x != none).map_or(0, |k| k / 64 + 1);
+                let mut bits = vec![0u64; words];
+                let mut vals = Vec::with_capacity(v.iter().filter(|x| **x != none).count());
+                for (k, x) in v.iter().enumerate().take(words * 64) {
+                    if *x != none {
+                        bits[k / 64] |= 1u64 << (k % 64);
+                        vals.push(*x);
+                    }
+                }
+                (bits, vals)
+            }
+            Store::Frozen { .. } => return,
+        };
+        let mut base = vec![0u32; bits.len()];
+        let mut n = 0u32;
+        for (w, b) in bits.iter().zip(base.iter_mut()) {
+            *b = n;
+            n += w.count_ones();
+        }
+        self.store = Store::Frozen { bits, base, vals };
+    }
+
+    /// the marked nodes (the tests')
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        match &self.store {
+            Store::Map(m) => m.len(),
+            Store::Dense(v) => v.iter().filter(|x| **x != self.none).count(),
+            Store::Frozen { vals, .. } => vals.len(),
+        }
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        if let Store::Map(m) = &mut self.store {
+            m.shrink_to_fit();
+        }
+    }
+}
+
+impl<T: Copy> std::ops::Index<usize> for Sparse<T> {
+    type Output = T;
+
+    #[inline]
+    fn index(&self, node: usize) -> &T {
+        match &self.store {
+            Store::Frozen { bits, base, vals } => match bits.get(node / 64) {
+                Some(&w) if w >> (node % 64) & 1 != 0 => {
+                    &vals[base[node / 64] as usize + (w & ((1u64 << (node % 64)) - 1)).count_ones() as usize]
+                }
+                _ => &self.none,
+            },
+            Store::Dense(v) => v.get(node).unwrap_or(&self.none),
+            Store::Map(m) => m.get(&(node as u32)).unwrap_or(&self.none),
+        }
+    }
+}
+
+impl<T: Copy> std::ops::IndexMut<usize> for Sparse<T> {
+    #[inline]
+    fn index_mut(&mut self, node: usize) -> &mut T {
+        let none = self.none;
+        if let Store::Frozen { bits, base, vals } = &self.store {
+            // (no mark is set once frozen; were one, the marks become a map again)
+            let mut m: IdMap<u32, T> = IdMap::default();
+            for (w, (&word, &b)) in bits.iter().zip(base.iter()).enumerate() {
+                let mut word = word;
+                let mut k = b as usize;
+                while word != 0 {
+                    m.insert((w * 64) as u32 + word.trailing_zeros(), vals[k]);
+                    word &= word - 1;
+                    k += 1;
+                }
+            }
+            self.store = Store::Map(m);
+        }
+        match &mut self.store {
+            Store::Dense(v) => {
+                if node >= v.len() {
+                    v.resize(node + 1, none);
+                }
+                &mut v[node]
+            }
+            Store::Map(m) => m.entry(node as u32).or_insert(none),
+            Store::Frozen { .. } => unreachable!(),
+        }
+    }
 }
 
 impl Mod {
@@ -663,7 +1419,7 @@ impl<'t> Ast<'t> {
     }
     #[inline]
     pub fn line(&self, id: NodeId) -> u32 {
-        self.0.nodes[id as usize].line
+        self.0.line(id)
     }
     #[inline]
     pub fn op(&self, id: NodeId) -> u8 {
@@ -938,6 +1694,21 @@ impl<'t> Ast<'t> {
         None
     }
 
+    /// Is prop_name(member) `name` (no copy made)?
+    pub fn prop_is(&self, member: NodeId, name: &str) -> bool {
+        let prop = self.at(member, jt::B);
+        if !self.computed(member) {
+            if self.kind(prop) == Kind::PrivateIdentifier {
+                return name.strip_prefix('#').is_some_and(|rest| eq(self.name(prop), rest));
+            }
+            return eq(self.name(prop), name);
+        }
+        match self.prop_name(member) {
+            Some(n) => eq(&n, name),
+            None => false,
+        }
+    }
+
     /// An object's or a class's member name, or None (computed).
     pub fn key_name(&self, prop: NodeId) -> Option<PyStr> {
         let key = self.at(prop, jt::A);
@@ -1031,75 +1802,232 @@ pub(crate) fn html_type(value: &[u32]) -> bool {
 pub struct Program {
     pub mods: Vec<Mod>,
     pub by_path: HashMap<PyStr, ModId>,
-    pub fns: Vec<Func>,
+    pub fns: Chunked<Func>,
     pub classes: Vec<Class>,
     pub objs: Vec<Obj>,
-    pub binds: Vec<Bind>,
+    pub binds: Chunked<Bind>,
     pub scopes: Vec<Scope>,
     /// function name -> [fid], every project function of that name
-    pub by_name: HashMap<PyStr, Vec<FnId>>,
+    pub by_name: HashMap<Rc<[u32]>, Vec<FnId>>,
     /// bid -> everything written to a shared binding
-    pub shared: HashMap<BindId, V>,
+    pub shared: IdMap<BindId, V>,
     /// bid -> who reads a shared binding (in the order they first did)
-    pub readers: HashMap<BindId, Vec<FnId>>,
-    pub desc_memo: HashMap<BindId, Rc<Vec<descs::D>>>,
-    pub tg_memo: HashMap<(ModId, NodeId), Rc<(Vec<FnId>, descs::How)>>,
+    pub readers: IdMap<BindId, Vec<FnId>>,
+    pub desc_memo: IdMap<BindId, Rc<Vec<descs::D>>>,
+    /// desc_memo's lists, one copy of each
+    pub desc_kept: HashMap<Vec<descs::D>, Rc<Vec<descs::D>>>,
+    /// the names the scopes declare and the objects' keys, numbered (BIG-BUNDLE-TAIL, memory: a map of names and a
+    /// copy of each name a scope or an object literal, of a bundle's 171,000 scopes and 71,000 literals, was 70 MB)
+    pub name_ids: HashMap<Rc<[u32]>, u32>,
+    /// the names, by number
+    pub names: Vec<Rc<[u32]>>,
+    /// (scope, name's number) -> the binding the scope declares
+    pub scope_names: ScopeNames,
+    /// (object literal, key's number) -> [(value node, scope)], the last written first
+    pub obj_props: ObjProps,
+    pub tg_memo: IdMap<(ModId, NodeId), Rc<(Vec<FnId>, descs::How)>>,
+    /// call_targets' answer for a call with none (Mod::tg_none)
+    pub tg_empty: Rc<(Vec<FnId>, descs::How)>,
+    /// tg_memo's answers, one copy of each
+    pub tg_kept: HashMap<(Vec<FnId>, descs::How), Rc<(Vec<FnId>, descs::How)>>,
     pub cfg: Rc<Config>,
     pub work: u64,
     pub budget: u64,
     pub nodes: u64,
-    pub anc: HashMap<FnId, Rc<BTreeSet<FnId>>>,
+    pub anc: IdMap<FnId, Rc<[FnId]>>,
     /// (the supply-chain model) a member of `this` — (class or object
     /// literal, its id, the member's name) — as a binding of its own
-    pub sc_props: HashMap<(u8, u32, PyStr), BindId>,
+    pub sc_props: HashMap<(u8, u32, u32), BindId>,
+    /// the bindings an import binding reads (import_targets, memoized)
+    pub import_targets: IdMap<BindId, Vec<BindId>>,
+
+    /// (the supply-chain model) the classes whose instances are made in more
+    /// than one place (`new C(…)` of them or of a subclass): made when first
+    /// asked (descs::Program::sc_made_widely)
+    pub sc_wide: Option<HashSet<ClassId>>,
+    /// (the supply-chain model) a class's `this.x` binding -> the class
+    pub sc_this_class: IdMap<BindId, ClassId>,
+    /// (the supply-chain model) a module -> the names of the members of a name it puts anything into
+    /// (`o.list.push(…)`, `Object.assign(o.opts, …)`): made when first asked (supply::collected_members, D-3b)
+    pub sc_collected: HashMap<ModId, HashSet<PyStr>>,
+    /// (the supply-chain model) a callee's names (supply's `sc_names`), by its node: what it is never changes
+    /// while the pass reads, and every reading of a call asked it again (P-17)
+    pub sc_names_memo: IdMap<(ModId, NodeId), Rc<Vec<PyStr>>>,
+    /// sc_names' answer for a callee that names nothing (Mod::sc_names_none)
+    pub sc_names_empty: Rc<Vec<PyStr>>,
+    /// sc_names_memo's lists, one copy of each
+    pub sc_names_kept: HashMap<Vec<PyStr>, Rc<Vec<PyStr>>>,
+    /// (the supply-chain model) a module -> what it writes or defines by name (supply::Defined, D-21): made when
+    /// first asked
+    pub sc_defined: HashMap<ModId, Rc<supply::Defined>>,
+    /// (the supply-chain model) a module -> its classes no code reaches (supply's sc_dead_classes, D-21): made when
+    /// first asked
+    pub sc_dead: HashMap<ModId, Rc<HashSet<ClassId>>>,
+    /// (the supply-chain model) a call -> whether it passes local fetch checks (supply's sc_platform_call, D-21)
+    pub sc_platform: IdMap<(ModId, NodeId), bool>,
+    /// D-21: function node -> binding names and whether there is an outer binding, indexed once per module.
+    pub sc_function_names: HashMap<ModId, Rc<HashMap<NodeId, (Vec<BindId>, bool)>>>,
+    /// (the supply-chain model) what each caller gives a function's parameter, (callee, index, caller) -> (from calls
+    /// made otherwise, from calls on an instance: sc_on_instance): the values a closure variable the parameter is
+    /// written to (Func::param_writes) is given, written there when the summary learns of it (driver's pw_carry),
+    /// not by reading every caller again
+    pub pw_args: IdMap<(FnId, u32, FnId), (V, V)>,
+    /// (callee, index) -> its callers in pw_args, in the order they first gave it a value
+    pub pw_callers: IdMap<(FnId, u32), Vec<FnId>>,
+    /// (the supply-chain model) closure variables a parameter is written to that its summary has just learned of:
+    /// (function, index, binding), for the driver to write the callers' values to
+    pub pw_new: Vec<(FnId, usize, BindId)>,
+    /// (the supply-chain model) values a caller gives a parameter that grew in its last reading: (callee, index,
+    /// caller), for the driver to write to the closure variables the callee writes the parameter to
+    pub pw_grew: Vec<(FnId, usize, FnId)>,
+    /// (the supply-chain model) the parameters written to closure variables, (function, index): what callers give
+    /// them is kept (pw_args) from the callers' readings after the first such write (which reads again the callers
+    /// that give the parameter a value)
+    pub pw_tracked: IdSet<(FnId, u32)>,
+    /// (the supply-chain model) the parameters a function calls, (function, index): its calls are kept (pc_sites)
+    /// from the callers' readings after the first such call (which reads again the callers that give it a value)
+    pub pc_tracked: IdSet<(FnId, u32)>,
+    /// the functions with a parameter in pc_tracked
+    pub pc_tracked_fns: IdSet<FnId>,
+    /// (callee, caller, call node) -> the call, as the caller's last reading made it
+    pub pc_sites: IdMap<(FnId, FnId, NodeId), PcSite>,
+    /// callee -> its calls in pc_sites, (caller, call node), in the order first made
+    pub pc_by_callee: IdMap<FnId, Vec<(FnId, NodeId)>>,
+    /// (function, index): what the function calls the parameter with grew, for the driver to run its callers' calls
+    /// again with it
+    pub pc_changed: Vec<(FnId, usize)>,
 }
 
 impl Program {
+    /// The model's vectors and maps at their size (BIG-BUNDLE-TAIL, memory: what grew by doubling gives back the rest
+    /// before the fixpoint's reading).
+    pub fn shrink_to_fit(&mut self) {
+        self.binds.shrink_to_fit();
+        self.scopes.shrink_to_fit();
+        self.fns.shrink_to_fit();
+        self.classes.shrink_to_fit();
+        self.objs.shrink_to_fit();
+        for b in &mut self.binds {
+            b.writes.shrink_to_fit();
+            b.refs.shrink_to_fit();
+        }
+        self.scope_names.freeze(self.scopes.len());
+        self.obj_props.freeze();
+        self.name_ids.shrink_to_fit();
+        for f in &mut self.fns {
+            f.calls.shrink_to_fit();
+        }
+        for m in &mut self.mods {
+            m.scope_at.shrink_to_fit();
+            m.fid_at.shrink_to_fit();
+            m.cid_at.shrink_to_fit();
+            m.oid_at.shrink_to_fit();
+            m.asg.shrink_to_fit();
+            m.member_rhs.shrink_to_fit();
+        }
+        self.by_name.shrink_to_fit();
+    }
+
     pub fn new(cfg: Rc<Config>) -> Program {
         Program {
             mods: Vec::new(),
             by_path: HashMap::new(),
-            fns: Vec::new(),
+            fns: Chunked::new(),
             classes: Vec::new(),
             objs: Vec::new(),
-            binds: Vec::new(),
+            binds: Chunked::new(),
             scopes: Vec::new(),
             by_name: HashMap::new(),
-            shared: HashMap::new(),
-            readers: HashMap::new(),
-            desc_memo: HashMap::new(),
-            tg_memo: HashMap::new(),
+            shared: IdMap::default(),
+            readers: IdMap::default(),
+            desc_memo: IdMap::default(),
+            desc_kept: HashMap::new(),
+            name_ids: HashMap::new(),
+            names: Vec::new(),
+            scope_names: ScopeNames::default(),
+            obj_props: ObjProps::default(),
+            tg_memo: IdMap::default(),
+            tg_empty: Rc::new((Vec::new(), descs::How::None)),
+            tg_kept: HashMap::new(),
             cfg,
             work: 0,
             budget: WORK_BASE,
             nodes: 0,
-            anc: HashMap::new(),
+            anc: IdMap::default(),
             sc_props: HashMap::new(),
+            import_targets: IdMap::default(),
+
+            sc_wide: None,
+            sc_this_class: IdMap::default(),
+            sc_collected: HashMap::new(),
+            sc_names_memo: IdMap::default(),
+            sc_names_empty: Rc::new(Vec::new()),
+            sc_names_kept: HashMap::new(),
+            sc_defined: HashMap::new(),
+            sc_dead: HashMap::new(),
+            sc_platform: IdMap::default(),
+            sc_function_names: HashMap::new(),
+            pw_args: IdMap::default(),
+            pw_callers: IdMap::default(),
+            pw_new: Vec::new(),
+            pw_grew: Vec::new(),
+            pw_tracked: IdSet::default(),
+            pc_tracked: IdSet::default(),
+            pc_tracked_fns: IdSet::default(),
+            pc_sites: IdMap::default(),
+            pc_by_callee: IdMap::default(),
+            pc_changed: Vec::new(),
         }
     }
 
-    /// fid and the functions around it (memoized).
-    pub fn scope_fns(&mut self, fid: FnId) -> Rc<BTreeSet<FnId>> {
+    /// (the supply-chain model) `caller` gives parameter `i` of `callee` the value `v` (`outside`: in a call on an
+    /// instance): kept, merged with what it gave there before (pw_args).
+    pub fn pw_given(&mut self, callee: FnId, i: usize, caller: FnId, v: V, outside: bool) {
+        let key = (callee, i as u32, caller);
+        let grew = match self.pw_args.get_mut(&key) {
+            Some((inside, out)) => {
+                let slot = if outside { out } else { inside };
+                let merged = slot.union(&v);
+                let grew = merged != *slot;
+                *slot = merged;
+                grew
+            }
+            None => {
+                let pair = if outside { (V::empty(), v) } else { (v, V::empty()) };
+                self.pw_args.insert(key, pair);
+                self.pw_callers.entry((callee, i as u32)).or_default().push(caller);
+                true
+            }
+        };
+        if grew && self.fns[callee as usize].sc_ref().and_then(|s| s.param_writes.get(&i)).is_some_and(|b| !b.is_empty()) {
+            self.pw_grew.push((callee, i, caller));
+        }
+    }
+
+    /// fid and the functions around it, ascending (memoized; a few, read with `contains`: BIG-BUNDLE-TAIL, memory).
+    pub fn scope_fns(&mut self, fid: FnId) -> Rc<[FnId]> {
         if let Some(got) = self.anc.get(&fid) {
             return got.clone();
         }
-        let mut out = BTreeSet::new();
+        let mut out = Vec::new();
         let mut f = fid;
         loop {
-            out.insert(f);
+            out.push(f);
             match self.fns[f as usize].parent {
                 Some(p) => f = p,
                 None => break,
             }
         }
-        let got = Rc::new(out);
+        out.sort_unstable();
+        out.dedup();
+        let got: Rc<[FnId]> = Rc::from(out);
         self.anc.insert(fid, got.clone());
         got
     }
 
     fn new_scope(&mut self, kind: ScopeKind, parent: Option<ScopeId>, fid: FnId) -> ScopeId {
         let id = self.scopes.len() as ScopeId;
-        self.scopes.push(Scope { kind, parent, names: HashMap::new(), fid });
+        self.scopes.push(Scope { kind, parent, fid });
         id
     }
 
@@ -1118,15 +2046,41 @@ impl Program {
     }
 
     pub fn lookup(&self, scope: ScopeId, name: &[u32]) -> Option<BindId> {
+        let id = self.name_ids.get(name).copied()?;
         let mut s = Some(scope);
-        while let Some(id) = s {
-            let sc = &self.scopes[id as usize];
-            if let Some(&b) = sc.names.get(name) {
+        while let Some(sid) = s {
+            if let Some(b) = self.scope_names.get(sid, id) {
                 return Some(b);
             }
-            s = sc.parent;
+            s = self.scopes[sid as usize].parent;
         }
         None
+    }
+
+    /// A name's number (made for a name not seen before): the scopes' and the objects' keys (scope_names, obj_props).
+    pub fn name_id(&mut self, name: &[u32]) -> u32 {
+        if let Some(&id) = self.name_ids.get(name) {
+            return id;
+        }
+        let id = self.names.len() as u32;
+        let kept: Rc<[u32]> = Rc::from(name);
+        self.names.push(kept.clone());
+        self.name_ids.insert(kept, id);
+        id
+    }
+
+    /// The binding a scope itself declares for `name`.
+    pub fn scope_get(&self, scope: ScopeId, name: &[u32]) -> Option<BindId> {
+        let id = self.name_ids.get(name).copied()?;
+        self.scope_names.get(scope, id)
+    }
+
+    /// What an object literal gives `name`: [(value node, scope)], the last written first.
+    pub fn obj_prop(&self, oid: ObjId, name: &[u32]) -> Vec<(NodeId, ScopeId)> {
+        match self.name_ids.get(name) {
+            Some(&id) => self.obj_props.get(oid, id),
+            None => Vec::new(),
+        }
     }
 
     // ---- indexing ----
@@ -1154,13 +2108,14 @@ impl Program {
             obj: None,
             is_module: true,
             route: 0,
-            reach: BTreeMap::new(),
-            ret_params: BTreeMap::new(),
-            ret_src: None,
-            ret_outer: BTreeMap::new(),
-            param_writes: BTreeMap::new(),
-            callers: BTreeMap::new(),
+            more: None,
+            ret_params: VecMap::new(),
+
+            eval_with: false,
+            callers: Callers::default(),
+            sc: None,
             runs: 0,
+            emits: true,
             calls: Vec::new(),
             size: 0,
         });
@@ -1170,7 +2125,7 @@ impl Program {
             path: path.to_vec(),
             file,
             dir,
-            tree,
+            tree: Rc::new(tree),
             scope,
             fn_: fid,
             named: HashMap::new(),
@@ -1181,13 +2136,17 @@ impl Program {
             regexp_proto: false,
             regexp_rebound: false,
             nodes: 0,
-            scope_at: vec![NONE; n],
-            fid_at: vec![NONE; n],
-            cid_at: vec![NONE; n],
-            oid_at: vec![NONE; n],
-            bind_at: vec![UNSET; n],
-            asg: vec![false; n],
-            text_memo: HashMap::new(),
+            scope_at: Sparse::new(NONE),
+            fid_at: Sparse::new(NONE),
+            cid_at: Sparse::new(NONE),
+            oid_at: Sparse::new(NONE),
+            bind_at: Sparse::dense(n, UNSET),
+            asg: Sparse::new(false),
+            member_rhs: IdMap::default(),
+            regexp_props: HashMap::new(),
+            text_memo: IdMap::default(),
+            tg_none: NodeBits::new(n),
+            sc_names_none: NodeBits::new(n),
         });
         self.by_path.entry(norm).or_insert(idx);
         if root != NONE {
@@ -1201,18 +2160,9 @@ impl Program {
     fn new_bind(&mut self, name: &[u32], kind: BindKind, scope: ScopeId, module: ModId) -> BindId {
         let bid = self.binds.len() as BindId;
         let fid = self.scopes[scope as usize].fid;
-        self.binds.push(Bind {
-            bid,
-            name: name.to_vec(),
-            kind,
-            fid,
-            writes: Vec::new(),
-            shared: false,
-            module,
-            refs: Vec::new(),
-            targets: None,
-        });
-        self.scopes[scope as usize].names.insert(name.to_vec(), bid);
+        let id = self.name_id(name);
+        self.binds.push(Bind { bid, name: id, kind, fid, writes: Vec::new(), shared: false, module, refs: Vec::new() });
+        self.scope_names.map.insert((scope, id), bid);
         bid
     }
 
@@ -1246,7 +2196,7 @@ impl Program {
                     if let Some(id) = id {
                         let name = self.mods[m as usize].tree.str(self.mods[m as usize].tree.nodes[id as usize].f[A as usize]).to_vec();
                         let fb = self.new_bind(&name, BindKind::Function, fscope, m);
-                        self.binds[fb as usize].writes.push(Write::Fn { node, scope: fscope, fid: inner });
+                        self.binds[fb as usize].writes.push_slim(Write::Fn { node, scope: fscope, fid: inner });
                     }
                 }
                 for (i, &p) in params.iter().enumerate() {
@@ -1254,7 +2204,7 @@ impl Program {
                     for (ident, _) in names {
                         let name = Ast(&self.mods[m as usize].tree).name(ident).to_vec();
                         let b = self.new_bind(&name, BindKind::Param, fscope, m);
-                        self.binds[b as usize].writes.push(Write::Param { node: p, scope: fscope, index: i });
+                        self.binds[b as usize].writes.push_slim(Write::Param { node: p, scope: fscope, index: i });
                     }
                 }
                 if self.mods[m as usize].tree.nodes[body as usize].kind == Kind::BlockStatement {
@@ -1272,11 +2222,11 @@ impl Program {
                 if t == Kind::FunctionDeclaration {
                     if let Some(id) = id {
                         let name = Ast(&self.mods[m as usize].tree).name(id).to_vec();
-                        let b = match self.scopes[scope as usize].names.get(&name) {
-                            Some(&b) if matches!(self.binds[b as usize].kind, BindKind::Var | BindKind::Function) => b,
+                        let b = match self.scope_get(scope, &name) {
+                            Some(b) if matches!(self.binds[b as usize].kind, BindKind::Var | BindKind::Function) => b,
                             _ => self.new_bind(&name, BindKind::Function, scope, m),
                         };
-                        self.binds[b as usize].writes.push(Write::Fn { node, scope, fid: inner });
+                        self.binds[b as usize].writes.push_slim(Write::Fn { node, scope, fid: inner });
                     }
                 }
                 continue;
@@ -1294,7 +2244,7 @@ impl Program {
                     let name = Ast(&self.mods[m as usize].tree).name(id).to_vec();
                     let target = if t == Kind::ClassDeclaration { scope } else { cscope };
                     let b = self.new_bind(&name, BindKind::Class, target, m);
-                    self.binds[b as usize].writes.push(Write::Class { node, scope, cid: c });
+                    self.binds[b as usize].writes.push_slim(Write::Class { node, scope, cid: c });
                 }
                 let members = Ast(&self.mods[m as usize].tree).list(body, A).to_vec();
                 for &member in members.iter().rev() {
@@ -1356,7 +2306,10 @@ impl Program {
                     let computed = a.computed(prop);
                     let key = a.at(prop, A);
                     if let Some(name) = &name {
-                        self.objs[o as usize].props.entry(name.clone()).or_default().insert(0, (v, scope));
+                        let id = self.name_id(name);
+                        let vals = self.obj_props.map.entry((o, id)).or_default();
+                        vals.reserve_exact(1);
+                        vals.insert(0, (v, scope));
                     }
                     stack.push((v, scope, fn_, if is_fn { Hint::ObjProp { oid: o, name: name.clone() } } else { Hint::None }));
                     if computed {
@@ -1380,14 +2333,14 @@ impl Program {
                     let names = Ast(&self.mods[m as usize].tree).pattern_names(id);
                     for (ident, path) in names {
                         let name = Ast(&self.mods[m as usize].tree).name(ident).to_vec();
-                        let existing = if kind == BindKind::Var { self.scopes[target as usize].names.get(&name).copied() } else { None };
+                        let existing = if kind == BindKind::Var { self.scope_get(target, &name) } else { None };
                         let b = match existing {
                             Some(b) if matches!(self.binds[b as usize].kind, BindKind::Var | BindKind::Function | BindKind::Param) => b,
                             _ => self.new_bind(&name, kind, target, m),
                         };
                         match init {
-                            Some(init) => self.binds[b as usize].writes.push(Write::Init { node: init, scope, path }),
-                            None if kind != BindKind::Var => self.binds[b as usize].writes.push(Write::Nothing { scope }),
+                            Some(init) => self.binds[b as usize].writes.push_slim(Write::Init { node: init, scope, path: path.into() }),
+                            None if kind != BindKind::Var => self.binds[b as usize].writes.push_slim(Write::Nothing { scope }),
                             None => {}
                         }
                     }
@@ -1441,7 +2394,7 @@ impl Program {
                     for (ident, _) in names {
                         let name = Ast(&self.mods[m as usize].tree).name(ident).to_vec();
                         let b = self.new_bind(&name, BindKind::Catch, cscope, m);
-                        self.binds[b as usize].writes.push(Write::Nothing { scope: cscope });
+                        self.binds[b as usize].writes.push_slim(Write::Nothing { scope: cscope });
                     }
                     self.push_pattern_parts(m, param, cscope, fn_, &mut stack);
                 }
@@ -1472,7 +2425,7 @@ impl Program {
                         }
                     };
                     let b = self.new_bind(&local, BindKind::Import, ms, m);
-                    self.binds[b as usize].writes.push(Write::Import { spec: src.clone(), scope, name });
+                    self.binds[b as usize].writes.push_slim(Write::Import { spec: Box::new(src.clone()), scope, name: Box::new(name) });
                 }
                 continue;
             }
@@ -1486,11 +2439,11 @@ impl Program {
                 match module {
                     Some(md) => {
                         let spec = Ast(&self.mods[m as usize].tree).str_value(md).unwrap_or(&[]).to_vec();
-                        self.binds[b as usize].writes.push(Write::Import { spec, scope, name: u("=") });
+                        self.binds[b as usize].writes.push_slim(Write::Import { spec: Box::new(spec), scope, name: Box::new(u("=")) });
                     }
                     None => {
                         if let Some(entity) = entity {
-                            self.binds[b as usize].writes.push(Write::Init { node: entity, scope, path: Vec::new() });
+                            self.binds[b as usize].writes.push_slim(Write::Init { node: entity, scope, path: Box::default() });
                         }
                     }
                 }
@@ -1503,9 +2456,9 @@ impl Program {
                     (if a.is_ident(id) { Some((a.name(id).to_vec(), id)) } else { None }, a.kids(node))
                 };
                 if let Some((name, _)) = name {
-                    if !self.scopes[scope as usize].names.contains_key(&name) {
+                    if self.scope_get(scope, &name).is_none() {
                         let b = self.new_bind(&name, BindKind::Enum, scope, m);
-                        self.binds[b as usize].writes.push(Write::Nothing { scope });
+                        self.binds[b as usize].writes.push_slim(Write::Nothing { scope });
                     }
                 }
                 for &k in kids.iter().rev() {
@@ -1515,6 +2468,7 @@ impl Program {
             }
             if t == Kind::WithStatement {
                 self.mods[m as usize].eval_with = true;
+                self.fns[fn_ as usize].eval_with = true;
             } else if t == Kind::AssignmentExpression {
                 let (left, right) = {
                     let a = Ast(&self.mods[m as usize].tree);
@@ -1604,9 +2558,12 @@ impl Program {
                 or(&mut name, mname);
                 if matches!(*kind, jt::M_METHOD | jt::M_CONSTRUCTOR) {
                     if let Some(mn) = mname {
+                        // (the names, one copy of each: BIG-BUNDLE-TAIL, memory)
+                        let id = self.name_id(mn);
+                        let mn = self.names[id as usize].clone();
                         let c = &mut self.classes[*cid as usize];
                         let table = if *is_static { &mut c.statics } else { &mut c.methods };
-                        table.insert(mn.clone(), fid);
+                        table.insert(mn, fid);
                     }
                 }
                 cls = Some(*cid);
@@ -1619,6 +2576,11 @@ impl Program {
             Hint::None => {}
         }
         let fscope = self.new_scope(ScopeKind::Function, Some(scope), fid);
+        // (the names, one copy of each: BIG-BUNDLE-TAIL, memory)
+        let name: Option<Rc<[u32]>> = name.map(|n| {
+            let id = self.name_id(&n);
+            self.names[id as usize].clone()
+        });
         self.fns.push(Func {
             fid,
             module: m,
@@ -1632,20 +2594,21 @@ impl Program {
             obj,
             is_module: false,
             route: 0,
-            reach: BTreeMap::new(),
-            ret_params: BTreeMap::new(),
-            ret_src: None,
-            ret_outer: BTreeMap::new(),
-            param_writes: BTreeMap::new(),
-            callers: BTreeMap::new(),
+            more: None,
+            ret_params: VecMap::new(),
+
+            eval_with: false,
+            callers: Callers::default(),
+            sc: None,
             runs: 0,
+            emits: true,
             calls: Vec::new(),
             size: 0,
         });
         self.mods[m as usize].fid_at[node as usize] = fid;
         if let Some(n) = name {
             if !n.is_empty() {
-                self.by_name.entry(n).or_default().push(fid);
+                self.by_name.entry(n).or_default().push_slim(fid);
             }
         }
         fid
@@ -1670,7 +2633,7 @@ impl Program {
 
     fn new_object(&mut self, m: ModId, node: NodeId) -> ObjId {
         let oid = self.objs.len() as ObjId;
-        self.objs.push(Obj { oid, module: m, props: HashMap::new() });
+        self.objs.push(Obj { oid, module: m });
         self.mods[m as usize].oid_at[node as usize] = oid;
         oid
     }
@@ -1710,7 +2673,7 @@ impl Program {
                 self.mods[m as usize].bind_at[node as usize] = b.unwrap_or(GLOBAL);
                 if field == F::Ref {
                     if let Some(b) = b {
-                        self.binds[b as usize].refs.push((node, parent));
+                        self.binds[b as usize].refs.push_slim((node, parent));
                         if self.binds[b as usize].fid != fid {
                             self.binds[b as usize].shared = true;
                         }
@@ -1749,8 +2712,9 @@ impl Program {
                     let callee = a.at(node, A);
                     if t == Kind::CallExpression && a.is_ident_named(callee, "eval") {
                         self.mods[m as usize].eval_with = true;
+                        self.fns[fid as usize].eval_with = true;
                     }
-                    self.fns[fid as usize].calls.push((node, scope));
+                    self.fns[fid as usize].calls.push_slim((node, scope));
                 }
                 Kind::AssignmentExpression => self.record_assignment(m, node, scope, fid),
                 Kind::UpdateExpression | Kind::UnaryExpression => {
@@ -1762,7 +2726,7 @@ impl Program {
                         } else if t == Kind::UpdateExpression && a.is_ident(arg) {
                             let name = a.name(arg).to_vec();
                             if let Some(b) = self.lookup(scope, &name) {
-                                self.binds[b as usize].writes.push(Write::Opaque { node, scope });
+                                self.binds[b as usize].writes.push_slim(Write::Opaque { node, scope });
                                 if self.binds[b as usize].fid != fid {
                                     self.binds[b as usize].shared = true;
                                 }
@@ -1800,7 +2764,7 @@ impl Program {
                             for (ident, _) in names {
                                 let name = Ast(&self.mods[m as usize].tree).name(ident).to_vec();
                                 if let Some(b) = self.lookup(scope, &name) {
-                                    self.binds[b as usize].writes.push(Write::Opaque { node, scope });
+                                    self.binds[b as usize].writes.push_slim(Write::Opaque { node, scope });
                                 }
                             }
                         }
@@ -1813,7 +2777,7 @@ impl Program {
                         for (ident, _) in names {
                             let name = Ast(&self.mods[m as usize].tree).name(ident).to_vec();
                             if let Some(b) = self.lookup(scope, &name) {
-                                self.binds[b as usize].writes.push(Write::Opaque { node, scope });
+                                self.binds[b as usize].writes.push_slim(Write::Opaque { node, scope });
                                 if self.binds[b as usize].fid != fid {
                                     self.binds[b as usize].shared = true;
                                 }
@@ -1942,6 +2906,12 @@ impl Program {
                 stack.push((k, scope, fid, node, F::Ref));
             }
         }
+        // (its marks are all set: kept as they are read from now on)
+        let md = &mut self.mods[m as usize];
+        for marks in [&mut md.scope_at, &mut md.fid_at, &mut md.cid_at, &mut md.oid_at, &mut md.bind_at] {
+            marks.freeze();
+        }
+        md.asg.freeze();
     }
 
     fn record_assignment(&mut self, m: ModId, node: NodeId, scope: ScopeId, fid: FnId) {
@@ -1956,11 +2926,11 @@ impl Program {
             match self.lookup(scope, &name) {
                 Some(b) => {
                     let w = if op_eq {
-                        Write::Assign { node: right, scope, path: Vec::new() }
+                        Write::Assign { node: right, scope, path: Box::default() }
                     } else {
                         Write::Opaque { node: right, scope }
                     };
-                    self.binds[b as usize].writes.push(w);
+                    self.binds[b as usize].writes.push_slim(w);
                     if self.binds[b as usize].fid != fid {
                         self.binds[b as usize].shared = true;
                     }
@@ -1983,7 +2953,7 @@ impl Program {
                 let name = Ast(&self.mods[m as usize].tree).name(ident).to_vec();
                 match self.lookup(scope, &name) {
                     Some(b) => {
-                        self.binds[b as usize].writes.push(Write::Assign { node: right, scope, path });
+                        self.binds[b as usize].writes.push_slim(Write::Assign { node: right, scope, path: path.into() });
                         if self.binds[b as usize].fid != fid {
                             self.binds[b as usize].shared = true;
                         }
@@ -2001,6 +2971,7 @@ impl Program {
             return;
         }
         self.mods[m as usize].asg[left as usize] = true;
+        self.mods[m as usize].member_rhs.insert(left, (right, op_eq));
         let (name, obj) = {
             let a = Ast(&self.mods[m as usize].tree);
             (a.prop_name(left), a.at(left, A))

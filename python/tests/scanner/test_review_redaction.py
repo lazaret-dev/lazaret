@@ -85,9 +85,10 @@ class EntropyLiteralTests(unittest.TestCase):
         self.assertNotIn(ENTROPY_LIT, all_text(issues))
 
     def test_literal_index_substring_match(self):
-        lits = core._SecretLiterals(['k = "%s"' % ENTROPY_LIT])
-        self.assertEqual(lits.redact("u=x" + ENTROPY_LIT + "yz"), "u=x[redacted]yz")
-        self.assertEqual(lits.redact("nothing here"), "nothing here")
+        context = ['k = "%s"' % ENTROPY_LIT]
+        self.assertEqual(core._redact_text("u=x" + ENTROPY_LIT + "yz", context), "u=x[redacted]yz")
+        self.assertEqual(core._redact_text("nothing here", context), "nothing here")
+        self.assertEqual(core._redact_text("u=x" + ENTROPY_LIT + "yz"), "u=x" + ENTROPY_LIT + "yz")   # (no context)
 
 
 class SqlCaseTests(unittest.TestCase):

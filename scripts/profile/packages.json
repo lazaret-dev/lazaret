@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "id": "npm:eslint@10.12.0",
+      "ecosystem": "npm",
+      "name": "eslint",
+      "version": "10.12.0",
+      "files": [
+        {
+          "url": "https://registry.npmjs.org/eslint/-/eslint-10.12.0.tgz",
+          "container": "tgz",
+          "artifact": "npm",
+          "filename": "eslint-10.12.0.tgz",
+          "sha256": "f70175878e41dcf89205c1fa885202c8cbfdf943210e8494c7d65b115b9d2db1",
+          "bytes": 628464
+        }
+      ],
+      "budget": {
+        "engine_s": null
+      }
+    },
+    {
+      "id": "npm:express@5.2.1",
+      "ecosystem": "npm",
+      "name": "express",
+      "version": "5.2.1",
+      "files": [
+        {
+          "url": "https://registry.npmjs.org/express/-/express-5.2.1.tgz",
+          "container": "tgz",
+          "artifact": "npm",
+          "filename": "express-5.2.1.tgz",
+          "sha256": "1773a16c02b4422653479b9c4d211268f7022bdac0d817b5698535bb485dd005",
+          "bytes": 22560
+        }
+      ],
+      "budget": {
+        "engine_s": null
+      }
+    },
+    {
+      "id": "npm:next@16.3.8",
+      "ecosystem": "npm",
+      "name": "next",
+      "version": "16.3.8",
+      "files": [
+        {
+          "url": "https://registry.npmjs.org/next/-/next-16.3.8.tgz",
+          "container": "tgz",
+          "artifact": "npm",
+          "filename": "next-16.3.8.tgz",
+          "sha256": "f6f312a6f62b3addcf3dbf10a5d908940bd9d772c59561341d8ac134fd077ff6",
+          "bytes": 42046250
+        }
+      ],
+      "budget": {
+        "engine_s": null
+      }
+    },
+    {
+      "id": "npm:playwright-core@1.63.0",
+      "ecosystem": "npm",
+      "name": "playwright-core",
+      "version": "1.63.0",
+      "files": [
+        {
+          "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.63.0.tgz",
+          "container": "tgz",
+          "artifact": "npm",
+          "filename": "playwright-core-1.63.0.tgz",
+          "sha256": "208593d4e1bcd8f8fe5f869cad1cc332dc7f1d70dc1d58c102dc3ac36e30f26c",
+          "bytes": 3123044
+        }
+      ],
+      "budget": {
+        "engine_s": null
+      }
+    },
+    {
+      "id": "npm:typescript@7.0.2",
+      "ecosystem": "npm",
+      "name": "typescript",
+      "version": "7.0.2",
+      "files": [
+        {
+          "url": "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz",
+          "container": "tgz",
+          "artifact": "npm",
+          "filename": "typescript-7.0.2.tgz",
+          "sha256": "da2513f4b95176d6dde8b51aab7afe8a927656c9d277369793f77f7e59371c08",
+          "bytes": 365612
+        }
+      ],
+      "budget": {
+        "engine_s": null
+      }
+    },
+    {
+      "id": "pypi:botocore@1.43.108",
+      "ecosystem": "pypi",
+      "name": "botocore",
+      "version": "1.43.108",
+      "files": [
+        {
+          "url": "https://files.pythonhosted.org/packages/61/16/6b4477f433da2c11193802f538330ce080076c2f38d817ad437ed3cd1465/botocore-1.43.108.tar.gz",
+          "container": "tgz",
+          "artifact": "sdist",
+          "filename": "botocore-1.43.108.tar.gz",
+          "sha256": "ee4f75cf3bdbb0da7912e089950e8112f692016539d939312c771499958e6cfd",
+          "bytes": 16312879
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/7a/0b/4670b7e23914b5cc357be5ca45fae503b57d98ecff4b3eabea70412809fd/botocore-1.43.108-py3-none-any.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "botocore-1.43.108-py3-none-any.whl",
+          "sha256": "ab9d16c6b4350aaa54ed28202dfa2998b2d735fdbf3247eb60af469d8d48a5b8",
+          "bytes": 16008194
+        }
+      ],
+      "budget": {
+        "engine_s": null
+      }
+    },
+    {
+      "id": "pypi:litellm@1.103.2",
+      "ecosystem": "pypi",
+      "name": "litellm",
+      "version": "1.103.2",
+      "files": [
+        {
+          "url": "https://files.pythonhosted.org/packages/89/ac/c11888f2fbd37225c48ecdb8535b38f8b0e0cb2219dcd5f3f1698c28ff58/litellm-1.103.2.tar.gz",
+          "container": "tgz",
+          "artifact": "sdist",
+          "filename": "litellm-1.103.2.tar.gz",
+          "sha256": "fa4f6f158bb6e9da41958fe57dd292ac851f23ecceb75b50e70177255e291d3b",
+          "bytes": 18954395
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/a9/d2/5d721cc501d48850caf76f0bf6eb5b179e76b8720663d626c465fd92d1a6/litellm-1.103.2-cp310-abi3-macosx_10_12_x86_64.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "litellm-1.103.2-cp310-abi3-macosx_10_12_x86_64.whl",
+          "sha256": "ff38483d5dd7384e285aaec0d60ce4b0924a5c14f7250af6549baac409ca4150",
+          "bytes": 27764146
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/32/75/6ee7223edc0da9fda4cd1804dbfb7f7cd1d1e62bf608b002b7fb72b97c6b/litellm-1.103.2-cp310-abi3-macosx_11_0_arm64.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "litellm-1.103.2-cp310-abi3-macosx_11_0_arm64.whl",
+          "sha256": "2dc9ebb340a9b3ba0e0a72e6ba86d28b702f5489e53eb6ef96c5831fcaa50108",
+          "bytes": 27226858
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/cf/db/386cd31aac601c1d76933447f0f0fcf37ef3a4179ebe68a1a25423b99d6f/litellm-1.103.2-cp310-abi3-manylinux_2_28_aarch64.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "litellm-1.103.2-cp310-abi3-manylinux_2_28_aarch64.whl",
+          "sha256": "36632b326132139db55eb47186b08f8425cb8c1757f0b3201ee2aa251139aa0a",
+          "bytes": 27534490
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/40/a6/21554ab56309662a81e143cfc7f233e2a48a2ee0b162a7f8955df9219f99/litellm-1.103.2-cp310-abi3-manylinux_2_28_x86_64.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "litellm-1.103.2-cp310-abi3-manylinux_2_28_x86_64.whl",
+          "sha256": "a9d54a0e48c5342b7cbfeb7f0053caca2aa0bb5d68ed69133ccf7107402855cb",
+          "bytes": 28079655
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/63/6d/c5b5c1fa526d453e807984139ecf5fbe6f640a110569e7d84fbc4e045559/litellm-1.103.2-cp310-abi3-musllinux_1_2_aarch64.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "litellm-1.103.2-cp310-abi3-musllinux_1_2_aarch64.whl",
+          "sha256": "c9c4b32c685ca62d7eaf246c94e4a943c884d1ab56607b408b2c9cdf959b658c",
+          "bytes": 27616993
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/cc/e1/2fe0fd0e8668ac6de67dec958524a26878c0ad963676cda2ceeb281e200e/litellm-1.103.2-cp310-abi3-musllinux_1_2_x86_64.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "litellm-1.103.2-cp310-abi3-musllinux_1_2_x86_64.whl",
+          "sha256": "f73617d4d6b6741903f01f003b23c825045276b35a057a72080c816772a90e31",
+          "bytes": 28196360
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/fa/c2/ecb4f45b170e9c5271132f6a399c9a3eb934c077ae6c8e2ac35f4d66ffa5/litellm-1.103.2-cp310-abi3-win_amd64.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "litellm-1.103.2-cp310-abi3-win_amd64.whl",
+          "sha256": "0dc3fb3439653e218bca4c905efd5bdb69e61ab4df31dbb0ede05013e1c4c649",
+          "bytes": 28140642
+        }
+      ],
+      "budget": {
+        "engine_s": null
+      }
+    },
+    {
+      "id": "pypi:requests@2.34.2",
+      "ecosystem": "pypi",
+      "name": "requests",
+      "version": "2.34.2",
+      "files": [
+        {
+          "url": "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz",
+          "container": "tgz",
+          "artifact": "sdist",
+          "filename": "requests-2.34.2.tar.gz",
+          "sha256": "f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed",
+          "bytes": 142856
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+          "container": "zip",
+          "artifact": "wheel",
+          "filename": "requests-2.34.2-py3-none-any.whl",
+          "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+          "bytes": 73075
+        }
+      ],
+      "budget": {
+        "engine_s": null
+      }
+    }
+  ]
+}

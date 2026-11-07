@@ -104,7 +104,16 @@ pub fn parse(src: &[u32]) -> Result<Tree, SyntaxError> {
     if src.len() > MAX_LEN {
         return Err(SyntaxError { line: 0, reason: "the text is too long".to_string() });
     }
-    let lexed = match lexer::tokenize(src) {
+    parse_shared(src, lexer::shared(src))
+}
+
+/// [`parse`], from `src`'s tokens as `lexer::shared(src)` made them (P-1: on the thread whose gate keeps them, for a
+/// parse on another).
+pub fn parse_shared(src: &[u32], lexed: std::sync::Arc<Result<lexer::Lexed, lexer::LexError>>) -> Result<Tree, SyntaxError> {
+    if src.len() > MAX_LEN {
+        return Err(SyntaxError { line: 0, reason: "the text is too long".to_string() });
+    }
+    let lexed = match std::sync::Arc::try_unwrap(lexed).unwrap_or_else(|kept| (*kept).clone()) {
         Ok(l) => l,
         Err((line, reason)) => return Err(SyntaxError { line, reason }),
     };

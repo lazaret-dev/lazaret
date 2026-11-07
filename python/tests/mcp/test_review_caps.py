@@ -126,6 +126,7 @@ def registry_patches(db, found=()):
     return [mock.patch.object(server, "REGISTRY_DB", db),
             mock.patch.object(repo, "discover_pypi", return_value=[]),
             mock.patch.object(repo, "discover_npm", return_value=list(found)),
+            mock.patch.object(repo, "discover_crates", return_value=[]),
             mock.patch.object(repo, "resolve_npm", side_effect=resolve),
             mock.patch.object(repo, "http_bytes", return_value=GOOD_TGZ),
             mock.patch.object(repo, "verify_digest", return_value=None)]

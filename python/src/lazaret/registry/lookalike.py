@@ -20,7 +20,13 @@ from a target; the others can't match). Neither is a target of fewer than
 MIN_TARGET characters (os, fs, vm, ws have hundreds of real neighbours), nor
 one in the package's own npm scope (its owner names those). A finding is
 MAJOR, a weak indicator: a new package with such a name is worth a look,
-and its code is judged by the other tests.
+and its code is judged by the other tests. A dependency's finding names the
+dependency (DEPENDENCY_KEY), and a registry scan or the guard reads that
+dependency's history: one that is an established package (a year old,
+three versions, no new publisher) is INFO (0.1.9, TYPO-ESTABLISHED:
+registry/lookalike_history.py; djotls depends on roman, one change from
+rowan). Not a dependency named like a Node built-in, nor the release's own
+name.
 
 npm names are also compared with Node's built-in modules that have a
 separator in their name (NODE_BUILTINS): a dependency on child-process
@@ -28,6 +34,76 @@ installs a stranger's package, since require('child_process') loads the
 built-in (crypto-hash-sdk, in the benchmark, declares it and uses neither).
 Built-ins named without one (events, buffer) are popular npm packages too,
 browser polyfills, so they are not compared.
+
+Go module paths (0.1.9, N-3) are compared part by part, since anyone can
+create an owner on GitHub but only its owner can add a repository to it: a
+path is one of a well-known module's when its owner is one change from that
+module's, differs from it only in its separators, or gains a word like "-go"
+(GO_AFFIXES), with the repository the same (github.com/shopsprint/
+decimal and github.com/boltdb-go/bolt, both published to squat on
+github.com/shopspring/decimal and github.com/boltdb/bolt); when its host is
+one change from the module's, with the rest the same (githab.com/spf13/
+cobra); or, for gopkg.in, when its name is (gopkg.in/yanl.v3 is
+github.com/go-yanl/yanl). The well-known modules are the TARGETS of
+popular_names.json's "go": the Go modules awesome-go lists and those Debian
+packages, compared lower-cased and without a major version (/v2). An owner
+or host of one of them is never a look-alike (it is no stranger's), nor is a
+dependency in the module's own owner, nor a change to an owner of fewer than
+MIN_GO_OWNER characters unless the repository has MIN_GO_REPO (rs/zerolog,
+aws/aws-sdk-go). A module of another owner with the same repository name is
+not one: most are forks.
+
+Crate names (0.1.9, N-3's second part) are compared as npm's and PyPI's
+are, with the 5,000 crates crates.io counts the most downloads of in the
+last 90 days as targets (popular_names.json's "crates"): proc-macro1 for
+proc-macro2, rustdecimal for rust_decimal (2022's CrateDepression squat). A
+crate's name is folded as crates.io folds it, lower-cased with "_" as "-"
+(rust_decimal and rust-decimal are one crate there, so that is no change);
+a separator dropped or added is still one (rustdecimal). The name compared
+is the crate's own and each crate its Cargo.toml depends on to build
+([dependencies], [build-dependencies] and their per-target tables, a
+renamed one by the name crates.io knows it by); a [dev-dependencies] crate
+is never built for a user of the crate.
+
+VS Code extensions (0.1.9, E-1's third part) are named `publisher.name`
+(compared without case, as the editor and both registries compare them),
+and anyone can create a publisher, so a look-alike is a stranger's: an
+identifier one change from a popular extension's, or differing from it only
+in its separators, in another publisher (juanbIanco.solidity, a capital I
+for the l, cloned juanblanco.solidity on Open VSX in 2025); or a publisher
+one change from a popular extension's publisher, or that publisher with its
+separators changed, whatever the extension's name (juan-bianco.solidity-
+vlang came next). The targets are popular_names.json's "vscode": the most
+installed extensions of the Marketplace and the most downloaded of Open
+VSX. An extension of the target's own publisher is never one (only that
+publisher can publish it), nor a publisher a popular extension has (the
+targets' and the "known_publishers"), nor a publisher of fewer than
+MIN_PUBLISHER letters and digits for the second test (ms, arm and ibm have
+hundreds of neighbours). The names compared are the extension's own (its
+package.json's publisher and name) and those it brings
+(`extensionDependencies` and `extensionPack`), its own publisher's left
+out. An extension of another publisher with the same name is not one:
+Open VSX carries forks and builds of popular extensions under their
+builders' namespaces.
+
+A look-alike name from a look-alike account (0.1.9, RA-9) is
+SC-PUBLISHER-LOOKALIKE, CRITICAL: proc-macro1, one change from proc-macro2,
+was published to crates.io by dtolney, one change from dtolnay, proc-macro2's
+maintainer (arrayref). One look-alike can be chance; two together are
+impersonation. For npm, PyPI and crates, when a release's own name is one
+change from a popular package's (lookalike()), its owners — npm's
+maintainers and the account that published the version, PyPI's owners and
+maintainers and its organization, crates.io's owners — are compared with
+that package's (popular_names.json's "owners", the targets' accounts
+lower-cased): an owner whose name is one change from one of theirs,
+differs from it only in its separators, or is one change from it with the
+separators aside (_publisher_change's rules), is one. Never an owner that is
+one of theirs (the same maintainer publishing a sibling package is normal:
+no finding at all then), nor an owner of any popular package of the registry
+(two real maintainers with like names), nor a name of fewer than MIN_OWNER
+letters and digits; and nothing is said when popular_names.json has no
+owners of the package, or the registry's documents name none
+(owner_lookalike).
 
 The lists and their licences: scripts/update-popular-names.py, and the
 "source" fields of popular_names.json.
@@ -40,11 +116,34 @@ import lazaret.scanner.core as lazaret
 
 MIN_TARGET = 5
 MAX_NAME = 214                       # npm's longest name; a longer one is not compared
+#: (TYPO-ESTABLISHED) the key of an npm, PyPI or crates dependency's finding that names the dependency, as its
+#: registry knows it: a registry scan or the guard reads its history (registry/lookalike_history.py)
+DEPENDENCY_KEY = "lookalikeDependency"
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789-._"
 _SEP_RE = re.compile(r"[-_.]")
 _PEP503_RE = re.compile(r"[-_.]+")
-_ECO_TEXT = {"npm": "npm packages", "pypi": "PyPI projects"}
+_ECO_TEXT = {"npm": "npm packages", "pypi": "PyPI projects", "crates": "crates", "vscode": "VS Code extensions"}
+#: the fewest letters and digits a publisher has for the publisher test (VS Code extensions)
+MIN_PUBLISHER = 6
 _DATA = {}
+#: Go module hosts where anyone can create an owner (a user, an organization,
+#: a group), so that a path is host/owner/repository; gopkg.in/NAME.vN is
+#: github.com/go-NAME/NAME and gopkg.in/OWNER/NAME.vN github.com/OWNER/NAME.
+GO_FORGES = frozenset({"github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "gitee.com", "git.sr.ht",
+                       "gitea.com", "framagit.org", "salsa.debian.org", "launchpad.net", "gopkg.in"})
+#: Words an owner may gain, with or without a separator: boltdb-go for
+#: boltdb. (Not lose: an author who moved a module to an organization so
+#: named left the old path, github.com/xdg/scram for github.com/xdg-go/scram,
+#: in the go.mod of the modules that required it, Shopify/sarama's among them.)
+GO_AFFIXES = ("go", "golang", "dev", "lib", "libs", "pkg", "io", "hq", "official", "org", "team", "labs", "oss",
+              "inc", "sdk")
+MIN_GO_OWNER = 4
+MIN_GO_REPO = 5
+MIN_GO_HOST = 5
+MAX_GO_PATH = 512
+_GO_MAJOR_RE = re.compile(r"/v(?:[2-9]|[1-9][0-9]+)$")
+_GOPKG_MAJOR_RE = re.compile(r"\.v(?:0|[1-9][0-9]*)(?:-unstable)?$")
+_GO_PATH_RE = re.compile(r"[a-z0-9.~_+-]+(?:/[a-z0-9.~_+-]+)*")
 #: Node's built-in modules named with a separator (string_decoder is a
 #: popular npm package too, so it is a target already).
 NODE_BUILTINS = ("child_process", "worker_threads", "perf_hooks", "async_hooks", "trace_events",
@@ -54,8 +153,14 @@ _BUILTIN_BARE = {_SEP_RE.sub("", b): b for b in NODE_BUILTINS}
 
 def normalize(eco, name):
     """The name as the registry compares it: npm's lower-cased, PyPI's
-    PEP 503-normalized."""
+    PEP 503-normalized, a crate's lower-cased with "_" as "-" (crates.io's
+    one name), a Go module path as go_path() writes it ("" for one it does
+    not compare)."""
+    if eco == "go":
+        return go_path(name) or ""
     name = name.strip()
+    if eco == "crates":
+        return name.lower().replace("_", "-")
     return _PEP503_RE.sub("-", name).lower() if eco == "pypi" else name.lower()
 
 
@@ -63,8 +168,13 @@ def _load():
     if not _DATA:
         with open(os.path.join(os.path.dirname(__file__), "popular_names.json"), encoding="utf-8") as f:
             raw = json.load(f)
-        for eco in ("npm", "pypi"):
+        for eco in ("npm", "pypi", "crates"):
             _DATA[eco] = tables(raw[eco]["targets"], raw[eco]["known"])
+        _DATA["go"] = go_tables(raw["go"]["targets"])
+        _DATA["github"] = github_tables(raw.get("github") or {}, raw["go"]["targets"])
+        vscode = raw.get("vscode") or {}
+        _DATA["vscode"] = vscode_tables(vscode.get("targets") or (), vscode.get("known") or (),
+                                        vscode.get("known_publishers") or ())
     return _DATA
 
 
@@ -79,6 +189,24 @@ def tables(targets, known):
         if len(t) >= MIN_TARGET:
             bare.setdefault(_SEP_RE.sub("", t), t)
     return rank, frozenset(known), bare
+
+
+def _bare(n):
+    """n without its separators."""
+    return _SEP_RE.sub("", n)
+
+
+def vscode_tables(targets, known, known_publishers=()):
+    """tables() for VS Code extensions' identifiers (normalized), and for the publisher test: (each popular
+    publisher's best-ranked target, the popular publishers by their letters without separators, the known ones)."""
+    rank, known_ids, bare = tables(targets, known)
+    best, by_bare = {}, {}
+    for t in targets:
+        publisher = t.split(".", 1)[0]
+        best.setdefault(publisher, t)
+        by_bare.setdefault(_bare(publisher), publisher)
+    known_pubs = frozenset(known_publishers) | frozenset(best) | frozenset(k.split(".", 1)[0] for k in known)
+    return rank, known_ids, bare, best, by_bare, known_pubs
 
 
 def variants(n):
@@ -100,7 +228,8 @@ def variants(n):
 
 
 def popular(eco, name):
-    """True for one of the registry's most-downloaded names (the targets)."""
+    """True for one of the registry's most-downloaded names (the targets;
+    for Go, the well-known modules)."""
     return isinstance(name, str) and normalize(eco, name) in _load()[eco][0]
 
 
@@ -135,12 +264,20 @@ def _how(n, t):
 
 def lookalike(eco, name, data=None):
     """(the popular name, how it was changed) when `name` looks like a
-    popular package's of its registry (see above), else None."""
-    rank, known, bare = data or _load()[eco]
+    popular package's of its registry (see above), else None. For Go,
+    go_lookalike's answer."""
+    if eco == "go":
+        return go_lookalike(name, data)
+    rank, known, bare = (data or _load()[eco])[:3]
     n = normalize(eco, name) if isinstance(name, str) else ""
     if not n or len(n) > MAX_NAME or n in rank or n in known:
         return None
-    scope = n.split("/", 1)[0] + "/" if eco == "npm" and n.startswith("@") and "/" in n else None
+    if eco == "npm" and n.startswith("@") and "/" in n:
+        scope = n.split("/", 1)[0] + "/"
+    elif eco == "vscode" and "." in n:
+        scope = n.split(".", 1)[0] + "."          # (an extension of the target's own publisher is that publisher's)
+    else:
+        scope = None
 
     def fits(t):
         return len(t) >= MIN_TARGET and not (scope and t.startswith(scope))
@@ -155,11 +292,230 @@ def lookalike(eco, name, data=None):
     return t, _how(n, t)
 
 
+# ---- VS Code extensions (0.1.9, E-1's third part)
+def _publisher_change(mine, theirs):
+    """How the publisher `mine` looks like the popular publisher `theirs`: a clause, else None."""
+    if mine == theirs:
+        return None
+    if _bare(mine) == _bare(theirs):
+        return f'differs from "{theirs}" only in its separators'
+    how = _one_change(mine, theirs)
+    if how:
+        return f'is one change from "{theirs}" ({how})'
+    how = _one_change(_bare(mine), _bare(theirs))
+    return f'is one change from "{theirs}" ({how}, its separators aside)' if how else None
+
+
+def publisher_lookalike(publisher, data=None):
+    """(the popular publisher, its best-ranked extension, how) when the publisher `publisher` (normalized) looks
+    like a popular extension's publisher: its separators changed, or one change, its separators aside; else None.
+    Never for a popular or known publisher, nor for one, or against one, of fewer than MIN_PUBLISHER letters and
+    digits."""
+    data = data or _load()["vscode"]
+    rank, _known, _bare_ids, best, by_bare, known_pubs = data
+    mine = _bare(publisher)
+    if not publisher or publisher in known_pubs or len(mine) < MIN_PUBLISHER:
+        return None
+    hits = {by_bare[mine]} if mine in by_bare else set()
+    for v in variants(mine):
+        theirs = by_bare.get(v)
+        if theirs is not None and len(_bare(theirs)) >= MIN_PUBLISHER:
+            hits.add(theirs)
+    for theirs in sorted(hits, key=lambda h: rank[best[h]]):
+        how = _publisher_change(publisher, theirs)
+        if how:
+            return theirs, best[theirs], how
+    return None
+
+
+def vscode_lookalike(name, data=None, own=None):
+    """For a VS Code extension's identifier: ("id", the popular extension, how) when the identifier is one change
+    from a popular one's of another publisher, or differs from it only in its separators (lookalike()); ("publisher",
+    the popular extension, the popular publisher, how) when its publisher looks like the publisher of a popular
+    extension (publisher_lookalike()); else None. `own`: the publisher of the extension that brings `name` (its own
+    are not compared)."""
+    data = data or _load()["vscode"]
+    n = normalize("vscode", name) if isinstance(name, str) else ""
+    if not n or len(n) > MAX_NAME or n.count(".") != 1:
+        return None
+    publisher = n.split(".", 1)[0]
+    if publisher == own:
+        return None
+    found = lookalike("vscode", n, data)
+    if found is not None:
+        return ("id",) + found
+    found = publisher_lookalike(publisher, data)
+    if found is not None:
+        theirs, target, how = found
+        return "publisher", target, theirs, how
+    return None
+
+
+# ---- Go module paths (0.1.9, N-3)
+def go_path(path):
+    """A Go module path as the look-alike check compares it — lower-cased,
+    without its major version (/v2; gopkg.in keeps its .vN, which is part
+    of the name) — or None for one it does not compare (not a string,
+    longer than MAX_GO_PATH, a character no module path has, no dot in its
+    host)."""
+    if not isinstance(path, str):
+        return None
+    p = path.strip().lower()
+    if not p or len(p) > MAX_GO_PATH or not _GO_PATH_RE.fullmatch(p) or "." not in p.split("/", 1)[0]:
+        return None
+    return p if p.startswith("gopkg.in/") else _GO_MAJOR_RE.sub("", p)
+
+
+def _go_key(p):
+    """A go_path() without gopkg.in's .vN."""
+    return _GOPKG_MAJOR_RE.sub("", p) if p.startswith("gopkg.in/") else p
+
+
+def _go_major(p):
+    """gopkg.in's .vN of a go_path(), else ""."""
+    m = _GOPKG_MAJOR_RE.search(p) if p.startswith("gopkg.in/") else None
+    return m.group(0) if m else ""
+
+
+def _go_split(p):
+    """A go_path() -> (host, owner, repository, what follows the host). A
+    forge's path (GO_FORGES) has an owner and a repository (a gopkg.in
+    name is its owner, with no repository); another host's has no owner
+    (None): its domain's owner owns every path below it."""
+    host, _, tail = p.partition("/")
+    if host not in GO_FORGES:
+        return host, None, "", tail
+    parts = _go_key(p).split("/")
+    return host, parts[1] if len(parts) > 1 else "", parts[2] if len(parts) > 2 else "", tail
+
+
+def go_tables(targets):
+    """(rank of each target, the targets by host and repository, the
+    targets by what follows their host, their owners, their hosts) for
+    go_lookalike(); `targets` are go_path()s."""
+    rank, by_repo, by_tail, owners, hosts = {}, {}, {}, set(), set()
+    for t in targets:
+        if t in rank:
+            continue
+        rank[t] = len(rank)
+        host, owner, repo, tail = _go_split(t)
+        hosts.add(host)
+        if owner is not None:
+            owners.add((host, owner))
+            by_repo.setdefault((host, repo), []).append((owner, t))
+        by_tail.setdefault(tail, []).append((host, t))
+    return rank, by_repo, by_tail, frozenset(owners), frozenset(hosts)
+
+
+def _one_change(mine, theirs):
+    """How `mine` is one change from `theirs` (_how's words), else None."""
+    if mine == theirs or abs(len(mine) - len(theirs)) > 1:
+        return None
+    if len(mine) == len(theirs):
+        diff = [i for i in range(len(mine)) if mine[i] != theirs[i]]
+        if len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1 and mine[diff[0]] == theirs[diff[1]]
+                              and mine[diff[1]] == theirs[diff[0]]):
+            return _how(mine, theirs)
+        return None
+    longer, shorter = (mine, theirs) if len(mine) > len(theirs) else (theirs, mine)
+    i = 0
+    while i < len(shorter) and longer[i] == shorter[i]:
+        i += 1
+    return _how(mine, theirs) if longer[i + 1:] == shorter[i:] else None
+
+
+def _go_change(mine, theirs, affixes=True):
+    """How `mine`, a part of a path (an owner, a gopkg.in name, a host),
+    looks like `theirs`: a clause ('is one change from "x" (a character
+    added)'), else None."""
+    if mine == theirs:
+        return None
+    if _SEP_RE.sub("", mine) == _SEP_RE.sub("", theirs):
+        return f'differs from "{theirs}" only in its separators'
+    how = _one_change(mine, theirs)
+    if how:
+        return f'is one change from "{theirs}" ({how})'
+    for word in GO_AFFIXES if affixes else ():
+        for sep in ("-", "_", ".", ""):
+            for piece, after in ((sep + word, True), (word + sep, False)):
+                if mine == (theirs + piece if after else piece + theirs):
+                    return f'is "{theirs}" with "{piece}" added'
+    return None
+
+
+def go_lookalike(path, data=None, own=None):
+    """(the well-known module, the part of `path` that looks like its
+    ("owner", "name" for a gopkg.in name, "host"), that part of `path`, the
+    module's, and how: _go_change's clause) when `path` looks like a
+    well-known module's (see above), else None. `own` is the (host, owner)
+    of the module that requires `path`: its own modules are not compared."""
+    rank, by_repo, by_tail, owners, hosts = data or _load()["go"]
+    p = go_path(path)
+    if p is None or p in rank:
+        return None
+    host, owner, repo, tail = _go_split(p)
+    hits = []
+    if owner and (host, owner) not in owners and (host, owner) != own:
+        part = "name" if host == "gopkg.in" and not repo else "owner"
+        for theirs, t in by_repo.get((host, repo), ()):
+            if len(theirs) < MIN_GO_OWNER and not (len(theirs) >= 2 and len(repo) >= MIN_GO_REPO):
+                continue
+            how = _go_change(owner, theirs)
+            if how:
+                hits.append((t, part, owner, theirs, how))
+    if host not in hosts:
+        for theirs, t in by_tail.get(tail, ()):
+            how = _go_change(host, theirs, affixes=False) if len(theirs) >= MIN_GO_HOST else None
+            if how:
+                hits.append((t, "host", host, theirs, how))
+    if not hits:
+        return None
+    major = _go_major(p)
+    return min(hits, key=lambda h: (_go_major(h[0]) != major, rank[h[0]]))
+
+
+def github_tables(section, go_targets):
+    """The look-alike tables of GitHub repositories (GH-NEW-REPOS): go_tables() of the popular repositories as Go
+    paths (github.com/owner/repo) — popular_names.json's "github" targets (owner/repo) and the "go" targets on
+    github.com — and, by repository name lower-cased, the [(owner, description)] the "github" section's
+    "descriptions" give ({"owner/repo": description}), for the copy test."""
+    paths = [f"github.com/{t.lower()}" for t in section.get("targets") or () if _owner_repo(t)]
+    paths += [t for t in go_targets if _github_module(t)]
+    return go_tables(filter(None, map(go_path, paths))), _copies(section.get("descriptions") or {})
+
+
+def _owner_repo(text):
+    return isinstance(text, str) and text.count("/") == 1
+
+
+def _github_module(path):
+    """A Go module path that is a GitHub repository's root (github.com/owner/repo)."""
+    return path.startswith("github.com/") and path.count("/") == 2
+
+
+def _copies(descriptions):
+    """{"owner/repo": description} -> {repo lower-cased: [(owner lower-cased, description)]}, empty ones left out."""
+    copies = {}
+    for full, text in sorted(descriptions.items()):
+        if _owner_repo(full) and isinstance(text, str) and text.strip():
+            owner, name = full.lower().split("/")
+            copies.setdefault(name, []).append((owner, text))
+    return copies
+
+
+def github_lookalike(full_name, data=None):
+    """go_lookalike() of a GitHub repository, `owner/repo`, against the popular repositories (github_tables)."""
+    tables_ = data if data is not None else _load()["github"][0]
+    return go_lookalike(f"github.com/{full_name}", data=tables_) if isinstance(full_name, str) else None
+
+
 def _line_of(text, needles):
-    """The 1-based line of the first of `needles` found in text, else 1."""
+    """The 1-based line of the first of `needles` found in text, else 1 (a
+    needle that starts with a line break: the line after it)."""
     for needle in needles:
         at = text.find(needle) if text and needle else -1
         if at >= 0:
+            at += len(needle) - len(needle.lstrip("\n"))
             return text.count("\n", 0, at) + 1
     return 1
 
@@ -185,10 +541,112 @@ def _found(eco, name):
     return found + (True,) if found is not None else None
 
 
+_GO_WHY = ("A typosquat publishes a Go module under a path like a well-known module's and waits for a typo in an "
+           "import or a go.mod: github.com/shopsprint/decimal for github.com/shopspring/decimal, github.com/"
+           "boltdb-go/bolt for github.com/boltdb/bolt. Anyone can create an owner on GitHub, so an owner one "
+           "character from a well-known one, or with a word like -go added, costs nothing to take. The owners "
+           "and hosts of the well-known modules are never flagged; this one is not among them.")
+
+
+def _go_issues(name, deps, rel, text, lines):
+    """issues() for a Go module whose go.mod (`rel`, `text`) names it `name`
+    and requires `deps`."""
+    out, count = [], f"{len(_load()['go'][0]):,}"
+    mine = go_path(name) if name else None
+    own = _go_split(mine)[:2] if mine else None
+
+    def whose(target, part, my_part, how):
+        return (f'its {part} "{my_part}" {how}, the {part} of "{target}", one of the {count} Go modules awesome-go '
+                "lists or Debian packages.")
+
+    found = go_lookalike(name) if mine else None
+    if found is not None:
+        target, part, my_part, _theirs, how = found
+        line = _line_of(text, [f"module {name}", f'module "{name}"'])
+        out.append(lazaret.mk_issue(
+            {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
+             "msg": f'The module is "{name}": ' + whose(target, part, my_part, how),
+             "why": _GO_WHY,
+             "fix": f'Make sure "{name}" is the module you meant, not "{target}"; read what its code does before '
+                    "building it.",
+             "ref": "CWE-506 · Supply chain"}, rel, line, lines))
+    for dep in sorted(deps):
+        found = go_lookalike(dep, own=own)
+        if found is None:
+            continue
+        target, part, my_part, _theirs, how = found
+        line = _line_of(text, [dep + " ", dep + "\t", f'"{dep}"'])
+        out.append(lazaret.mk_issue(
+            {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
+             "msg": f'Requires "{dep}": ' + whose(target, part, my_part, how),
+             "why": _GO_WHY,
+             "fix": f'Check that "{dep}" is the module meant, not "{target}", and read it before building.',
+             "ref": "CWE-506 · Supply chain"}, rel, line, lines))
+    return out
+
+
+_VSCODE_WHY = ("A VS Code extension is named by its publisher and its name, and anyone can create a publisher, so a "
+               "clone of a popular extension takes a publisher a character away from the real one's: juanbIanco (a "
+               "capital I for the l) for juanblanco's Solidity extension on Open VSX in 2025, then juan-bianco, both "
+               "aimed at Solidity developers. The editor runs an extension with the user's full access when it "
+               "activates it, and installs the extensions it brings with it. The publishers of the most-installed "
+               "extensions are never flagged; this one is not among them.")
+
+
+def _vscode_issues(name, deps, rel, text, lines):
+    """issues() for a VS Code extension identified as `name` (publisher.name) in its package.json (`rel`, `text`)
+    that brings `deps` (its extensionDependencies and extensionPack)."""
+    out, count = [], f"{len(_load()['vscode'][0]):,}"
+    low = (text or "").lower()
+
+    def whose(ident, found):
+        """The clause that says what `ident` looks like (vscode_lookalike's `found`), after the identifier."""
+        if found[0] == "id":
+            return f', one change from "{found[1]}" ({found[2]}), one of the {count} most-installed VS Code extensions.'
+        _kind, target, _theirs, how = found
+        mine = normalize("vscode", ident).split(".", 1)[0]
+        return (f': its publisher "{mine}" {how}, the publisher of "{target}", one of the {count} most-installed '
+                "VS Code extensions.")
+
+    own = None
+    if isinstance(name, str) and name.count(".") == 1:
+        own = normalize("vscode", name).split(".", 1)[0]
+        found = vscode_lookalike(name)
+        if found is not None:
+            out.append(lazaret.mk_issue(
+                {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
+                 "msg": f'The extension is "{name}"' + whose(name, found),
+                 "why": _VSCODE_WHY,
+                 "fix": f'Make sure "{name}" is the extension you meant, not "{found[1]}"; read what it runs before '
+                        "installing it.",
+                 "ref": "CWE-506 · Supply chain"}, rel, _line_of(text, ['"name":', '"name" :']), lines))
+    for dep in sorted(deps):
+        found = vscode_lookalike(dep, own=own)
+        if found is None:
+            continue
+        out.append(lazaret.mk_issue(
+            {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
+             "msg": f'Brings "{dep}" (its extensionDependencies or extensionPack)' + whose(dep, found),
+             "why": _VSCODE_WHY,
+             "fix": f'Check that "{dep}" is the extension meant, not "{found[1]}", and read it before installing this '
+                    "one.",
+             "ref": "CWE-506 · Supply chain"}, rel, _line_of(low, [json.dumps(normalize("vscode", dep))]), lines))
+    return out
+
+
 def issues(eco, name, deps, rel, text=""):
     """SC-TYPOSQUAT findings (MAJOR) for a release named `name` that declares
-    `deps` in `rel` (its text, for the lines)."""
+    `deps` in `rel` (its text, for the lines). For Go, `name` is the module
+    path of a go.mod and `deps` the paths it requires; for a VS Code
+    extension, `name` is its publisher.name and `deps` the extensions it
+    brings. An npm, PyPI or crates dependency's finding names the dependency
+    (DEPENDENCY_KEY; not one like a Node built-in): lookalike_history may
+    make it INFO."""
     out, lines = [], (text or "").split("\n")
+    if eco == "go":
+        return _go_issues(name, deps, rel, text, lines)
+    if eco == "vscode":
+        return _vscode_issues(name, deps, rel, text, lines)
     count = f"{len(_load()[eco][0]):,}"
     what = _ECO_TEXT[eco]
 
@@ -200,7 +658,8 @@ def issues(eco, name, deps, rel, text=""):
     found = _found(eco, name) if name else None
     if found is not None:
         target, how, builtin = found
-        line = _line_of(text, [f'"name": {json.dumps(name)}', f'"name":{json.dumps(name)}', f"Name: {name}"])
+        line = _line_of(text, [f'"name": {json.dumps(name)}', f'"name":{json.dumps(name)}', f"Name: {name}",
+                               f"name = {json.dumps(name)}"])
         out.append(lazaret.mk_issue(
             {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
              "msg": f'The package is named "{name}", ' + whose(target, how, builtin),
@@ -213,11 +672,127 @@ def issues(eco, name, deps, rel, text=""):
         if found is None:
             continue
         target, how, builtin = found
-        line = _line_of(text, [json.dumps(dep) + ":", f"Requires-Dist: {dep}"])
-        out.append(lazaret.mk_issue(
+        line = _line_of(text, [json.dumps(dep) + ":", f"Requires-Dist: {dep}", f"package = {json.dumps(dep)}",
+                               f"dependencies.{dep}]", f"\n{dep} ="])
+        issue = lazaret.mk_issue(
             {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
              "msg": f'Depends on "{dep}", ' + whose(target, how, builtin),
              "why": _BUILTIN_WHY if builtin else _WHY,
              "fix": f'Check that "{dep}" is the dependency meant, not "{target}", and read it before installing.',
-             "ref": "CWE-506 · Supply chain"}, rel, line, lines))
+             "ref": "CWE-506 · Supply chain"}, rel, line, lines)
+        if not builtin:
+            issue[DEPENDENCY_KEY] = dep          # (TYPO-ESTABLISHED: the registry reads its history, lookalike_history)
+        out.append(issue)
     return out
+
+
+# ---- A look-alike name from a look-alike account (0.1.9, RA-9)
+#: the registries whose packages' owners popular_names.json keeps
+OWNER_ECOSYSTEMS = ("npm", "pypi", "crates")
+#: the fewest letters and digits an account's name has to be compared (a short one has hundreds of neighbours)
+MIN_OWNER = 5
+_OWNERS = {}
+
+
+def owner_tables(section):
+    """popular_names.json's "owners" section ({eco: {popular package: its owners, space-separated}}; a list is read
+    too) -> {eco: ({popular package: frozenset of its owners}, frozenset of every owner of a popular package)} for
+    owner_lookalike()."""
+    out = {}
+    for eco in OWNER_ECOSYSTEMS:
+        by_name = section.get(eco) if isinstance(section, dict) else None
+        table = {}
+        for n, owners in (by_name or {}).items():
+            names = owners.split() if isinstance(owners, str) else owners if isinstance(owners, list) else ()
+            kept = frozenset(normalize_owner(o) for o in names if isinstance(o, str) and o.strip())
+            if isinstance(n, str) and kept:
+                table[normalize(eco, n)] = kept
+        out[eco] = table, frozenset().union(*table.values())
+    return out
+
+
+def _owner_data(eco):
+    if not _OWNERS:
+        with open(os.path.join(os.path.dirname(__file__), "popular_names.json"), encoding="utf-8") as f:
+            _OWNERS.update(owner_tables(json.load(f).get("owners") or {}))
+    return _OWNERS.get(eco) or ({}, frozenset())
+
+
+def normalize_owner(name):
+    """An account's name as it is compared: lower-cased (npm's, PyPI's and GitHub's names are one name in any case)."""
+    return name.strip().lower()
+
+
+def owner_change(mine, theirs):
+    """How the account `mine` looks like the account `theirs` (both normalized): "its separators changed", or
+    _how's words ("a character changed"), with ", its separators aside" when they are; None when it does not, when it
+    is `theirs`, or when either has fewer than MIN_OWNER letters and digits."""
+    if mine == theirs or min(len(_bare(mine)), len(_bare(theirs))) < MIN_OWNER:
+        return None
+    if _bare(mine) == _bare(theirs):
+        return "its separators changed"
+    how = _one_change(mine, theirs)
+    if how:
+        return how
+    how = _one_change(_bare(mine), _bare(theirs))
+    return f"{how}, its separators aside" if how else None
+
+
+def owner_target(eco, name, data=None, owner_data=None):
+    """(the popular package, how the name was changed) when `name` looks like a popular package's (lookalike()) whose
+    owners popular_names.json keeps, else None: a release whose owners are worth asking for."""
+    if eco not in OWNER_ECOSYSTEMS:
+        return None
+    found = lookalike(eco, name, data)
+    if found is None or not (owner_data or _owner_data(eco))[0].get(found[0]):
+        return None
+    return found
+
+
+def owner_lookalike(eco, name, owners, data=None, owner_data=None):
+    """(the popular package, how the name was changed, the release's owner, the popular package's owner it looks like,
+    how) when the release `name` looks like a popular package's (owner_target) and one of its `owners` (account names,
+    as the registry gives them) looks like one of that package's owners (owner_change); else None. None too when one
+    of `owners` is one of that package's own, and for an owner of any popular package of the registry (see above)."""
+    found = owner_target(eco, name, data, owner_data)
+    if found is None:
+        return None
+    by_name, everyone = owner_data or _owner_data(eco)
+    target, how_name = found
+    theirs = by_name[target]
+    mine = {normalize_owner(o) for o in owners or () if isinstance(o, str) and o.strip()}
+    if mine & theirs:
+        return None
+    for m in sorted(mine - everyone):
+        for t in sorted(theirs):
+            how = owner_change(m, t)
+            if how:
+                return target, how_name, m, t, how
+    return None
+
+
+_OWNER_WHY = ("proc-macro1, one change from proc-macro2, was published to crates.io by dtolney, one change from "
+              "dtolnay, proc-macro2's maintainer (arrayref). A name one character from a popular package's can be "
+              "chance; an account one character from that package's maintainer's as well is impersonation: it is "
+              "made to be mistaken for the maintainer's own sibling package. The popular packages' own maintainers "
+              "are never flagged; this account is not among them.")
+
+
+def owner_issues(eco, name, owners, rel="(release)"):
+    """SC-PUBLISHER-LOOKALIKE (CRITICAL, RA-9) for a release named `name` whose registry names `owners` as its owners
+    (owner_lookalike); [] when it is not one, or `owners` is empty or None (the registry's documents did not say)."""
+    found = owner_lookalike(eco, name, owners) if name and owners else None
+    if found is None:
+        return []
+    target, how_name, mine, theirs, how = found
+    count, what = f"{len(_load()[eco][0]):,}", _ECO_TEXT[eco]
+    return [lazaret.mk_issue(
+        {"id": "SC-PUBLISHER-LOOKALIKE", "name": "A look-alike package from a look-alike account", "type": "HOTSPOT",
+         "sev": "CRITICAL",
+         "msg": (f'Published by "{mine}", whose name imitates "{theirs}" ({how}), a maintainer of "{target}", one of '
+                 f'the {count} most-downloaded {what}; and the package\'s own name, "{name}", is one change from '
+                 f'"{target}" ({how_name}). Two look-alikes together are impersonation, not chance.')[:1200],
+         "why": _OWNER_WHY,
+         "fix": f'Do not install "{name}"; if you meant "{target}", install that, and report this package to the '
+                "registry.",
+         "ref": "CWE-506 · Supply chain"}, rel, 1, [])]

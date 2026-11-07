@@ -3,9 +3,11 @@
 // clipLine did Array.from(<whole line>) (and mkIssue cpLen(line.slice(0,
 // col))) once per finding, so N findings on one long line cost O(N x line):
 // 2.5k / 5k / 10k / 20k repeats of `try{}catch(e){}` on ONE line took
-// 1.1 / 3.5 / 12.6 / > 44 s (the original engine: 1.7 s at 20k). Clipping is
-// now O(window) per finding (a cached code-point view per line) with output
-// identical to Python's code-point-based clip_snippet_line.
+// 1.1 / 3.5 / 12.6 / > 44 s (the original engine: 1.7 s at 20k). The
+// UTF-16 to code-point offset is now O(log n) per finding (a cached view per
+// line), and since 0.1.9 (BR-7 step 3 c) the engine makes the snippets, all
+// of a file's findings in one call (mkIssues), with the output of Python's
+// code-point-based clip_snippet_line.
 //
 // The 30 s per-file backstop was checked only between rules, so one text
 // rule's per-match loop ran to the end (a 2 s budget: 13.5 s, all 10k
@@ -16,11 +18,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scanFile } from "../src/index.js";
-import { clipLine, mkIssue, cpIndexOf, SNIPPET_MAX, SNIPPET_LEAD } from "../src/lib/issue.js";
+import { clipLine, mkIssues, cpIndexOf, SNIPPET_MAX, SNIPPET_LEAD } from "../src/lib/issue.js";
 import { cpIndex } from "../src/lib/pycompat.js";
 import { setWorkBudget } from "../src/lib/native.js";
 import { registerScanContext } from "../src/lib/redact.js";
-import { SECRET_SKIP_RE } from "../src/scanner/engine.js";
 
 // Python's clip_snippet_line on code points (the reference the engines share)
 function referenceClip(text, col = null) {
@@ -54,13 +55,14 @@ test("clipLine output is Python's code-point clipping (astral characters, lone s
 test("20,000 findings on one 300 KB line: O(window) snippets", () => {
   const line = "try{}catch(e){}".repeat(20_000);
   const lines = ["// header", line, "// footer"];
-  registerScanContext(lines, SECRET_SKIP_RE);       // as scanFile does: each line is redacted once
+  registerScanContext(lines);       // the file's own redaction: each line is redacted once
+  const rule = { id: "B-EMPTY-CATCH", name: "n", type: "BUG", sev: "MAJOR", msg: "m", why: "w", fix: "f", ref: "r" };
   const t0 = performance.now();
-  for (let k = 0; k < 20_000; k++) {
-    const issue = mkIssue({ id: "B-EMPTY-CATCH", name: "n", type: "BUG", sev: "MAJOR", msg: "m", why: "w", fix: "f", ref: "r" },
-      "t.js", 2, lines, k * 15 + 5);
-    if (k === 19_999) assert.ok(issue.snippet[1].includes("catch(e){}") && issue.snippet[1].startsWith("…"));
-  }
+  const issues = mkIssues("t.js", lines, Array.from({ length: 20_000 }, (_, k) => [rule, 2, k * 15 + 5]));
+  assert.equal(issues.length, 20_000);
+  const last = issues[19_999].snippet[1];
+  assert.ok(last.includes("catch(e){}") && last.startsWith("…"));
+  assert.deepEqual(issues[0].snippet, ["// header", line.slice(0, SNIPPET_MAX - 1) + "…", "// footer"]);
   const ms = performance.now() - t0;
   assert.ok(ms < 5000, `${ms.toFixed(0)} ms (was quadratic: minutes)`);
 });

