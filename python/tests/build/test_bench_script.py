@@ -36,6 +36,54 @@ def bench():
     return _support.load_script(SCRIPT, "bench_for_tests")
 
 
+class SetsMetadataTests(unittest.TestCase):
+    """Selected-denominator metadata is validated without loading or scanning artifacts."""
+
+    def setUp(self):
+        self.b = bench()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = pathlib.Path(tmp.name)
+        self.manifest = self.dir / "manifest.jsonl"
+        self.manifest.write_text(
+            json.dumps({"id": "one", "cat": "malicious_intent", "artifact_path": "unused-one"}) + "\n" +
+            json.dumps({"id": "two", "cat": "malicious_intent", "artifact_path": "unused-two"}) + "\n",
+            encoding="utf-8")
+        self.skipped = self.dir / "skipped.json"
+        self.skipped.write_text(json.dumps([{"id": "empty", "skipped": "no files"}]) + "\n", encoding="utf-8")
+        self.provenance = self.dir / "provenance.json"
+        self.write_provenance()
+        self.sets = self.dir / "sets.json"
+        self.sets.write_text(json.dumps({"sets": [{
+            "name": "benchmark", "manifest": "manifest.jsonl", "selected": 3,
+            "skipped": "skipped.json", "provenance": "provenance.json",
+        }]}), encoding="utf-8")
+
+    def write_provenance(self):
+        self.provenance.write_text(json.dumps({
+            "schema": 1, "set": "benchmark", "selected": 3, "scanned": 2, "skipped": 1,
+            "skipped_ids": ["empty"], "manifest_sha256": self.b._sha256(self.manifest),
+            "skipped_sha256": self.b._sha256(self.skipped),
+        }) + "\n", encoding="utf-8")
+
+    def test_selected_denominator_and_checksums(self):
+        entry = self.b.load_sets(self.sets)["sets"][0]
+        self.assertEqual(self.b._selected_denominator(entry, [
+            {"id": "one", "verdict": "SUSPICIOUS"}, {"id": "two", "verdict": "WARN"},
+        ]), "caught 1/2 scanned (50.0%) and 1/3 selected (33.3%); 1 selected releases have no artifact")
+        run = self.dir / "run"
+        run.mkdir()
+        self.b._claim_sets(run, [entry])
+        claimed = json.loads((run / "sets.json").read_text(encoding="utf-8"))
+        self.assertEqual(claimed[0]["manifest_sha256"], self.b._sha256(self.manifest))
+        self.assertEqual(claimed[0]["provenance_sha256"], self.b._sha256(self.provenance))
+
+    def test_changed_metadata_is_refused(self):
+        self.provenance.write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(self.b.SetupError, "provenance does not match"):
+            self.b.load_sets(self.sets)
+
+
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class BenchTests(unittest.TestCase):
     def setUp(self):
@@ -392,6 +440,35 @@ class AllTests(unittest.TestCase):
         self.assertIn("held: 2 releases in", said)
         self.assertIn("against first: verdict changed: 1", said)
 
+    def test_selected_denominator_and_provenance_are_recorded(self):
+        skipped = self.dir / "skipped.json"
+        skipped.write_text(json.dumps([{"id": "empty", "skipped": "no files"}]) + "\n", encoding="utf-8")
+        manifest_path = self.dir / "inert.jsonl"
+        provenance = self.dir / "provenance.json"
+        provenance.write_text(json.dumps({
+            "schema": 1,
+            "set": "inert",
+            "selected": 3,
+            "scanned": 2,
+            "skipped": 1,
+            "skipped_ids": ["empty"],
+            "manifest_sha256": self.b._sha256(manifest_path),
+            "skipped_sha256": self.b._sha256(skipped),
+        }) + "\n", encoding="utf-8")
+        self.sets.write_text(json.dumps({"results": "runs", "report": "reports", "sets": [{
+            "name": "inert", "manifest": "inert.jsonl", "selected": 3,
+            "skipped": "skipped.json", "provenance": "provenance.json",
+        }]}), encoding="utf-8")
+
+        code, said, _ = self.all("--label", "canonical")
+        self.assertEqual(code, 0, said)
+        denominator = "caught 1/2 scanned (50.0%) and 1/3 selected (33.3%); 1 selected releases have no artifact"
+        self.assertIn(denominator, said)
+        self.assertIn(denominator, (self.dir / "reports" / "canonical" / "inert.txt").read_text(encoding="utf-8"))
+        claimed = json.loads((self.dir / "runs" / "canonical" / "sets.json").read_text(encoding="utf-8"))
+        self.assertEqual(claimed[0]["manifest_sha256"], self.b._sha256(manifest_path))
+        self.assertEqual(claimed[0]["provenance_sha256"], self.b._sha256(provenance))
+
     def test_only_and_baseline(self):
         self.assertEqual(self.all("--label", "first")[0], 0)
         self.make_piped_warn("first")
@@ -434,6 +511,10 @@ class AllTests(unittest.TestCase):
         self.sets.write_text(json.dumps({"sets": [{"name": "a", "manifest": "inert.jsonl"}]}), encoding="utf-8")
         self.assertIn("no such set: b", self.all("--only", "b")[2])
         self.assertIn("a label is letters", self.all("--label", "../x")[2])
+
+        self.sets.write_text(json.dumps({"sets": [{"name": "a", "manifest": "inert.jsonl",
+                                                   "selected": 3}]}), encoding="utf-8")
+        self.assertIn("skipped", self.all()[2])
 
 
 #: In the misses' files and nowhere in `misses`' output: no file's contents are written.

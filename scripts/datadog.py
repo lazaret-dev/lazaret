@@ -3,7 +3,8 @@
 malicious-software-packages-dataset: the manifests scripts/bench.py runs.
 
     git clone --filter=blob:none --no-checkout https://github.com/DataDog/malicious-software-packages-dataset.git DATASET
-    python3 scripts/datadog.py DATASET OUT [--commit SHA|HEAD] [--only benchmark|holdout] [--holdout-seed N]
+    python3 scripts/datadog.py DATASET OUT [--canonical|--commit SHA|HEAD]
+        [--only benchmark|holdout] [--holdout-seed N] [--sets-file SETS.json]
 
 writes OUT/benchmark/manifest.jsonl and OUT/holdout/manifest.jsonl, each
 release's file in its set's files/ folder, and prints the two entries of a
@@ -23,12 +24,14 @@ history, without the old samples, from
 `git fetch --unshallow --filter=blob:none origin`. The holdout is read in
 aggregate only (docs/TESTING.md).
 
---commit b302ad0b gives the audit's benchmark (audits/lazaret-audit-2026-10-01.md,
-Appendix): the 516 releases 0.1.9's figures were measured on, with a holdout
-of the same shape (the audit's own, of Sept 30, cannot be drawn again: its
-draw was not kept). Another commit (HEAD: the clone's newest) draws new sets
-there, whose first runs are their baselines; the script prints the commit to
-give again.
+--canonical gives the pinned audit benchmark (audits/lazaret-audit-2026-10-01.md,
+Appendix): 516 selected releases, of which 513 have artifacts and three are
+documented empty releases. It validates the draw and the empty-release list.
+With --sets-file it also writes the separate sets516 configuration consumed
+by bench.py, including paths to provenance and skipped-release metadata.
+--commit b302ad0b draws the same dataset commit without the canonical checks.
+Another commit (HEAD: the clone's newest) draws new sets there, whose first
+runs are their baselines; the script prints the commit to give again.
 
 A sample is a zip, encrypted with the dataset's password ("infected"), of a
 release's files and, for some compromised releases, the upstream sources
@@ -75,7 +78,7 @@ import zipfile
 import zlib
 
 PASSWORD = b"infected"
-AUDIT_COMMIT = "b302ad0b"                             # the audit's (Sept 28, 2026): detectors were written from its benchmark
+AUDIT_COMMIT = "b302ad0b4f614533e7b5ba11de6e2fae46d16928"  # audit draw (Sept 28, 2026)
 COMMIT = "0cf258a43d8baf58aeb01a7e67dbdb63206dc554"   # the measurements' since Oct 15, 2026 (John restarted them there)
 BENCHMARK_SEED = 20260928
 HOLDOUT_SEED = 20261015
@@ -88,6 +91,12 @@ SIZES = {
                 ("npm", "compromised_lib"): 150, ("pypi", "compromised_lib"): EVERY},
 }
 AUDIT_BENCHMARK = 516
+AUDIT_DRAW_PREFIX = "f65d228b78f128e5"
+AUDIT_EMPTY_IDS = (
+    "datadog:pypi:malicious_intent:bolym@1.0",
+    "datadog:pypi:malicious_intent:detectron2@0.6",
+    "datadog:pypi:malicious_intent:requestsx@0.1.2",
+)
 MARKS = ("PKG-INFO", "setup.py", "pyproject.toml", "package.json")
 SDIST_MARKS = {"PKG-INFO", "setup.py", "pyproject.toml"}
 EXTENSION = {("tgz", "npm"): ".tgz", ("tgz", "sdist"): ".tar.gz", ("tbz2", "sdist"): ".tar.bz2",
@@ -503,6 +512,14 @@ def write_atomically(path, data):
     os.replace(tmp, path)
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def read_lines(path):
     if not path.exists():
         return []
@@ -557,6 +574,62 @@ def prepare_set(dataset, set_dir, name, chosen, about, log):
     return manifest, kept, skipped, changed, remade
 
 
+def write_provenance(set_dir, name, about, manifest, kept, skipped):
+    """Write non-sample metadata that makes a generated set independently checkable."""
+    skipped_path = set_dir / "skipped.json"
+    provenance = {
+        "schema": 1,
+        "set": name,
+        "dataset": about["dataset"],
+        "commit": about["commit"],
+        "seed": about["seed"],
+        "draw": about["draw"],
+        "selected": about["releases"],
+        "scanned": len(kept),
+        "skipped": len(skipped),
+        "skipped_ids": [line["id"] for line in skipped],
+        "manifest_sha256": sha256_file(manifest),
+        "skipped_sha256": sha256_file(skipped_path),
+        "release_rules": RULES,
+    }
+    path = set_dir / "provenance.json"
+    write_atomically(path, (json.dumps(provenance, indent=1) + "\n").encode("utf-8"))
+    return path
+
+
+def validate_canonical_draw(dataset_sha, chosen):
+    draw = fingerprint(chosen)
+    if dataset_sha != AUDIT_COMMIT:
+        raise SetupError(f"canonical benchmark resolved to {dataset_sha}, expected {AUDIT_COMMIT}")
+    if len(chosen) != AUDIT_BENCHMARK or not draw.startswith(AUDIT_DRAW_PREFIX):
+        raise SetupError(f"canonical benchmark draw changed: {len(chosen)} releases, draw {draw}; expected "
+                         f"{AUDIT_BENCHMARK} and {AUDIT_DRAW_PREFIX}...")
+
+
+def validate_canonical_skips(skipped):
+    got = tuple(sorted(line["id"] for line in skipped))
+    expected = tuple(sorted(AUDIT_EMPTY_IDS))
+    if got != expected:
+        raise SetupError(f"canonical benchmark empty releases changed: got {list(got)}, expected {list(expected)}")
+
+
+def write_sets(path, results, report, entries):
+    """Write an idempotent sets file without replacing an unrelated configuration."""
+    path = pathlib.Path(path).expanduser().resolve()
+    value = {"schema": 1, "results": results, "report": report, "sets": entries}
+    if path.exists():
+        try:
+            before = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SetupError(f"cannot read existing sets file {path}: {exc}") from None
+        if before != value:
+            raise SetupError(f"{path} already holds another sets configuration")
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomically(path, (json.dumps(value, indent=1) + "\n").encode("utf-8"))
+    return path
+
+
 def make_release(dataset, files_dir, name, item):
     """Read one sample, write its release's file -> its record (or the reason it gives no release)."""
     rid = release_id(item)
@@ -593,11 +666,16 @@ def lazaret_checkout(path):
     return None
 
 
-def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED, log=print):
+def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED, log=print,
+            canonical=False, sets_file=None, results="runs516", report="reports516"):
     out = pathlib.Path(out).expanduser().resolve()
     inside = lazaret_checkout(out)
     if inside:
         raise SetupError(f"{out} is inside the repository {inside}: keep the samples' files outside it")
+    if canonical:
+        if only not in (None, "benchmark"):
+            raise SetupError("the canonical set is the audit benchmark, not a holdout")
+        only, commit = "benchmark", AUDIT_COMMIT
     dataset = Dataset(dataset_path, commit or COMMIT)
     try:
         audit = dataset.resolve(AUDIT_COMMIT)
@@ -607,6 +685,8 @@ def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED
              "new sets, whose first runs are their baselines"))
         groups = samples_by_package(dataset.paths())
         benchmark = draw(groups, BENCHMARK_SEED, SIZES["benchmark"])
+        if canonical:
+            validate_canonical_draw(dataset.sha, benchmark)
         leave_out, holdout_about = {(i["eco"], i["name"]) for i in benchmark}, {}
         if not at_audit:
             # The detectors were written from the audit's benchmark: a holdout holds none of its packages.
@@ -626,6 +706,7 @@ def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED
                      "releases": len(chosen), "draw": fingerprint(chosen), **(holdout_about if name == "holdout" else {})}
             log(f"{name}: {len(chosen)} releases drawn (draw {about['draw'][:16]})")
             manifest, kept, skipped, changed, remade = prepare_set(dataset, out / name, name, chosen, about, log)
+            provenance = write_provenance(out / name, name, about, manifest, kept, skipped)
             log(f"{name}: {len(kept)} releases ({subsets(kept)}), {len(skipped)} skipped")
             if remade:
                 log(f"{name}: {remade} releases made again by the release rules of version {RULES}; "
@@ -635,12 +716,17 @@ def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED
                     log(f"  skipped {line['id']}: {line['skipped']}")
                 for rid in changed:
                     log(f"  changed {rid}")
-                if at_audit and (len(chosen) != AUDIT_BENCHMARK or skipped):
-                    log(f"  The audit's benchmark has {AUDIT_BENCHMARK} releases: this one differs, so its numbers "
-                        "are not the ones the README and the CHANGELOG give.")
+                if canonical:
+                    validate_canonical_skips(skipped)
+                    log(f"  canonical denominator: {len(kept)} scanned, {len(chosen)} selected; the "
+                        f"{len(skipped)} empty releases count as misses")
+                elif at_audit and (len(chosen) != AUDIT_BENCHMARK or skipped):
+                    log(f"  The audit draw selected {AUDIT_BENCHMARK}; {len(kept)} artifacts are scannable and "
+                        f"{len(skipped)} selected releases have no artifact.")
             elif skipped:
                 log(f"  (the holdout's are in {out / name / 'skipped.json'}; read in aggregate only)")
-            entry = {"name": name, "manifest": str(manifest)}
+            entry = {"name": name, "manifest": str(manifest), "selected": len(chosen),
+                     "skipped": str((out / name / "skipped.json")), "provenance": str(provenance)}
             if name == "holdout":
                 entry["aggregate_only"] = True
             entries.append(entry)
@@ -650,7 +736,11 @@ def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED
         log(f"These sets are drawn at {dataset.sha}: give --commit {dataset.sha} to draw them again.")
     log("A sets file's entries for them (scripts/bench.py all):")
     for entry in entries:
-        log("  " + json.dumps(entry) + ",")
+        shown = {key: entry[key] for key in ("name", "manifest", "aggregate_only") if key in entry}
+        log("  " + json.dumps(shown) + ",")
+    if sets_file:
+        written = write_sets(sets_file, results, report, entries)
+        log(f"sets file: {written}")
     return 0
 
 
@@ -669,15 +759,21 @@ def main(argv=None):
                     "dataset, for scripts/bench.py.")
     parser.add_argument("dataset", help="a clone of DataDog/malicious-software-packages-dataset, with its history")
     parser.add_argument("out", help="the folder the sets go to: outside the repository and any synced folder")
-    parser.add_argument("--commit", default=COMMIT,
-                        help="the dataset's commit the sets are drawn at (default: the measurements', since Oct 15, "
-                             f"%(default).8s; {AUDIT_COMMIT}: the audit's; HEAD: the clone's newest)")
+    at = parser.add_mutually_exclusive_group()
+    at.add_argument("--commit", default=None,
+                    help="the dataset commit to draw (default: the Oct 15 measurements; HEAD: the clone's newest)")
+    at.add_argument("--canonical", action="store_true",
+                    help=f"write and validate the pinned {AUDIT_BENCHMARK}-selection audit benchmark")
     parser.add_argument("--only", choices=("benchmark", "holdout"), help="write one set")
     parser.add_argument("--holdout-seed", type=int, default=HOLDOUT_SEED,
                         help="the holdout's draw (default %(default)s); another seed draws another holdout")
+    parser.add_argument("--sets-file", help="also write an idempotent bench.py sets configuration")
+    parser.add_argument("--results", default="runs516", help="sets file's results path (default %(default)s)")
+    parser.add_argument("--report", default="reports516", help="sets file's report path (default %(default)s)")
     args = parser.parse_args(argv)
     try:
-        return prepare(args.dataset, args.out, args.commit, args.only, args.holdout_seed)
+        return prepare(args.dataset, args.out, args.commit, args.only, args.holdout_seed, canonical=args.canonical,
+                       sets_file=args.sets_file, results=args.results, report=args.report)
     except SetupError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

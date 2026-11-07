@@ -72,7 +72,9 @@ manifest, the holdout's with "aggregate_only", the folder the runs are kept
 in ("results") and the one the comparisons go to ("report"):
 
     {"results": "runs", "report": "~/Projects/lazaret/Claude outputs/bench",
-     "sets": [{"name": "benchmark", "manifest": "benchmark/manifest.jsonl"},
+     "sets": [{"name": "benchmark", "manifest": "benchmark/manifest.jsonl",
+               "selected": 516, "skipped": "benchmark/skipped.json",
+               "provenance": "benchmark/provenance.json"},
               {"name": "holdout", "manifest": "holdout/manifest.jsonl", "aggregate_only": true},
               {"name": "popular", "manifest": "popular/manifest.jsonl"}]}
 
@@ -85,6 +87,10 @@ the set's last finished run, and writes each comparison, and a summary,
 to REPORT/LABEL/. A holdout's comparison is in counts only, and nothing
 `all` prints names one of its releases. Stopped, the same command goes on
 where it was; a label's runs are never mixed with another engine library's.
+When a set carries selected, skipped and provenance fields, all three are
+validated against the manifest checksums. Reports show both the scanned and
+selected denominators, and each labelled run records the exact manifest and
+provenance checksums it used.
 
 `misses` reads what a set's misses are without anyone opening them: each
 malicious release of the set's last finished run (or --label's) that is not
@@ -599,7 +605,48 @@ def _set_entry(sets_path, entry, seen):
     manifest = _where(sets_path, entry.get("manifest"), f"set {name}'s \"manifest\"")
     if not manifest.is_file():
         raise SetupError(f"{sets_path}: set {name}'s manifest {manifest} is not there")
-    return {"name": name, "manifest": manifest, "aggregate_only": entry.get("aggregate_only") is True}
+    value = {"name": name, "manifest": manifest, "aggregate_only": entry.get("aggregate_only") is True,
+             "selected": None, "skipped": None, "provenance": None}
+    if "selected" not in entry and "skipped" not in entry and "provenance" not in entry:
+        return value
+    selected = entry.get("selected")
+    if not isinstance(selected, int) or isinstance(selected, bool) or selected < 1:
+        raise SetupError(f"{sets_path}: set {name}'s \"selected\" must be a positive integer")
+    skipped = _where(sets_path, entry.get("skipped"), f"set {name}'s \"skipped\"")
+    provenance = _where(sets_path, entry.get("provenance"), f"set {name}'s \"provenance\"")
+    _validate_set_provenance(sets_path, name, manifest, skipped, provenance, selected)
+    value.update(selected=selected, skipped=skipped, provenance=provenance)
+    return value
+
+
+def _json_file(path, what):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SetupError(f"cannot read {what} {path}: {exc}") from None
+
+
+def _validate_set_provenance(sets_path, name, manifest, skipped_path, provenance_path, selected):
+    """Refuse a selected denominator that is not backed by matching generated metadata."""
+    skipped = _json_file(skipped_path, f"set {name}'s skipped metadata")
+    provenance = _json_file(provenance_path, f"set {name}'s provenance")
+    try:
+        manifest_rows = read_jsonl(manifest)
+    except (OSError, ValueError) as exc:
+        raise SetupError(f"cannot read set {name}'s manifest {manifest}: {exc}") from None
+    if not isinstance(skipped, list) or any(not isinstance(row, dict) or not row.get("id") for row in skipped):
+        raise SetupError(f"{sets_path}: set {name}'s skipped metadata is not a list of releases")
+    if not isinstance(provenance, dict):
+        raise SetupError(f"{sets_path}: set {name}'s provenance is not an object")
+    if len(manifest_rows) + len(skipped) != selected:
+        raise SetupError(f"{sets_path}: set {name} has {len(manifest_rows)} manifest releases and {len(skipped)} "
+                         f"skipped releases, not the selected denominator {selected}")
+    expected = {"set": name, "selected": selected, "scanned": len(manifest_rows), "skipped": len(skipped),
+                "skipped_ids": [row["id"] for row in skipped], "manifest_sha256": _sha256(manifest),
+                "skipped_sha256": _sha256(skipped_path)}
+    wrong = [key for key, value in expected.items() if provenance.get(key) != value]
+    if wrong:
+        raise SetupError(f"{sets_path}: set {name}'s provenance does not match {', '.join(wrong)}")
 
 
 def _sha256(path):
@@ -702,6 +749,33 @@ def _claim_label(run_dir, identity, jobs, deadline_s):
                             "started": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
 
 
+def _claim_sets(run_dir, entries):
+    """Bind a labelled run to exact manifest and provenance checksums."""
+    path = run_dir / "sets.json"
+    value = []
+    for entry in entries:
+        record = {"name": entry["name"], "manifest": str(entry["manifest"]),
+                  "manifest_sha256": _sha256(entry["manifest"])}
+        if entry["selected"] is not None:
+            record.update(selected=entry["selected"], skipped_sha256=_sha256(entry["skipped"]),
+                          provenance_sha256=_sha256(entry["provenance"]))
+        value.append(record)
+    before = _read_json(path, None)
+    if before is None:
+        _write_json(path, value)
+        return
+    if not isinstance(before, list) or any(not isinstance(item, dict) or not item.get("name") for item in before):
+        raise SetupError(f"{run_dir} has invalid set provenance; give this run another --label")
+    claimed = {item["name"]: item for item in before}
+    for record in value:
+        old = claimed.get(record["name"])
+        if old is not None and old != record:
+            raise SetupError(f"{run_dir} holds {record['name']} runs made with another manifest or provenance; "
+                             "give this run another --label")
+        claimed[record["name"]] = record
+    _write_json(path, list(claimed.values()))
+
+
 def _baseline(history, name, label, wanted):
     """The label of the finished run this set's run is compared with, or None."""
     finished = history.get(name, [])
@@ -738,7 +812,22 @@ def _report_set(entry, out, before, show):
             moved = 0
         else:
             moved = compare(before, out, entry["aggregate_only"], show)
+        denominator = _selected_denominator(entry, read_jsonl(out))
+        if denominator:
+            print("  " + denominator)
     return text.getvalue(), moved
+
+
+def _selected_denominator(entry, rows):
+    if entry["selected"] is None:
+        return None
+    scanned, selected = len(rows), entry["selected"]
+    caught = sum(1 for row in rows if row.get("verdict") == "SUSPICIOUS")
+    empty = selected - scanned
+    scanned_rate = 100 * caught / scanned if scanned else 0.0
+    return (f"caught {caught}/{scanned} scanned ({scanned_rate:.1f}%) and "
+            f"{caught}/{selected} selected ({100 * caught / selected:.1f}%); "
+            f"{empty} selected releases have no artifact")
 
 
 def run_all(sets_path, jobs, only=None, label=None, baseline=None, deadline_s=28.0, show=50, allow_stale=False):
@@ -750,6 +839,7 @@ def run_all(sets_path, jobs, only=None, label=None, baseline=None, deadline_s=28
     label = _checked_label(label or default_label())
     results, report_dir = conf["results"], conf["report"] / label
     _claim_label(results / label, identity, jobs, deadline_s)
+    _claim_sets(results / label, chosen)
     report_dir.mkdir(parents=True, exist_ok=True)
     print(f"bench all: {label}, rule set {identity['ruleSet']}, {jobs} jobs; reports in {report_dir}", flush=True)
     lines, status = [_summary_head(label, identity, jobs, stale)], 0
@@ -812,6 +902,9 @@ def _one_set(entry, results, label, wanted, jobs, deadline_s, show, report_dir):
     (report_dir / f"{name}.txt").write_text(text, encoding="utf-8")
     errors = sum(1 for r in read_jsonl(out) if "error" in r)
     head = f"{name}: {total} releases in {took}, {errors} harness errors"
+    denominator = _selected_denominator(entry, read_jsonl(out))
+    if denominator:
+        head += "; " + denominator
     return _set_line(head, against, wanted, text), moved
 
 

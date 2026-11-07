@@ -325,30 +325,27 @@ every release whose verdict or strong findings moved — read each one —
 and `--aggregate-only` gives the counts alone, for the holdout. The
 samples themselves are kept outside the repository (`STRUCTURE.md` §6).
 
-**The malicious sets.** `scripts/datadog.py DATASET OUT` writes the
-benchmark's and the holdout's manifests from a clone of DataDog's
-malicious-software-packages-dataset (a plain clone or a `--filter=blob:none`
-one, not a shallow one), and prints the two entries of a sets file. The
-October 15 measurements use dataset commit `0cf258a4`, the script's default.
-That supplementary benchmark follows the audit draw's recipe
-(seed 20260928: 200 npm and 200 PyPI malicious-intent packages, 100
-compromised npm releases and every compromised PyPI release), but at the
-newer dataset commit: 517 releases are selected and 514 have files to scan.
-It is not the canonical audit draw. The holdout is a new draw of the shape
-of Sept 30's, whose draw was not kept (seed 20261015: 300 npm and 300 PyPI
-malicious-intent packages and 150 compromised npm releases), among the
-packages that neither the benchmark nor the audit's benchmark holds: the
-detectors were written from the audit's, so the clone needs the audit's
-commit, `b302ad0b`, in its history
-(a shallow clone gets it, without the old samples, from `git fetch
---unshallow --filter=blob:none origin`). The first runs on them are the
-baselines. `--commit b302ad0b` gives the canonical audit benchmark: 516
-releases are selected, 513 have files to scan, and the three expected empty
-samples (`bolym@1.0`, `detectron2@0.6` and `requestsx@0.1.2`) are recorded in
-`skipped.json`. Report both the strict verdicts out of 513 scanned artifacts
-and out of 516 selected releases, counting those three as misses for
-comparison with the historical table. Another commit draws new sets there, and
-the script prints the commit to give again. Each sample is read in memory
+**The malicious sets.** The canonical in-sample regression benchmark is the
+audit draw at DataDog dataset commit
+`b302ad0b4f614533e7b5ba11de6e2fae46d16928`, seed 20260928. It selects 516
+releases: 513 have artifacts to scan, while `bolym@1.0`, `detectron2@0.6`
+and `requestsx@0.1.2` are documented empty releases and count as misses in
+the historical 516 denominator. `scripts/datadog.py DATASET OUT --canonical`
+pins and validates that commit, draw fingerprint, selection count and exact
+empty-release list. With `--sets-file`, it writes a separate sets516
+configuration and per-set provenance containing the dataset commit, seed,
+draw fingerprint, manifest and skipped-file checksums, and release-rule
+version.
+
+The Oct 15 draw at `0cf258a4` remains supplementary evidence and is not
+overwritten or relabelled. It uses the same benchmark recipe at the newer
+dataset commit: 517 releases were selected and 514 produced scannable
+artifacts. Its 750-release holdout (seed 20261015) is drawn from packages in
+neither that benchmark nor the audit benchmark and remains aggregate-only.
+A later draw may be made with `--commit`, but its first run is a new baseline
+rather than a replacement for the canonical set. The dataset clone must
+contain the audit commit (a shallow clone can obtain history with `git fetch
+--unshallow --filter=blob:none origin`). Each sample is read in memory
 from git and written as its registry serves the release (the September
 harness's rules: the folder with the dataset's `package_info`, never an
 upstream `sources/` tree; a sample zipped inside itself, as litellm
@@ -398,36 +395,51 @@ named here outside the repository and any synced folder):
    `git clone --filter=blob:none --no-checkout https://github.com/DataDog/malicious-software-packages-dataset.git ~/lazaret-datadog`
    (a shallow clone needs `git fetch --unshallow --filter=blob:none origin`:
    the holdout's draw reads the audit's commit, `b302ad0b`).
-2. Write the canonical audit benchmark manifest:
-   `python3 scripts/datadog.py ~/lazaret-datadog ~/lazaret-corpus-516 --commit b302ad0b4f614533e7b5ba11de6e2fae46d16928 --only benchmark`.
-   It selects 516 releases, writes 513 scannable releases to
-   `benchmark/manifest.jsonl`, and records the three expected empty releases
-   in `benchmark/skipped.json`. Stopped, the same command goes on.
-3. Write the October 15 holdout (and preserve its supplementary benchmark):
-   `python3 scripts/datadog.py ~/lazaret-datadog ~/lazaret-corpus`. It writes
-   `benchmark/manifest.jsonl` and `holdout/manifest.jsonl` there. The first is
-   the separate 514-scannable supplementary draw; the second is the 750-release
-   aggregate-only holdout used with the canonical benchmark.
-4. Write the sets file once, `~/lazaret-bench/sets516.json` (a `~` is the home
-   folder; any other relative path is the sets file's folder's):
+2. Generate and validate the canonical draw, its provenance and its separate
+   sets file (the command is resumable):
 
-   ```
-   {"results": "runs516", "report": "~/Projects/lazaret/Claude outputs/bench516",
-    "sets": [{"name": "benchmark", "manifest": "~/lazaret-corpus-516/benchmark/manifest.jsonl"},
-             {"name": "holdout", "manifest": "~/lazaret-corpus/holdout/manifest.jsonl", "aggregate_only": true}]}
+   ```sh
+   python3 scripts/datadog.py ~/lazaret-datadog ~/lazaret-corpus-516 \
+     --canonical --sets-file ~/lazaret-bench/sets516.json \
+     --results runs516 --report "~/Projects/lazaret/Claude outputs/bench516"
    ```
 
-5. With the commit to measure checked out and its engine built
+   The generated sets entry names the manifest, `skipped.json`, the selected
+   denominator and `provenance.json`. `bench.py` refuses it if their counts or
+   checksums do not agree. Keep the older 514-artifact corpus, sets file, runs
+   and reports under their existing names.
+3. Preserve the October 15 supplementary benchmark and aggregate-only holdout
+   under their existing corpus, sets, run and report names. If they must be
+   rebuilt, use `python3 scripts/datadog.py ~/lazaret-datadog
+   ~/lazaret-corpus`; do not add them to or relabel them as the canonical
+   `sets516.json` run.
+4. With the exact commit to measure checked out and its engine built
    (`pip install -e ./python`: the run refuses a library that is not the
    tree's), from the repository's root:
-   `python3 scripts/bench.py all ~/lazaret-bench/sets516.json --only benchmark,holdout`.
+   `python3 scripts/bench.py all ~/lazaret-bench/sets516.json --label LABEL`.
    A set's first run is its baseline; each later one is compared with the
    set's last finished run (`--baseline LABEL`: another).
+5. Run v0.1.8 and the candidate from separate clean worktrees and environments,
+   using labels that include their exact commits. Before each run, record
+   `git rev-parse HEAD`, build that worktree's engine, and use for example:
+
+   ```sh
+   BASELINE_LABEL=v0.1.8-$(git rev-parse --short=12 HEAD)
+   python3 scripts/bench.py all ~/lazaret-bench/sets516.json --label "$BASELINE_LABEL"
+   echo "$BASELINE_LABEL"
+
+   # In the candidate worktree, set BASELINE_LABEL to the value printed above.
+   python3 scripts/bench.py all ~/lazaret-bench/sets516.json \
+     --label candidate-$(git rev-parse --short=12 HEAD) --baseline "$BASELINE_LABEL"
+   ```
+
+   Do not reuse one editable installation between worktrees. Every labelled
+   run records the engine identity plus manifest, skipped-file and provenance
+   checksums. Reports state both caught/513 scanned and caught/516 selected.
 6. What a session reads back is the report folder,
-   `Claude outputs/bench516/LABEL/`: `summary.txt`, `benchmark.txt` (the
-   verdicts by category and every release that moved) and `holdout.txt`
-   (counts alone). The runs (`~/lazaret-bench/runs516/`), the manifests and
-   the samples stay on the machine.
+   `Claude outputs/bench516/LABEL/`: `summary.txt` and `benchmark.txt`.
+   The runs (`~/lazaret-bench/runs516/`), manifests and samples stay on the
+   maintainer machine.
 7. When a session is to write stories from the benchmark's misses:
    `python3 scripts/bench.py misses ~/lazaret-bench/sets516.json benchmark`.
    It scans again, in memory, each malicious release of the set's last
