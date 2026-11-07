@@ -44,7 +44,10 @@ ships as **two independently-installable packages that must behave identically**
 - **npm `lazaret`** — the Node engine. Zero runtime dependencies, ES modules.
   It is the **project scanner** (`lazaret <dir>`) and the commit-time gate
   (`lazaret hook`); registry auditing, the install guard, custom taint specs,
-  SCA and the MCP server are Python-only.
+  SCA and the MCP server are Python-only through 0.1.10. Installing only npm
+  therefore provides no MCP server; the Python package alone provides both the
+  scanner and MCP, so both packages are not required. Full MCP capability from
+  either package is planned for 0.2.0 (issue #83).
 
 Both packages run one **native engine** written in Rust (`rust/`, no
 crates): every wheel of the PyPI package carries it as a library, and the

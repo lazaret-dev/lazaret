@@ -17,7 +17,7 @@ default-members = ["crates/lazaret-archive", "crates/lazaret-engine", "crates/la
                    "crates/lazaret-net"]
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 license = "Apache-2.0 AND Unicode-3.0"
 rust-version = "1.87"
