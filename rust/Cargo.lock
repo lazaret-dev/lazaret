@@ -4,14 +4,14 @@ version = 3
 
 [[package]]
 name = "lazaret-archive"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "lazaret-verify",
 ]
 
 [[package]]
 name = "lazaret-engine"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "lazaret-archive",
  "lazaret-verify",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "lazaret-ffi"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "lazaret-engine",
  "lazaret-net",
@@ -28,14 +28,14 @@ dependencies = [
 
 [[package]]
 name = "lazaret-net"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "pratique",
 ]
 
 [[package]]
 name = "lazaret-verify"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "pratique",
 ]

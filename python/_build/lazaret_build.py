@@ -65,7 +65,7 @@ RUST = ROOT / "rust" if (ROOT / "rust" / "Cargo.toml").is_file() else ROOT.paren
 
 NAME = "lazaret"
 METADATA = {
-    "Summary": "Static analysis for Python, JavaScript, TypeScript and SQL, plus credential and supply-chain checks for Go and Rust",
+    "Summary": "Static security analysis for Python, JavaScript, TypeScript and SQL, plus supply-chain and credential checks for Go and Rust",
     "Requires-Python": ">=3.10",
     # PEP 639 (Metadata-Version 2.4): an SPDX expression plus the license
     # files' paths (in the sdist root; in the wheel under .dist-info/licenses/).
