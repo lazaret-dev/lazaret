@@ -1,5 +1,11 @@
 # Lazaret
 
+This is the PyPI package reference and long description. The repository's
+documentation map is
+[`docs/README.md`](https://github.com/lazaret-dev/lazaret/blob/main/docs/README.md),
+and documentation changes follow the
+[`documentation guide`](https://github.com/lazaret-dev/lazaret/blob/main/docs/DOCUMENTATION_GUIDE.md).
+
 Static security, supply-chain and quality analysis for Python, JavaScript, TypeScript and SQL, plus supply-chain and credential checks for Go and Rust, with **no dependencies**: Lazaret runs on the Python standard library and its own native engine (written in Rust, with no external crates; every wheel carries it), and even building it downloads nothing.
 
 ```bash

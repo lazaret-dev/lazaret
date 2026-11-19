@@ -1,107 +1,160 @@
 # Releasing Lazaret
 
-One-time setup for claiming the package names and switching to token-free publishing, then the routine for cutting a release, and what to do when a tag goes out wrong. The repository layout is described in `STRUCTURE.md`.
+The routine for promoting reviewed public source, cutting a release from the
+curated GitHub repository, and recovering when a tag or registry publish goes
+wrong. The repository boundary is described in
+[`../STRUCTURE.md`](../STRUCTURE.md): private
+development happens in GitLab, while GitHub contains the reviewed public tree
+and is the only authority for public release tags, PyPI and npm.
 
-## First-time setup
+This file owns the release procedure. Do not duplicate its commands in other
+documents. Changes follow [DOCUMENTATION_GUIDE.md](DOCUMENTATION_GUIDE.md).
 
-Do these in order. Everything here is one-time.
+## Repository and registry bootstrap
+
+These controls already exist. Review them after a change of repository owner,
+workflow name, release environment or registry account; do not repeat the
+first-publish procedure for an established package.
 
 1. **Accounts and orgs.** The `lazaret-dev` org exists on GitHub and the `lazaret-dev` group on GitLab.
    - GitHub org → Settings → Authentication security → require two-factor authentication. Do the same for the GitLab group (Settings → General → Permissions).
    - GitHub org → Settings → Verified and approved domains → add `lazaret.dev` (DNS TXT record at your registrar).
 
-2. **Create the repos and push.**
-   - Create `lazaret-dev/lazaret` on GitHub (public, empty, no README) and `lazaret-dev/lazaret` on GitLab (empty).
-   - Transfer or delete the earlier `johnabooth-afk/lazaret` repo so there's only one GitHub home.
-   - Push to both at once from your machine (see *Mirroring to GitLab* below), then confirm the CI workflow passes on GitHub.
-   - GitHub repo → Settings → Code security → enable private vulnerability reporting, Dependabot alerts, and secret scanning.
-   - GitHub repo → Settings → Rules → Rulesets: protect `main` (no force-push, no deletion) and add a tag ruleset for `v*` (no deletion, no update). On GitLab: Settings → Repository → Protected tags → `v*`, allowed to create: Maintainers.
+2. **Configure the private and public repositories.**
+   - `lazaret-dev/lazaret` on GitLab is the private full-development repository.
+   - `lazaret-dev/lazaret` on GitHub is the curated public repository and the
+     source for public release tags, PyPI packages and npm packages.
+   - Do not configure one remote to push automatically to both repositories.
+     Private GitLab branches, tags and commits must not be mirrored wholesale
+     to GitHub.
+   - Maintain `public-integration` in GitLab for changes intended for the public
+     repository. Before promotion, run the public-scope guard, full-history
+     secret scan and proportionate test suite. Push the reviewed result to a
+     GitHub feature branch and merge it through a protected pull request.
+   - On GitHub, go to **Settings → Advanced Security** and enable private
+     vulnerability reporting, Dependabot alerts, secret scanning and push
+     protection where available.
+   - On GitHub, go to **Settings → Rulesets → Rulesets**. Protect `main` from
+     force-pushes and deletion, require pull requests and protected checks, and
+     add a tag ruleset for `v*` that restricts creation to release maintainers
+     and prevents update and deletion.
+   - On GitLab, go to **Settings → Repository → Branch rules**. Protect the
+     private development branch and `public-integration`; allow merge requests
+     but prevent direct pushes and force-pushes.
 
-3. **First PyPI release.** Recommended: add a *pending* trusted publisher on PyPI (Account settings → Publishing → GitHub: owner `lazaret-dev`, repository `lazaret`, workflow `release.yml`, environment `pypi`), then push the first `v*` tag and let the release workflow create the project. No token is ever created.
-
-   Manual alternative, if you want the name claimed before CI is ready:
-   ```sh
-   cd python
-   python _build/lazaret_build.py dist     # Lazaret's own stdlib build; nothing to install
-   twine upload dist/*                     # an upload tool on your machine, not a Lazaret dependency
-   ```
-   Use a PyPI API token when prompted, never save it to a file in the repo, and delete it after step 5.
-
-4. **First npm release (manual).** npm trusted publishing is configured per package, so the package must exist first.
-   ```sh
-   cd js
-   npm run build                           # the native engine as WebAssembly (Rust + its wasm32-unknown-unknown target)
-   npm login
-   npm publish --access public             # prepack refuses a package without native/lazaret.wasm of this version
-   ```
-   Also create the `@lazaret` org scope at npmjs.com (free for public packages) to hold future companion packages and block lookalikes.
-
-   **Now do step 7, before anything else.** The misspellings are only safe once they are published.
-
-5. **Switch both registries to trusted publishing (OIDC from GitHub Actions).**
+3. **Registry identities and trusted publishing.** PyPI and npm both contain
+   Lazaret 0.1.10. Public releases come only from the protected GitHub
+   repository and `.github/workflows/release.yml`; no registry publishing token
+   belongs in either repository.
    - GitHub repo → Settings → Environments → create `pypi` and `npm`. For each, add yourself as a required reviewer and restrict deployments to `v*` tags.
    - PyPI: project `lazaret` → Settings → Publishing → add GitHub publisher: owner `lazaret-dev`, repository `lazaret`, workflow `release.yml`, environment `pypi`.
    - npm: package `lazaret` → Settings → Trusted publishing → GitHub Actions: organization `lazaret-dev`, repository `lazaret`, workflow `release.yml`, environment `npm`. Leave **Allow npm publish unchecked**: the publisher is then stage-only, and CI can only stage a release, which goes live after you approve it with 2FA. Then set the package to require 2FA and disallow tokens for publishing.
-   - Delete any API tokens you created for the first manual releases.
+   - After changing any of those identities, inspect both registry settings and
+     run the release workflow only from a reviewed tag. Do not use a manual
+     first-publish command as a shortcut.
 
-6. **Domain (lazaret.dev).**
+4. **Domain (lazaret.dev).**
    - At the registrar: turn on auto-renew, the transfer lock, and 2FA on the registrar account. An expired maintainer domain is a known route to hijacking package-registry accounts.
    - Create `security@lazaret.dev` (a forward is fine). It's already referenced in `SECURITY.md`.
    - The reviewed static site source is tracked in `website/`. Deploy that directory to the existing Cloudflare Pages project only after its repository change is reviewed. Do not commit `.wrangler/`, credentials or local environment files, and do not deploy an empty `404.html`; see `website/README.md`.
 
-7. **Reserve likely misspellings (typosquat defense). Blocking: do it right after the first publish (steps 3 and 4).**
-   The names: `lazarat`, `lazarett`, `lazeret`. `lazarat` matters most: it's the likeliest misspelling, and it reads like "Lazarus RAT," which is exactly what an attacker would want to publish. As of 2026-09-25, twelve hours and more after 0.0.1 went live, all three were still unclaimed on both registries.
+5. **Verify reserved misspellings (typosquat defense).** The expected reserved
+   names are `lazarat`, `lazarett` and `lazeret`. Do not rely on the historical
+   2026-09-25 registry status: check the registries each time this control is
+   audited.
    ```sh
-   python3 scripts/make_typosquat_stubs.py --check    # which names are still unclaimed (exit 1 if any)
-   python3 scripts/make_typosquat_stubs.py            # or pass your own list of names
-   # for each name in build/typosquats/:
-   twine upload build/typosquats/lazarat/python/*.whl
-   (cd build/typosquats/lazarat/js && npm publish --access public)
-   npm deprecate lazarat "Misspelling of lazaret. Run: npm install lazaret"
-   python3 scripts/make_typosquat_stubs.py --check    # must now print "All misspellings are reserved."
+   python3 scripts/make_typosquat_stubs.py --check
    ```
-   Then on PyPI, open each stub project → Manage → Releases → **Yank** 0.0.1, with the reason "Misspelling of lazaret." Yanked releases stay reserved but pip skips them, so `pip install lazarat` fails instead of quietly installing a stub. On npm, the deprecation shows a warning on install.
-   Each stub has no dependencies and no code. Importing or requiring it raises an error pointing to `lazaret`, so a misspelled dependency fails loudly rather than silently. It deliberately does not depend on `lazaret`: a stub that pulls in the real package would hide the typo and leave the misspelled name in people's lockfiles.
-   These are one-time manual publishes. Don't add them to CI.
-   - [ ] `python3 scripts/make_typosquat_stubs.py --check` exits 0 and prints "All misspellings are reserved."
+   It must exit 0 and print `All misspellings are reserved.` If a name is no
+   longer controlled by the project, treat that as a registry-security incident
+   rather than automatically publishing from a development checkout.
 
-8. **Trademark.** Search "LAZARET" in Classes 9 and 42 at tmsearch.uspto.gov. (`github.com/lazaret` belongs to an unrelated archaeology lab in Nice; that's why the org is `lazaret-dev`.)
+6. **Trademark.** Search "LAZARET" in Classes 9 and 42 at tmsearch.uspto.gov. (`github.com/lazaret` belongs to an unrelated archaeology lab in Nice; that's why the org is `lazaret-dev`.)
 
 ## Signing tags (optional)
 
-Release tags don't need a signature: the tag ruleset (only maintainers can create `v*` tags), the environment approvals, trusted publishing and npm's 2FA stage approval are what protect a release. If you want tags to show as Verified on GitHub anyway, turn on signing once and `scripts/tag-release.sh` signs automatically. SSH signing (git 2.34 or later) reuses the key you already push with, no GPG needed:
+Release tags don't need a signature: the tag ruleset, environment approvals,
+trusted publishing and npm's 2FA stage approval protect a release. The ruleset
+must restrict creation of `v*` tags to release maintainers as well as prevent
+their update and deletion. If you want tags to show as Verified on GitHub,
+configure signing in the public repository; `scripts/tag-release.sh` then signs
+automatically. Use the approved release-signing key rather than assuming that a
+particular default SSH key is the right one:
 
 ```sh
-git config --global gpg.format ssh
-git config --global user.signingkey ~/.ssh/id_ed25519.pub
-git config --global tag.gpgSign true
+git config gpg.format ssh
+git config user.signingkey /absolute/path/to/release-signing-key.pub
+git config tag.gpgSign true
 ```
 
 Then add the same public key to GitHub as a **Signing Key** (Settings → SSH and GPG keys → New SSH key → Key type).
 
-## Mirroring to GitLab
+## Promoting reviewed changes to public GitHub
 
-GitHub is the source of truth; GitLab is a read-only mirror. The simplest setup with no secrets in CI is to push to both from your machine:
+GitLab contains the complete private development repository. GitHub contains
+only the reviewed public product. They are not automatic mirrors, and a remote
+must never have both repositories as push URLs.
+
+Use separate remotes:
 
 ```sh
-git remote add origin git@github.com:lazaret-dev/lazaret.git
-git remote set-url --add --push origin git@github.com:lazaret-dev/lazaret.git
-git remote set-url --add --push origin git@gitlab.com:lazaret-dev/lazaret.git
-git push origin main                      # goes to both
-git push origin refs/tags/v0.1.0          # a release tag: one tag at a time, also to both
+git remote add gitlab git@gitlab.com:lazaret-dev/lazaret.git
+git remote add github-public https://github.com/lazaret-dev/lazaret.git
+git fetch gitlab --prune --tags
+git fetch github-public --prune --tags
 ```
 
-Never `git push --tags` (or `git push origin main --tags`): it pushes every tag in your local clone, including experiments and tags you deleted on the server, and a pushed `v*` tag starts a release.
+Begin a public update from GitHub's current `main`:
 
-Anything merged through the GitHub web UI reaches GitLab the next time you pull and push. On the GitLab project, note in the description that it's a mirror, and disable issues and merge requests so contributions go to GitHub. (GitLab can also pull-mirror automatically, but on gitlab.com that requires a paid tier.)
+```sh
+git switch public-integration
+git merge --ff-only github-public/main
+```
+
+If the local branch does not exist yet:
+
+```sh
+git switch --create public-integration github-public/main
+```
+
+Apply only changes reviewed for public release. Do not merge private GitLab
+`main` into this branch. Before promotion, inspect the complete public diff and
+run the release gates:
+
+```sh
+git diff --name-status github-public/main...HEAD
+git diff --check github-public/main...HEAD
+sh scripts/check-secrets.sh
+sh scripts/check-versions.sh
+```
+
+The public-scope review is a maintainer decision: confirm that the diff contains
+only product source and public documentation, no private branches, runner
+operations, sample locations, credentials or private infrastructure. Run the
+proportionate test suite, confirm that `github-public` has exactly one push URL
+and that it is GitHub, and push the reviewed branch to protected
+`public-integration` in GitLab. Then create a fresh GitHub branch and pull
+request:
+
+```sh
+git remote get-url --push --all github-public
+git push gitlab public-integration
+public_branch="codex/public-release-$(date +%Y%m%d)"
+git switch -c "$public_branch"
+git push --set-upstream github-public "$public_branch"
+gh pr create --repo lazaret-dev/lazaret --base main --head "$public_branch" --fill
+```
+
+Release tags are created only after the GitHub pull request passes its protected
+checks and is merged. Never use `git push --tags`: it pushes every local tag,
+including experiments and tags previously deleted on a server.
 
 ## Cutting a release
 
 ### Build-machine trust boundary
 
 Published artifacts are built only on GitHub-hosted infrastructure. A release
-tag calls `ci.yml` and `wheels.yml`, but their routing expressions keep every
-tag job off the private runner:
+tag calls `ci.yml` and `wheels.yml`:
 
 - the Linux libraries and sdist use GitHub-hosted Linux runners and pinned
   PyPA manylinux or musllinux images;
@@ -109,58 +162,37 @@ tag job off the private runner:
 - both Windows libraries use GitHub-hosted Windows runners; and
 - the npm WebAssembly package is built on GitHub-hosted Linux.
 
-The private Apple-silicon pool is only an acceleration lane for trusted branch
-and pull-request testing. It must never build a file published to PyPI or npm.
-Before enabling or changing that pool, confirm every item in this checklist:
+No public workflow may select a self-hosted runner. Private runner design and
+operation belong to private GitLab documentation and are outside the public
+release boundary.
 
-- [ ] every runner has the unique `lazaret-tart` label and is limited to the
-      `lazaret-dev/lazaret` repository;
-- [ ] the controller accepts only canonical-repository pushes and
-      maintainer-authored, same-repository pull requests; fork and external
-      pull requests remain on GitHub-hosted runners;
-- [ ] GitHub requires approval for workflows from all external contributors;
-- [ ] each job receives a fresh ephemeral JIT runner and a fresh VM cloned
-      from the immutable base, and both are discarded after that one job;
-- [ ] the VM network permits required internet/DNS access but no access to the
-      host or LAN; and
-- [ ] tag pushes, release workflow calls, manual dispatches and scheduled
-      workflows resolve to GitHub-hosted labels in the routing-policy tests.
-
-Choose and record one runner-group policy; GitHub cannot combine both:
-
-- **Private-PR acceleration (the current workflow policy).** Keep the runner
-  group restricted to `lazaret-dev/lazaret`, but do not restrict it to
-  workflow files at `refs/heads/main`: a pull-request job executes the workflow
-  at `refs/pull/N/merge`, so that restriction would also block trusted PRs.
-  This mode therefore depends on *all* of the controller, external-contributor
-  approval, ephemeral-runner and network-isolation controls above. A workflow
-  expression that checks the PR author is only defense in depth; workflow YAML
-  from a fork is attacker-controlled.
-- **Trusted-ref-only pool.** Remove the self-hosted route from every
-  `pull_request` job and use the private pool only for trusted branch pushes.
-  The runner group can then allow only `.github/workflows/ci.yml` and
-  `.github/workflows/wheels.yml` at `refs/heads/main`. Pull requests use
-  GitHub-hosted runners in this mode.
-
-The first mode buys faster maintainer PR feedback; the second has the smaller
-authorization surface. Revisit the choice before enabling external
-contributions or adding an organization member who can open same-repository
-pull requests.
-
-The workflow file is defense in depth, not the only authorization boundary:
-the out-of-repository controller must reject an untrusted job before it creates
-or registers a runner, even if a pull request changes its own workflow YAML.
-
-1. Bump the version in one commit, and get it onto `main` (merge the PR, or push to `main`): `__version__` in `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and `version` under `[workspace.package]` in `rust/Cargo.toml`, the native engine's, which ships in the platform wheels; then run `cargo update --workspace --offline` in `rust/`, which rewrites the workspace's entries in `rust/Cargo.lock` (`lazaret-archive`, `lazaret-engine`, `lazaret-ffi`, `lazaret-net` and `lazaret-verify`; pratique keeps its own version), and commit that too. `sh scripts/check-versions.sh HEAD` checks all of them.
+1. On a feature branch of the public GitHub repository, bump `__version__` in
+   `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and
+   `version` under `[workspace.package]` in `rust/Cargo.toml`, the native
+   engine's version that ships in the platform wheels. Run `cargo update
+   --workspace --offline` in `rust/`; it rewrites the workspace entries in
+   `rust/Cargo.lock` (`lazaret-archive`, `lazaret-engine`, `lazaret-ffi`,
+   `lazaret-net` and `lazaret-verify`; pratique keeps its own version). Commit
+   the bump, run `sh scripts/check-versions.sh HEAD`, and merge it into `main`
+   through a protected GitHub pull request. Do not push directly to `main`.
 2. Tag the commit on `main`, from a clean checkout of it:
    ```sh
-   git switch main && git pull
-   sh scripts/tag-release.sh                # or: sh scripts/tag-release.sh v0.2.0
+   git switch main
+   git pull --ff-only github-public main
+   RELEASE_REMOTE=github-public sh scripts/tag-release.sh
+   # or: RELEASE_REMOTE=github-public sh scripts/tag-release.sh v0.2.0
    ```
-   The script refuses uncommitted changes, a HEAD that isn't the tip of `origin/main` (it fetches first; a local `main` you didn't pull after merging would tag older code. `RELEASE_NOT_LATEST=1` tags an older commit on `main` on purpose), committed versions that disagree or don't match the tag (`scripts/check-versions.sh HEAD vX.Y.Z`), and a tag name that already exists locally or on `origin`. It then creates an annotated tag (signed as well if you turned on `tag.gpgSign`; see *Signing tags*). It does not push.
+   The script refuses uncommitted changes, a HEAD that isn't the tip of public
+   GitHub `main`, committed versions that disagree or don't match the tag
+   (`scripts/check-versions.sh HEAD vX.Y.Z`), and a tag name that already exists
+   locally or on the selected release remote. It creates an annotated tag
+   (signed as well if you enabled `tag.gpgSign`; see *Signing tags*) and does not
+   push it. `RELEASE_NOT_LATEST=1` is an exceptional recovery control for
+   intentionally tagging an older commit on `main`, not part of an ordinary
+   release.
 3. Push that one tag, with the command the script printed:
    ```sh
-   git push origin refs/tags/v0.2.0         # both push URLs: GitHub and GitLab
+   git push github-public refs/tags/v0.2.0
    ```
 4. The tag triggers `.github/workflows/release.yml`:
    - `verify-tag` fails the release unless the tagged commit is on `main`, the tag is annotated (not a lightweight tag), and the versions committed at the tag match it;
@@ -169,10 +201,22 @@ or registers a runner, even if a pull request changes its own workflow YAML.
    - only when **both** builds succeed do the publish jobs start, each waiting for your approval on its environment (`pypi`, `npm`).
 5. PyPI goes live as soon as its job finishes. npm is only *staged*: approve it with 2FA at https://www.npmjs.com/package/lazaret (the **Staged Packages** tab) or with `npm stage approve <stage-id>`. The run's summary page carries a reminder.
 6. - [ ] `python3 scripts/make_typosquat_stubs.py --check` still exits 0.
-7. Once the release is on PyPI, tag the pre-commit mirror (https://github.com/lazaret-dev/lazaret-pre-commit, from 0.1.9). pre-commit installs a Python hook with `pip install .` at its repository's root, which this repository can't serve, so the mirror holds the hook's definition and a package that pins the release; a mirror tagged before PyPI has the release fails to install:
+7. Once the release is on PyPI, update and tag the pre-commit mirror
+   (https://github.com/lazaret-dev/lazaret-pre-commit, from 0.1.9). pre-commit
+   installs a Python hook with `pip install .` at its repository's root, which
+   this repository can't serve, so the mirror holds the hook's definition and
+   a package that pins the release; a mirror tagged before PyPI has the release
+   fails to install:
    ```sh
    python3 scripts/make_pre_commit_mirror.py 0.2.0 ../lazaret-pre-commit
-   cd ../lazaret-pre-commit && git add -A && git commit -m "Lazaret 0.2.0" && git tag -a v0.2.0 -m v0.2.0 && git push origin main refs/tags/v0.2.0
+   cd ../lazaret-pre-commit
+   git status --short
+   git add -- .pre-commit-hooks.yaml pyproject.toml README.md LICENSE
+   git diff --cached --check
+   git diff --cached
+   git commit -m "Lazaret 0.2.0"
+   git tag -a v0.2.0 -m v0.2.0
+   git push origin main refs/tags/v0.2.0
    ```
    The first time, create the repository empty on GitHub (Apache-2.0; the script writes the LICENSE), clone it next to this one, and protect its tags as this repository's are.
 
@@ -183,71 +227,104 @@ or registers a runner, even if a pull request changes its own workflow YAML.
 The registries get packages built by the release workflow. To send the source itself (to a reviewer, say), build the archive from what git tracks, never with a plain `tar` of your working tree:
 
 ```sh
-python3 scripts/make_bundle.py lazaret-0.1.4.tgz          # tracked files only, reproducible
-git archive --format=tar.gz -o lazaret-0.1.4.tgz v0.1.4   # exactly the tagged tree
+python3 scripts/make_bundle.py lazaret-source-X.Y.Z.tgz
+git archive --format=tar.gz --output=lazaret-git-tree-X.Y.Z.tgz vX.Y.Z
 ```
 
-`make_bundle.py` also refuses credential files and skips OS junk and build output (see `STRUCTURE.md`). A plain `tar` does neither. On macOS it writes each file's extended attributes as a separate `._name` file (AppleDouble): the tarball reviewed for 0.1.3 carried 117 of them. It also picks up untracked files, build output (`build/`, `npm-dist/`) and caches. If you must use `tar`, run it as `COPYFILE_DISABLE=1 tar --exclude='._*' …`, and check that `tar -tzf lazaret-0.1.4.tgz | grep -E '(^|/)\._'` prints nothing.
+Run these commands from the curated public checkout. `make_bundle.py` refuses
+credential files and skips OS junk and build output (see `STRUCTURE.md`). A
+plain `tar` does neither. On macOS it writes extended attributes as separate
+`._name` files (AppleDouble), and can pick up untracked files, build output and
+caches. If you must use `tar`, run it as `COPYFILE_DISABLE=1 tar
+--exclude='._*' …`, and check that `tar -tzf ARCHIVE.tgz | grep -E
+'(^|/)\._'` prints nothing.
 
 ## Recovering from a bad tag
 
 Re-point a tag only if **nothing was published from it**. PyPI and npm versions are immutable: once a version is public (or staged on npm and approved), release the next patch version instead and leave the tag alone.
 
-### v0.1.0 (tagged 2026-09-25, pointing at 8b63318)
+### Tag pushed but nothing published
 
-`v0.1.0` was pushed pointing at `8b63318`, whose version files still say `0.0.1` (the bump was committed afterwards). The release workflow at that commit runs the `versions` check (tag vs. files) inside its test stage, before any build or publish job, so its run should have stopped there with nothing published; step 1 confirms it. The decision is to keep the version number 0.1.0 and re-tag the fixed commit.
+First record the tag object, commit and failed run URL, then confirm the version
+is absent from PyPI, public npm and npm staging:
 
-1. Confirm nothing went out for 0.1.0:
+```sh
+curl --fail --silent --show-error https://pypi.org/pypi/lazaret/json \
+  | python3 -c 'import json,sys; print(*json.load(sys.stdin)["releases"], sep="\n")'
+npm view lazaret versions --json
+npm stage list lazaret
+gh run list --repo lazaret-dev/lazaret --limit 20
+```
+
+If the version appears in either public registry, or an npm stage was approved,
+do not move the tag. Keep it naming the published source and release the next
+patch version. If an unapproved npm stage exists while PyPI has nothing, reject
+that stage before considering a re-tag.
+
+Only when nothing was published:
+
+1. On GitHub, open **Settings → Rulesets → Rulesets → the `v*` tag ruleset**,
+   set its enforcement status to **Disabled**, and save. This temporary change
+   needs explicit maintainer approval.
+2. Delete the tag from public GitHub and locally, naming the release remote
+   explicitly:
+
    ```sh
-   npm view lazaret versions --json          # expect ["0.0.1"]
-   npm stage list lazaret                    # (after npm login) expect no 0.1.0; if there is one: npm stage reject <stage-id>
+   git push github-public :refs/tags/vX.Y.Z
+   git tag -d vX.Y.Z
+   git ls-remote --tags github-public refs/tags/vX.Y.Z
    ```
-   and https://pypi.org/project/lazaret/#history lists only 0.0.1, and the v0.1.0 run on the Actions tab failed in its test stage. If 0.1.0 is on PyPI or public on npm, stop here and release 0.1.1 instead.
-2. Lift the tag protection:
-   - GitHub: repo → Settings → Rules → Rulesets → the `v*` tag ruleset → Enforcement status: **Disabled** → Save changes.
-   - GitLab: project → Settings → Repository → Protected tags → `v*` → **Unprotect**.
-3. Delete the tag everywhere:
+
+   The final command must print nothing. If GitHub created a Release, remove the
+   resulting draft on the Releases page. Leave the failed Actions run in the
+   audit history and do not rerun it.
+3. Merge the correction into public GitHub `main` through a protected pull
+   request, then tag its clean tip:
+
    ```sh
-   git push origin :refs/tags/v0.1.0        # origin has both push URLs: deletes it on GitHub and GitLab
-   git tag -d v0.1.0
-   git ls-remote --tags git@github.com:lazaret-dev/lazaret.git refs/tags/v0.1.0   # prints nothing
-   git ls-remote --tags git@gitlab.com:lazaret-dev/lazaret.git refs/tags/v0.1.0   # prints nothing
+   git switch main
+   git pull --ff-only github-public main
+   RELEASE_REMOTE=github-public sh scripts/tag-release.sh vX.Y.Z
+   git push github-public refs/tags/vX.Y.Z
    ```
-4. GitHub leftovers:
-   - If a GitHub Release named v0.1.0 was created, deleting the tag turns it into a draft: delete it on the Releases page.
-   - GitHub served "Source code (zip / tar.gz)" archives for v0.1.0 generated from `8b63318` (0.0.1 code). They disappear with the tag, and the new tag's archives are generated from the new commit, so anything downloaded before now is not what 0.1.0 is. Don't publish checksums of those archives.
-   - The failed release run for the old tag can stay in the Actions history; don't re-run it.
-5. Get the fixed commit onto `main` and tag it:
+
+4. Immediately restore the `v*` ruleset to **Active**, confirm it protects tag
+   creation, update and deletion, and then approve the release environments.
+5. Other clones keep the old local tag. After the replacement is complete, run
+   this in each clone:
+
    ```sh
-   git switch main && git pull              # main now has the fixes and "Bump version to 0.1.0"
-   sh scripts/check-versions.sh HEAD v0.1.0 # expect: python: 0.1.0  npm: 0.1.0 ... tag: v0.1.0 matches
-   sh scripts/tag-release.sh v0.1.0
-   git push origin refs/tags/v0.1.0
+   git tag -d vX.Y.Z
+   git fetch github-public tag vX.Y.Z
    ```
-6. Restore the protection right away:
-   - GitHub: the `v*` tag ruleset → Enforcement status: **Active** → Save changes.
-   - GitLab: Settings → Repository → Protected tags → protect `v*` again (allowed to create: Maintainers).
-7. Approve the `pypi` and `npm` environments in the new release run, then approve the staged npm version.
-8. Other clones keep the old tag: `git fetch --tags` never moves an existing tag. On every other machine run `git tag -d v0.1.0 && git fetch origin tag v0.1.0`.
+
+Historical note: `v0.1.0` once named a commit whose files still said `0.0.1`.
+The current workflow and `scripts/tag-release.sh` contain version and ancestry
+checks to prevent that class of mistake; its incident-specific commands are not
+the current procedure.
 
 ### One registry published, the other failed
 
 A version can't be re-uploaded, so don't re-point the tag once either registry has it (the tag must keep naming what was published). Finish the other registry from the same run instead:
 
-- **npm failed after PyPI published** (v0.1.0: `npm stage publish` read `npm-dist/...tgz` as a GitHub repository; fixed with `./`). If the fix is only in the workflow, publish the tarball that run built, by hand, with 2FA:
+- **npm failed after PyPI published.** Recover only the tarball that the same
+  run built. Download it, record its checksum, inspect its version and stage it
+  for the normal 2FA approval; do not rebuild that version from another commit:
   ```sh
   gh run download <run-id> -n npm-dist -D npm-dist
+  shasum -a 256 npm-dist/lazaret-X.Y.Z.tgz
   tar -xOf npm-dist/lazaret-X.Y.Z.tgz package/package.json | grep '"version"'   # X.Y.Z
-  npm publish ./npm-dist/lazaret-X.Y.Z.tgz                                     # asks for your 2FA code
+  npm stage publish ./npm-dist/lazaret-X.Y.Z.tgz
+  npm stage approve <stage-id>                                                  # asks for 2FA
   ```
-  (Or `npm stage publish ./npm-dist/lazaret-X.Y.Z.tgz` and then `npm stage approve <stage-id>`, if you want to look at the staged version first.)
   Then merge the workflow fix so the next release stages from CI again.
-- **PyPI failed after npm staged or published**: rerun the failed job (`gh run rerun <run-id> --failed`); it publishes the artifacts that run built.
+- **PyPI failed after npm staged but unapproved:** leave npm unapproved and
+  rerun the failed job (`gh run rerun <run-id> --failed`), which publishes the
+  artifacts that run built. If PyPI cannot be completed, reject the npm stage.
+- **PyPI failed after npm was approved:** rerun the failed PyPI job from the
+  original run. The public npm version makes the tag immutable even while PyPI
+  is incomplete.
 - If the package itself is wrong, leave the published version alone and release the next patch version from both.
-
-### In general
-
-The same steps with your version: confirm nothing was published, lift the tag protection on GitHub and GitLab, `git push origin :refs/tags/vX.Y.Z` and `git tag -d vX.Y.Z`, delete any GitHub Release, fix `main`, `sh scripts/tag-release.sh vX.Y.Z`, `git push origin refs/tags/vX.Y.Z`, restore the protection.
 
 ## Notes
 
@@ -256,5 +333,8 @@ The same steps with your version: confirm nothing was published, lift the tag pr
 - `build-python` pins an exact Python (3.12.14): compressed bytes depend on the interpreter's zlib, so a byte-identical rebuild of a tag needs the same Python.
 - The native libraries' pins live in `.github/workflows/wheels.yml` and are bumped by hand (Dependabot only updates actions): `RUST_VERSION` (at or above `rust-version` in `rust/Cargo.toml`; `release.yml` has its own copy for the npm package's WebAssembly build, kept the same, which `test_review_release_workflow.py` checks), and the PyPA images, by digest: the two manylinux_2_28 ones and the two musllinux_1_2 ones, which the install job names again (`docker buildx imagetools inspect quay.io/pypa/manylinux_2_28_x86_64:latest`, and the same for `_aarch64` and `musllinux_1_2_x86_64`, `_aarch64`). The musl jobs install the musl-hosted toolchain of `RUST_VERSION` (`rustup toolchain install 1.95.0-x86_64-unknown-linux-musl --force-non-host`), which runs in the image. A pull request that changes the workflow runs it, so a bump is tested before a tag needs it. GitHub's last Intel macOS image, `macos-15-intel`, goes away in August 2027; the x86-64 macOS library then has to be cross-built on Apple silicon (`docs/RUST_ENGINE.md`, section 4).
 - The sdist and the wheels are `Apache-2.0 AND Unicode-3.0` and carry `LICENSE`, `LICENSE-UNICODE` (the Unicode 13.0 table is Unicode data, and so is the engine the dashboard carries, with its notices) and `rust/NOTICE`: the native engine, which every wheel carries and the sdist carries the source of, is Lazaret's own work since P-16 (`docs/RUST_ENGINE.md`, section 11). The npm package is `Apache-2.0 AND Unicode-3.0` too: it carries the native engine as WebAssembly (`native/lazaret.wasm`, with `rust/NOTICE` as `native/NOTICE`), with `js/LICENSE-UNICODE` and `js/NOTICE`. The codec names the npm package and the dashboard list are what Python's codecs answer to, facts about Python, so no package carries CPython's license. The engine takes no translation of CPython code (write from the documentation and Python's answers): `tests/architecture/test_rust_notices.py` fails on an engine file that carries CPython's license or says it is ported from CPython, and `test_notices.py` holds the npm package's notices to its code.
-- PyPI trusted publishing has run for real (v0.0.1, v0.1.0). The npm job's staged publish has not succeeded yet: v0.1.0's run failed on the tarball path (now `./npm-dist/...`, and `tests/build/test_review_release_workflow.py` checks it), so that version was finished as in *One registry published, the other failed*. The first npm release (step 4) was manual too, because npm only allows a trusted publisher on a package that already exists.
+- PyPI and npm both contain Lazaret 0.1.10. Their trusted publishers are bound
+  to `lazaret-dev/lazaret` on GitHub, `.github/workflows/release.yml`, and the
+  `pypi` or `npm` environment. Verify those identities before changing repository
+  ownership, workflow names or environment names.
 - npm provenance requires the GitHub repo to be public. So does `verify-tag`, which fetches `main` without credentials.

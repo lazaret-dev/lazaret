@@ -1,5 +1,9 @@
 # Security policy
 
+This file owns Lazaret's public security policy. Repository documentation is
+organized through the [documentation index](docs/README.md) and maintained
+under the [documentation guide](docs/DOCUMENTATION_GUIDE.md).
+
 Lazaret is a supply-chain security tool, so its own supply chain is held to a high bar:
 
 - **No dependencies, at any layer.** The Python package runs on the standard library alone; its Postgres client (`lazaret.pg`) and safe XML parser (`lazaret.safexml`) are part of it. It builds with its own standard-library backend, and its tests run on plain `unittest`. `tests/architecture/test_stdlib_only.py` fails the build on any non-stdlib import, and `tests/build/test_build_backend.py` checks the wheel declares no dependencies. The npm package has none either.

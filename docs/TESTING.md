@@ -3,14 +3,18 @@
 *The working method for verifying a change. What to run, in what order, how to
 keep it fast, and how to survive Windows.*
 
+This file owns the operational testing procedure. The documentation map is in
+[README.md](README.md), and changes follow
+[DOCUMENTATION_GUIDE.md](DOCUMENTATION_GUIDE.md).
+
 This is the operational playbook. It complements two documents you should also
 know:
 
-- **`STRUCTURE.md` §4** — the test *layout*, categories/gating, the exact
+- **[`../STRUCTURE.md`](../STRUCTURE.md) §4** — the test *layout*, categories/gating, the exact
   `python -m unittest` commands, and the authoritative **cross-platform rules**
   (encoding, paths, resources, line endings, OS capabilities, interpreter
   drift, time). Don't duplicate those rules; obey them.
-- **`docs/DESIGN.md` §6–§8** — *why* we test this way (the parity invariant
+- **[`DESIGN.md`](DESIGN.md) §6–§8** — *why* we test this way (the parity invariant
   between the packages, the engine's recorded outputs, the 0-false-positive
   discipline, bounded work).
 

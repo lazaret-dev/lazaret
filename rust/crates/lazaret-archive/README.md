@@ -1,5 +1,10 @@
 # lazaret-archive
 
+This is the crate-specific archive reference. See the repository
+[documentation index](../../../docs/README.md) and
+[documentation guide](../../../docs/DOCUMENTATION_GUIDE.md) for ownership and
+maintenance rules.
+
 Bounded, in-memory archive extraction in native Rust. The crate uses no external
 crates, performs no filesystem or network I/O, and forbids `unsafe` code.
 Lazaret's ZIP parser lives here as the `zip` subsystem. It lists the union of

@@ -4,32 +4,21 @@
 breaking the things that make it trustworthy.*
 
 This document is for whoever picks Lazaret up next — human or agent. Read it
-before changing detection logic. The companion docs: `README.md` covers what the
-tool does and how to use it; `STRUCTURE.md` covers where files live, the test
-layout, and the cross-platform rules; `docs/TESTING.md` is the operational
-testing playbook (what to run, in what order, and the Windows quirks); this
-document covers the **design and the invariants**. When they disagree, the code
-and the tests are the source of truth — fix the doc.
+before changing detection logic. It owns stable **design and invariants**, not
+release procedures or a chronological implementation diary. Use the
+[documentation index](README.md) to find product, structure, engine and testing
+references, and follow [DOCUMENTATION_GUIDE.md](DOCUMENTATION_GUIDE.md) when
+changing it. When documentation, code and tests disagree, the code and tests
+are the source of truth—then fix the owning document.
 
 ---
 
 ## 1. What Lazaret is
 
-RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and Rust models and reads shell deletion commands. Removing a home directory or its personal files, a filesystem/drive root, or repositories selected through recursive `.git` globs adds “deletes the user's files”: CRITICAL at install/build/import, MAJOR when found only in use-time code. Relative build/dist/fixture cleanup, created temporary directories and named application-cache subtrees are excluded. Unknown paths alone are not evidence of deletion of user files. The check is static; no target path is accessed.
+Historical validation of the deletion detector is retained separately in
+[`ra6-deletion-review.md`](ra6-deletion-review.md); release-by-release behavior
+belongs in the root changelog.
 
-RA-6 follow-up (rule set 2.99.0) exempts fully literal paths at least two components below home outside protected personal-data and credential subtrees. This is a lexical path rule, not proof that a package owns a folder. Home itself, whole top-level home folders, roots/drives, repository deletion and unknown/globbed home paths still trigger. Protected paths include personal folders, cloud storage, browser profiles, Mail/Messages/Photos and credentials; their ancestors are protected too because deleting an ancestor deletes that data. Matching is case-insensitive independent of the scanning host. Dot components and separators are normalized before classification, and unknown components cannot disappear through `..` to gain the new exemption. The existing named-cache exemption retains precedence, including unknown descendants under a known owner; whole caches and unknown owners are not exempt. Unknown paths without an identified home/root/repository target remain outside this detector's evidence. Import-risk attribution preserves the deleting call's line when another call adds no finding. No filesystem paths are accessed and no cleanup is executed.
-
-RA-6 rework (rule set 2.101.0) restores protection for whole application-data containers and listed wallet, messenger, password-manager, keyring, mail, browser and developer-credential paths on macOS, Linux and Windows. Container ancestors remain protected; literal tool children outside the protected lists remain exempt. The names come from data categories, not benchmark or holdout samples. APPDATA/LOCALAPPDATA paths are recognized, and an unknown child directly under a root/drive remains dangerous.
-
-A separate bounded provenance check can exempt a direct entry of the same exempt directory returned by a Node or Python directory listing, with optional literal suffixes. It follows single-source bindings, collection iteration, inline Node callbacks, filtering, indexing/destructuring and Python loops/comprehensions; Dirent and pathlib path forms retain the directory anchor. Reassignments, mutations, object escape, mismatched directories, extra unknown components, recursive listings, globs and visible API/symlink changes do not earn the new exemption. A Python comprehension's provenance stays within its expression. Provenance uses a separate work budget and reads its directory in literal-only mode; cycles cannot consume the original path reader's budget. This checks lexical containment and modeled native API origins, not filesystem ownership, absence of pre-existing symlinks, or API replacement outside the scanned source. The exempt directory is the boundary of the listed-name exception: an unknown entry name is not itself compared with protected basenames such as `.git` or vault-file suffixes. General import/use-time reachability is unchanged. The holdout is not inspected or scored here; John performs the one aggregate acceptance run against stack-0.1.9-b, then decides whether further narrowing or a revert is needed.
-
-The native listing callee must have one unambiguous binding, followed through aliases without reassignment or escape; a conditional callee does not qualify. Name-array filters use the same mutation and escape checks as Dirent filters, including callback rest/third arguments, arguments, closures and helper calls. Python escape checks include positional and keyword values and star expansions. Its writes and escapes are keyed by lexical binding, including global/nonlocal writes, so an unrelated local with the same spelling does not invalidate a listing. Unknown scope ownership or an escaped native namespace keeps the original deletion reading.
-
-Directory expressions at the listing and join also require single-write, scope-qualified literal/native provenance. Augmented, annotated, destructuring and other unsupported writes cannot reuse an earlier decoy value. Global/nonlocal declarations, dynamic namespace access and star imports conservatively disable listing exemptions in that source; failed provenance retains the may-resolve deletion reading. JavaScript global-object access similarly prevents an exemption.
-
-F-05 (rule set 2.102.0) gives the path readers separate operations for Node join and resolve, Python POSIX and Windows joins, Go path/filepath joins, and Rust path pushes/joins. Later absolute components append in Node/Go joins; Python joins can reset the root or drive. Native-platform operations retain two correlated POSIX/Windows interpretations; either can add a deletion or credential-read finding, and a listing exemption requires the directory interpretations to agree. No target cwd or filesystem is consulted. A home API supplies an absolute symbolic anchor; a literal tilde component is not expanded by joining. Dot normalization retains unknown components when their cancellation would discard uncertainty. The shared path helper is removed. The regression matrix compares inert strings with Node/Python path libraries, plus Go standard-library tests selected for the running platform.
-
-Path assembly checks a conservative MAX_TEXT bound before allocating intermediates, retains a bounded prefix plus unknown interpretation on overflow, and charges the engine work budget by text length. Callers collect each part once and evaluate the whole API operation only at completion (or once to check a listed-name prefix); resolve selects components before joining instead of repeatedly prepending strings. Shared input conversions and fixed-platform operations avoid duplicate work. These bounds preserve uncertainty instead of exempting truncated paths.
 
 Lazaret is a static security, supply-chain and quality scanner for Python,
 JavaScript and SQL projects, plus a registry auditor for npm and PyPI packages,
@@ -84,19 +73,15 @@ untrusted dependencies past it before letting them in.
 
 ---
 
-## 2. The prime directive: two engines, one behavior
+## 2. The prime directive: one engine, consistent package behavior
 
-**The single most important invariant.** Every rule, lexer quirk, taint step,
-SQL sink, encoding rule and metric behaves the same in *both* packages, and
-they must agree on every input — the same finding (rule, file, line,
-severity, message), the same metrics, ratings, quality gate and exit code.
-Since 0.1.8 most of that is one engine: the npm package runs the native
-engine (below) as WebAssembly for the supply-chain tests, the rules of
-`scan_file` and the cross-file follower, and keeps JavaScript twins only for
-what the native engine does not answer yet (the comment
-lexer and the suppression markers, the taint, SQL-sink and function passes,
-the flow engine, the manifest, workflow and settings checks, config-file
-credentials).
+**The single most important invariant.** The Rust engine is the only scanning
+engine. The Python distribution loads it as a native library and the npm
+distribution loads it as WebAssembly. Where package orchestration necessarily
+differs, both public interfaces must still agree on every common input: the
+same finding (rule, file, line, severity and message), metrics, ratings,
+quality gate and exit code. A package-specific capability must be named and
+must fail or degrade visibly; it must never silently under-report.
 
 - **Held by tests.** `python/tests/architecture/test_js_parity.py` runs both
   CLIs on every fixture tree, a synthetic project, and an adversarial tree
@@ -106,13 +91,11 @@ credentials).
   and the CLIs on each area's trees, often by running thousands of cases
   through one Node process and diffing against the Python answer. They need
   the npm engine built (`cd js && npm run build`).
-- **When you change a part both packages have, change both in the same
-  commit:** the native engine is one (`rust/`: its code, or the rule pack,
-  with its reviewed difference in the recorded outputs); where the Python
-  package still does the work in Python, change it there and in its
-  JavaScript twin. The JS twin of a Python helper says so in a comment
-  (`Twin of lazaret.scanner.core…`). Parity failing is not a flaky test; it
-  means the packages have diverged and one of them is now wrong.
+- **When you change common behavior, change the engine and both adapters in the
+  same commit.** Engine changes include reviewed differences in the recorded
+  outputs. Package orchestration remains subject to CLI and report parity.
+  Parity failing is not a flaky test; it means an adapter or package path has
+  diverged and one of them is now wrong.
 - **The browser dashboard** (`python/src/lazaret/web/lazaret.html`) runs the
   npm package's scan on the engine it carries (BR-7 step 5, 0.1.9):
   `scripts/make_dashboard.py` builds it from `js/dashboard/`, the package's
@@ -4385,18 +4368,18 @@ leaves the texts to go with their calls, which gives the same answers:
   `rust/Cargo.lock` entries). `scripts/check-versions.sh` fails if they
   disagree (and, at a tag, if they don't match the tag). Pre-1.0; the 0.x API
   may still change.
-- **Release** (`docs/RELEASING.md`): bump the versions in one commit, get it
-  onto `main`, `scripts/tag-release.sh vX.Y.Z` (it refuses uncommitted changes,
-  a HEAD not on `origin/main`, mismatched versions, or an existing tag), then
-  push the tag. The GitHub Actions workflow runs the suite, then publishes to
-  PyPI and npm via **trusted publishing (OIDC)** — no long-lived tokens. The
+- **Release:** follow [`RELEASING.md`](RELEASING.md), the sole owner of exact
+  promotion, tagging, recovery and registry commands. The design invariant is
+  that a reviewed commit reaches curated public GitHub through a protected pull
+  request, and only a protected GitHub tag can publish through **trusted
+  publishing (OIDC)**—no long-lived tokens. The
   PyPI release has an sdist (with the engine's sources) and eight platform
   wheels with the engine, built, checked and installed on their platforms
   by `wheels.yml` (no pure wheel: pip compiles the sdist elsewhere);
   the npm package carries the same engine as WebAssembly, built by
   `release.yml` with the same pinned compiler.
-  Published versions are immutable; a mistake means releasing the next patch,
-  not re-tagging.
+  Published versions are immutable; registry state determines whether recovery
+  may replace an unpublished tag or must use the next patch version.
 - **CHANGELOG.md** started at 0.1.6 (Keep a Changelog). Date each entry at
   release.
 - **What ships** is narrow: the wheel/sdist contain only `src/lazaret/` and
@@ -4484,7 +4467,11 @@ a file, then run the file").
 
 ---
 
-## 12. Current state (0.1.8) and backlog
+## 12. Historical calibration and backlog record
+
+This section preserves the measured 0.1.8 and 0.1.9 detection work. It is not a
+statement of current release status; current shipped changes belong in the root
+changelog, and active work belongs in its tracked issue or branch.
 
 **After 0.1.8: popular packages' false positives.** A sweep of the latest
 releases of 1,204 popular npm and PyPI packages found nine SUSPICIOUS

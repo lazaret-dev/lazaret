@@ -3,6 +3,11 @@
 Status: proposed requirements for the Lazaret owner. This document is a handoff,
 not a claim that the requirements are implemented.
 
+This is a first-party integration requirements document, not general Lazaret
+usage or an implemented-feature claim. Its scope and status must remain explicit
+under [DOCUMENTATION_GUIDE.md](DOCUMENTATION_GUIDE.md); current product behavior
+belongs in the root README and engine references.
+
 The November 4, 2026 gateway review added six P0 clarifications: cancellation
 is always present in the scan context; completeness is relative to a versioned
 profile and the supplied view; incompleteness can have several simultaneous

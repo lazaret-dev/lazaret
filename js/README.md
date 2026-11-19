@@ -1,5 +1,10 @@
 # lazaret (npm)
 
+This is the npm package reference. The repository's documentation map is
+[`docs/README.md`](https://github.com/lazaret-dev/lazaret/blob/main/docs/README.md),
+and documentation changes follow the
+[`documentation guide`](https://github.com/lazaret-dev/lazaret/blob/main/docs/DOCUMENTATION_GUIDE.md).
+
 Quarantine for your dependencies: security & quality scanner for Python,
 JavaScript, TypeScript and SQL projects, plus supply-chain and credential
 checks for Go and Rust.
@@ -197,7 +202,7 @@ resolving to one file. Writes are atomic
   any program a variable names given a file of code, the tests read the
   strings a file decodes as it runs (hex, base64, a file's own decoding
   helpers, a home-made XOR or character-code decoder, javascript-obfuscator's
-  string arrays and proxy objects), and — as in the Python engine — a
+  string arrays and proxy objects), and — as in the Python distribution — a
   package's files are followed
   into each other: a value received in one file and run in another, through
   wrappers and re-exports, classes, object literals, callbacks and Promises,

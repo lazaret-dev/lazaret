@@ -1,5 +1,10 @@
 # lazaret.dev
 
+This is the deployment-source reference for the public site. Repository
+documentation is organized by [`docs/README.md`](../docs/README.md) and
+maintained under
+[`docs/DOCUMENTATION_GUIDE.md`](../docs/DOCUMENTATION_GUIDE.md).
+
 This directory is the reviewed source deployed at <https://lazaret.dev>.
 It is a static site: `index.html`, `style.css`, `favicon.svg`, and the
 Cloudflare Pages `_headers` file are the complete deployable contents.
