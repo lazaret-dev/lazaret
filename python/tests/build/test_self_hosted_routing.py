@@ -139,12 +139,13 @@ class Expression:
 
 
 def route(expression, *, event, ref, actor="johnabooth-afk", head="lazaret-dev/lazaret",
+          repository="lazaret-dev/lazaret",
           os_name="macos-latest", tag="macosx_11_0_arm64", fallback="macos-15", profile="full"):
     """Evaluate the small GitHub-expression subset the routing policy uses."""
     values = {
         "github.event.pull_request.head.repo.full_name": head,
         "github.event_name": event,
-        "github.repository": "lazaret-dev/lazaret",
+        "github.repository": repository,
         "github.actor": actor,
         "github.ref": ref,
         "matrix.runner": fallback,
@@ -166,6 +167,9 @@ class SelfHostedRoutingTests(unittest.TestCase):
                                head="outsider/lazaret"), "macos-latest")
         self.assertEqual(route(expression, event="pull_request", ref="refs/pull/44/merge",
                                actor="someone-else"), "macos-latest")
+        self.assertEqual(route(expression, event="pull_request", ref="refs/pull/44/merge",
+                               repository="lazaret-dev/lazaret-public-audit",
+                               head="lazaret-dev/lazaret-public-audit"), "macos-latest")
         self.assertEqual(route(expression, event="workflow_dispatch", ref="refs/heads/integration"),
                          "macos-latest")
         self.assertEqual(route(expression, event="schedule", ref="refs/heads/integration"),
@@ -181,6 +185,9 @@ class SelfHostedRoutingTests(unittest.TestCase):
                                head="outsider/lazaret"), "macos-15")
         self.assertEqual(route(expression, event="pull_request", ref="refs/pull/44/merge",
                                actor="someone-else"), "macos-15")
+        self.assertEqual(route(expression, event="pull_request", ref="refs/pull/44/merge",
+                               repository="lazaret-dev/lazaret-public-audit",
+                               head="lazaret-dev/lazaret-public-audit"), "macos-15")
         self.assertEqual(route(expression, event="push", ref="refs/heads/main",
                                tag="macosx_10_12_x86_64", fallback="macos-15-intel"), "macos-15-intel")
 

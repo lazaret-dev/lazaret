@@ -162,9 +162,45 @@ tag calls `ci.yml` and `wheels.yml`:
 - both Windows libraries use GitHub-hosted Windows runners; and
 - the npm WebAssembly package is built on GitHub-hosted Linux.
 
-No public workflow may select a self-hosted runner. Private runner design and
-operation belong to private GitLab documentation and are outside the public
-release boundary.
+The private Apple-silicon pool is only an acceleration lane for trusted branch
+and pull-request testing. It must never build a file published to PyPI or npm.
+Before enabling or changing that pool, confirm every item in this checklist:
+
+- [ ] every runner has the unique `lazaret-tart` label and is limited to the
+      `lazaret-dev/lazaret` repository;
+- [ ] the controller accepts only canonical-repository pushes and
+      maintainer-authored, same-repository pull requests; fork and external
+      pull requests remain on GitHub-hosted runners;
+- [ ] GitHub requires approval for workflows from all external contributors;
+- [ ] each job receives a fresh ephemeral JIT runner and a fresh VM cloned
+      from the immutable base, and both are discarded after that one job;
+- [ ] the VM network permits required internet/DNS access but no access to the
+      host or LAN; and
+- [ ] tag pushes, release workflow calls, manual dispatches and scheduled
+      workflows resolve to GitHub-hosted labels in the routing-policy tests.
+
+Choose and record one runner-group policy; GitHub cannot combine both:
+
+- **Private-PR acceleration (the current workflow policy).** Keep the runner
+  group restricted to `lazaret-dev/lazaret`, but do not restrict it to
+  workflow files at `refs/heads/main`: a pull-request job executes the workflow
+  at `refs/pull/N/merge`, so that restriction would also block trusted PRs.
+  This mode therefore depends on all of the controller, external-contributor
+  approval, ephemeral-runner and network-isolation controls above. A workflow
+  expression that checks the PR author is only defense in depth; workflow YAML
+  from a fork is attacker-controlled.
+  The controller must reject an untrusted job before it creates a runner
+  registration or starts a VM.
+- **Trusted-ref-only pool.** Remove the self-hosted route from every
+  `pull_request` job and use the private pool only for trusted branch pushes.
+  The runner group can then allow only `.github/workflows/ci.yml` and
+  `.github/workflows/wheels.yml` at `refs/heads/main`. Pull requests use
+  GitHub-hosted runners in this mode.
+
+The first mode buys faster maintainer PR feedback; the second has the smaller
+authorization surface. Keep controller implementation details in private
+GitLab documentation, but retain this public trust-boundary contract alongside
+the workflow that relies on it.
 
 1. On a feature branch of the public GitHub repository, bump `__version__` in
    `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and
